@@ -34,7 +34,10 @@ func newNode(t *testing.T) *interpretedRuntime {
 
 func TestNode_Success(t *testing.T) {
 	requireNode(t)
-	res := run(t, newNode(t), runnerapi.RunRequest{SourceCode: "console.log(2+2)", TimeoutMs: 3000, MemoryMB: 128})
+	// 8s (not 3s): a Node/V8 cold start under the race detector on a contended CI
+	// runner can exceed a tight 3s budget and spuriously time out. The assertion is
+	// on success+output, not latency, so a generous wall budget removes the flake.
+	res := run(t, newNode(t), runnerapi.RunRequest{SourceCode: "console.log(2+2)", TimeoutMs: 8000, MemoryMB: 128})
 	if res.Status != runnerapi.StatusSuccess {
 		t.Fatalf("expected success, got %q (stderr=%q)", res.Status, res.Stderr)
 	}
@@ -50,7 +53,7 @@ func TestNode_Stdin(t *testing.T) {
 	requireNode(t)
 	// Read all of stdin and echo it uppercased, with no trailing newline.
 	src := "const s = require('fs').readFileSync(0, 'utf8'); process.stdout.write(s.toUpperCase());"
-	res := run(t, newNode(t), runnerapi.RunRequest{SourceCode: src, Stdin: "abc", TimeoutMs: 3000, MemoryMB: 128})
+	res := run(t, newNode(t), runnerapi.RunRequest{SourceCode: src, Stdin: "abc", TimeoutMs: 8000, MemoryMB: 128})
 	if res.Status != runnerapi.StatusSuccess || res.Stdout != "ABC" {
 		t.Fatalf("stdin echo failed: status=%q stdout=%q stderr=%q", res.Status, res.Stdout, res.Stderr)
 	}
@@ -58,7 +61,7 @@ func TestNode_Stdin(t *testing.T) {
 
 func TestNode_RuntimeError(t *testing.T) {
 	requireNode(t)
-	res := run(t, newNode(t), runnerapi.RunRequest{SourceCode: "throw new Error('boom')", TimeoutMs: 3000, MemoryMB: 128})
+	res := run(t, newNode(t), runnerapi.RunRequest{SourceCode: "throw new Error('boom')", TimeoutMs: 8000, MemoryMB: 128})
 	if res.Status != runnerapi.StatusRuntimeError {
 		t.Fatalf("expected runtime_error, got %q (stderr=%q)", res.Status, res.Stderr)
 	}
@@ -82,7 +85,7 @@ func TestNode_DisableProto(t *testing.T) {
 	requireNode(t)
 	// --disable-proto=throw makes any __proto__ access throw, so this run must
 	// FAIL — proving the hardening flag reaches the interpreter.
-	res := run(t, newNode(t), runnerapi.RunRequest{SourceCode: "console.log(({}).__proto__)", TimeoutMs: 3000, MemoryMB: 128})
+	res := run(t, newNode(t), runnerapi.RunRequest{SourceCode: "console.log(({}).__proto__)", TimeoutMs: 8000, MemoryMB: 128})
 	if res.Status != runnerapi.StatusRuntimeError {
 		t.Fatalf("expected __proto__ access to throw under --disable-proto=throw, got status=%q stdout=%q", res.Status, res.Stdout)
 	}
