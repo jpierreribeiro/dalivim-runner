@@ -34,8 +34,8 @@ residuals.
 | Phase | Theme | Value | Size | Breaks contract? | Status |
 |---|---|---|---|---|---|
 | **[G6](G6-batch-execution.md)** | Batch execution (compile-once, run N stdins) | ⚪ gated¹ | medium | no (additive `stdins[]`) | ✅ implemented² |
-| **[G7](G7-execution-determinism.md)** | Execution determinism (locale / TZ / env) | 🟢 hygiene¹ | **XS/S** | no | — |
-| **[G8](G8-ops-containment-maintenance.md)** | Ops & containment maintenance | 🟢 medium | small | no | — |
+| **[G7](G7-execution-determinism.md)** | Execution determinism (locale / TZ / env) | 🟢 hygiene¹ | **XS/S** | no | ✅ done |
+| **[G8](G8-ops-containment-maintenance.md)** | Ops & containment maintenance | 🟢 medium | small | no | ✅ done |
 
 | Guide | | | | |
 |---|---|---|---|---|
@@ -52,11 +52,11 @@ contract is additive (`stdins[]` + batch envelope), so shipping the executor sid
 early costs nothing and it's ready the moment a backend test-case model exists.
 See the implementation notes in [G6](G6-batch-execution.md).
 
-Recommended order for the remaining Wave 2: **G8 → G7**. G8's residuals (esp.
-token rotation and the language-parametrized escape corpus) are real now; G7 is
-cheap hygiene to bank ahead of any judge. The higher-leverage
-near-term work is now at the **system** level (seam consolidation, runner migration,
-abuse/quota hardening) — tracked outside this runner-only roadmap.
+**Wave 2 is complete.** G8 (token rotation, the language-parametrized escape
+corpus, shutdown-grace alignment), G7 (locale/TZ determinism), and G6 (batch, by
+owner decision above) are all implemented. The higher-leverage near-term work is
+now at the **system** level (seam consolidation, runner migration, abuse/quota
+hardening) — tracked outside this runner-only roadmap.
 
 ## How each spec is written
 

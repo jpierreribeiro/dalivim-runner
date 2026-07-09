@@ -31,8 +31,9 @@ type compiledLangSpec struct {
 	// compileEnv is extra environment for the COMPILE jail, appended to the base
 	// PATH+TMPDIR (e.g. Go's isolated GOCACHE/GOPATH under the size-capped /tmp).
 	compileEnv []string
-	// runEnv is the environment for the RUN jail (a static artifact needs almost
-	// none; C/C++ disable glibc rseq for the seccomp allowlist).
+	// runEnv is the environment for the RUN jail: the shared determinism pin
+	// (G7: LANG/LC_ALL/TZ — see determinismEnv) plus per-language extras (C/C++
+	// disable glibc rseq for the seccomp allowlist; Go pins GOMAXPROCS).
 	runEnv []string
 	// capAddressSpace applies a hard RLIMIT_AS (== MemoryMB) to the run jail. True
 	// for C/C++ (a static glibc binary tolerates it). FALSE for Go: the Go runtime
@@ -120,7 +121,7 @@ var cSpec = compiledLangSpec{
 	// Disable glibc's rseq registration so __libc_start_main doesn't issue the rseq
 	// syscall — nsjail 3.4's kafel cannot name rseq for the static allowlist, and
 	// rseq is a pure perf optimisation. Harmless under the denylist too.
-	runEnv:            []string{"GLIBC_TUNABLES=glibc.pthread.rseq=0"},
+	runEnv:            determinismEnv("GLIBC_TUNABLES=glibc.pthread.rseq=0"),
 	capAddressSpace:   true,
 	staticAllowlistOK: true,
 	versionArgs:       []string{"-dumpfullversion"},
@@ -134,7 +135,7 @@ var cppSpec = compiledLangSpec{
 	compile:           []string{"g++", "-O2", "-static", "-std=c++20", "-o", "{out}", "{src}"},
 	run:               []string{"{out}"},
 	binNames:          []string{"g++"},
-	runEnv:            []string{"GLIBC_TUNABLES=glibc.pthread.rseq=0"},
+	runEnv:            determinismEnv("GLIBC_TUNABLES=glibc.pthread.rseq=0"),
 	capAddressSpace:   true,
 	staticAllowlistOK: true,
 	versionArgs:       []string{"-dumpfullversion"},
@@ -170,7 +171,7 @@ var goSpec = compiledLangSpec{
 	compileArgv0Absolute: true,
 	// GOMAXPROCS=1 keeps the scheduler to one OS thread — fewer clone/thread churn
 	// under the denylist and the per-run pids cap, plenty for judged programs.
-	runEnv:            []string{"GOMAXPROCS=1"},
+	runEnv:            determinismEnv("GOMAXPROCS=1"),
 	capAddressSpace:   false, // Go dies under RLIMIT_AS; cgroup memory.max bounds it
 	staticAllowlistOK: false, // Go's scheduler needs a wider syscall set → denylist
 	versionArgs:       []string{"version"},
@@ -204,6 +205,7 @@ var javaSpec = compiledLangSpec{
 	// its getpwuid on a jail uid with no passwd entry).
 	run:               []string{"-XX:+UseSerialGC", "-XX:-UsePerfData", "-XX:ActiveProcessorCount=1", "-Xmx{mem}m", "-cp", "{dir}", "Main"},
 	runBin:            []string{"java"},
+	runEnv:            determinismEnv(),
 	runFullRootfs:     true,  // the JVM is dynamically linked — needs its runtime libs
 	capAddressSpace:   false, // the JVM reserves a large virtual space; RLIMIT_AS kills startup
 	staticAllowlistOK: false, // widest syscall surface of any target → denylist
@@ -586,9 +588,10 @@ func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest,
 		defer acct.Close()
 	}
 	cmd.Stdin = strings.NewReader(req.Stdin)
-	// The run env is per-language: C/C++ disable glibc rseq (see runEnv); Go pins
-	// GOMAXPROCS; Java needs none. Never nil — an empty non-nil slice keeps the child
-	// from inheriting the runner's environment.
+	// The run env is per-language on top of the shared determinism pin (G7:
+	// LANG/LC_ALL/TZ): C/C++ disable glibc rseq (see runEnv); Go pins GOMAXPROCS;
+	// Java adds nothing. Never nil — an empty non-nil slice keeps the child from
+	// inheriting the runner's environment.
 	if cmd.Env = r.spec.runEnv; cmd.Env == nil {
 		cmd.Env = []string{}
 	}

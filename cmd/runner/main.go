@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/jpierreribeiro/dalivim-runner/internal/config"
 	"github.com/jpierreribeiro/dalivim-runner/internal/executor"
@@ -30,8 +31,10 @@ func main() {
 		slog.Error("configuration", "err", err)
 		os.Exit(1)
 	}
-	if cfg.ServiceToken == "" {
-		slog.Warn("RUNNER_SERVICE_TOKEN is empty (development); the runner accepts unauthenticated calls")
+	if len(cfg.ServiceTokens) == 0 {
+		slog.Warn("no service token set (development); the runner accepts unauthenticated calls")
+	} else if len(cfg.ServiceTokens) > 1 {
+		slog.Info("service token rotation active", "valid_tokens", len(cfg.ServiceTokens))
 	}
 
 	// Resolve the containment backend before accepting a single request.
@@ -81,14 +84,15 @@ func main() {
 
 	srv := httpapi.New(svc, httpapi.Config{
 		Addr:                cfg.Addr,
-		Token:               cfg.ServiceToken,
+		Tokens:              cfg.ServiceTokens,
 		MaxSourceBytes:      cfg.MaxSourceBytes,
 		MaxStdinBytes:       cfg.MaxStdinBytes,
 		MaxFilesBytes:       cfg.MaxFilesBytes,
 		MaxBatch:            cfg.MaxBatch,
 		MaxBatchStdinBytes:  cfg.MaxBatchStdinBytes,
 		MaxConcurrentRuns:   cfg.MaxConcurrentRuns,
-		MetricsToken:        cfg.MetricsToken,
+		MetricsTokens:       cfg.MetricsTokens,
+		ShutdownGrace:       time.Duration(cfg.ShutdownGraceMs) * time.Millisecond,
 		Backend:             sb.Backend(),
 		NetworkIsolated:     sb.NetworkIsolated(),
 		ReadyRequiresNsjail: cfg.ReadyRequiresNsjail,

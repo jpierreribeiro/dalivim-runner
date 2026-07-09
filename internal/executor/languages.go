@@ -5,6 +5,21 @@ import (
 	"strings"
 )
 
+// determinismEnv prepends the pinned locale/timezone (G7) to a spec's run
+// environment. Wherever output may be compared or diffed, the same submission
+// must produce the same bytes regardless of language or base-image drift, so
+// every runtime — interpreted and compiled — sees an identical LANG/LC_ALL/TZ.
+//
+// This MUST live in each spec's env slice, not (only) in the Dockerfile: the
+// jail runs with an explicit minimal cmd.Env, so a process-level ENV never
+// propagates to the child. C.UTF-8 (not en_US.UTF-8) keeps collation
+// locale-independent and needs no locale data in the image; TZ=UTC makes the
+// timezone policy instead of an accident of a missing /etc/localtime.
+// See docs/DETERMINISM.md for the full guarantee.
+func determinismEnv(extra ...string) []string {
+	return append([]string{"LANG=C.UTF-8", "LC_ALL=C.UTF-8", "TZ=UTC"}, extra...)
+}
+
 // languageSpec describes one INTERPRETED language: everything the generic
 // interpretedRuntime needs to run a single source file inside the sandbox. It is
 // the extension point invariant the plan calls for — a new interpreted language
@@ -87,8 +102,10 @@ var pythonSpec = languageSpec{
 	binNames:   []string{"python3"},
 	// -I: isolated mode — ignore env vars and the user site, and keep the cwd off
 	// sys.path, so a submission cannot import planted modules.
-	runArgs:      []string{"-I", "main.py"},
-	env:          []string{"PATH=/usr/local/bin:/usr/bin:/bin", "PYTHONUNBUFFERED=1"},
+	runArgs: []string{"-I", "main.py"},
+	// Pinned locale/TZ (G7): with LANG/LC_ALL set explicitly, CPython no longer
+	// needs its PEP 538 coercion — the locale is policy, not a runtime guess.
+	env:          determinismEnv("PATH=/usr/local/bin:/usr/bin:/bin", "PYTHONUNBUFFERED=1"),
 	versionArgs:  []string{"--version"}, // "Python 3.12.3"
 	parseVersion: secondField,           // -> "3.12.3"
 	memErrSubstr: "MemoryError",
@@ -114,7 +131,7 @@ var javascriptSpec = languageSpec{
 	// prototype-pollution escalation path. The file is run directly: single-file
 	// execution, no npm and no node_modules lookup.
 	runArgs:      []string{"--disable-proto=throw", "main.js"},
-	env:          []string{"PATH=/usr/local/bin:/usr/bin:/bin"},
+	env:          determinismEnv("PATH=/usr/local/bin:/usr/bin:/bin"),
 	versionArgs:  []string{"--version"}, // "v20.11.0"
 	parseVersion: trimLeadingV,          // -> "20.11.0"
 	// No memory substring: Node's OOM ("JavaScript heap out of memory") is a V8

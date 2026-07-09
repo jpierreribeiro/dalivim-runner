@@ -441,6 +441,21 @@ jobs:
           done
           echo "SMOKE OK   [G6] batch caps rejected with 400"
 
+      # G7: execution determinism. LANG/LC_ALL/TZ are pinned identically in every
+      # language's run env, so a fixed epoch formatted as LOCAL time (TZ=UTC) and
+      # the reported LANG are IDENTICAL across all six runtimes. Each snippet must
+      # print exactly:  "1970-01-01 00:00:00\nLANG=C.UTF-8\n".
+      - name: G7 determinism — locale/TZ identical across all languages
+        run: |
+          EXP=$'1970-01-01 00:00:00\nLANG=C.UTF-8\n'
+          ./scripts/smoke-run.sh python $'import os, time\nprint(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(0)))\nprint("LANG=" + os.environ.get("LANG", ""))' "$EXP"
+          ./scripts/smoke-run.sh javascript $'const d=new Date(0);const p=n=>String(n).padStart(2,"0");\nconsole.log(`${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`);\nconsole.log("LANG="+(process.env.LANG||""));' "$EXP"
+          ./scripts/smoke-run.sh c $'#include <stdio.h>\n#include <stdlib.h>\n#include <time.h>\nint main(void){ time_t t=0; char b[64]; strftime(b,sizeof b,"%Y-%m-%d %H:%M:%S",localtime(&t)); printf("%s\\n", b); printf("LANG=%s\\n", getenv("LANG")); return 0; }' "$EXP"
+          ./scripts/smoke-run.sh cpp $'#include <stdio.h>\n#include <stdlib.h>\n#include <time.h>\nint main(){ time_t t=0; char b[64]; strftime(b,sizeof b,"%Y-%m-%d %H:%M:%S",localtime(&t)); printf("%s\\n", b); printf("LANG=%s\\n", getenv("LANG")); return 0; }' "$EXP"
+          ./scripts/smoke-run.sh go $'package main\nimport ("fmt";"os";"time")\nfunc main(){ t:=time.Unix(0,0); fmt.Println(t.Format("2006-01-02 15:04:05")); fmt.Println("LANG="+os.Getenv("LANG")) }' "$EXP"
+          ./scripts/smoke-run.sh java $'import java.time.*;\nimport java.time.format.*;\npublic class Main { public static void main(String[] a){ LocalDateTime dt=LocalDateTime.ofInstant(Instant.ofEpochSecond(0), ZoneId.systemDefault()); System.out.println(dt.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))); System.out.println("LANG="+System.getenv("LANG")); } }' "$EXP"
+          echo "SMOKE OK   [G7] locale/TZ pinned identically across all six languages"
+
       # F-D follow-up: the static run jail can take a tight seccomp ALLOWLIST
       # (DEFAULT KILL) instead of the shared denylist. Prove on a dedicated
       # RUNNER_STATIC_SECCOMP=enforce container that (a) the kafel allowlist
