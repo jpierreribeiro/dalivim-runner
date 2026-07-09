@@ -36,6 +36,16 @@ type Config struct {
 	MaxStdinBytes    int // per-request stdin cap, independent of the source budget
 	MaxOutputBytes   int
 
+	// Multi-file submission caps (G3). These bound the attacker-controlled
+	// files[] payload: how many files, how large each is, the summed budget, and
+	// how long/deep a single path may be. Every one is enforced before a byte
+	// touches disk (see executor.FilePolicy).
+	MaxFiles      int // most files a single request may carry
+	MaxFileBytes  int // largest a single file's content may be
+	MaxFilesBytes int // largest the summed content of all files may be
+	MaxPathBytes  int // longest a single file path may be
+	MaxPathDepth  int // deepest a path may nest (number of components)
+
 	// Compiled-language (C/C++) compile phase — separate budget from execution.
 	CompileTimeoutMs    int // default per-run compile wall/CPU budget
 	MaxCompileTimeoutMs int // hard ceiling for compile time
@@ -72,6 +82,12 @@ func Load() (Config, error) {
 		MaxSourceBytes:      envInt("RUNNER_MAX_SOURCE_BYTES", 200_000),
 		MaxStdinBytes:       envInt("RUNNER_MAX_STDIN_BYTES", 1_000_000),
 		MaxOutputBytes:      envInt("RUNNER_MAX_OUTPUT_BYTES", 64*1024),
+
+		MaxFiles:      envInt("RUNNER_MAX_FILES", 50),
+		MaxFileBytes:  envInt("RUNNER_MAX_FILE_BYTES", 262_144),
+		MaxFilesBytes: envInt("RUNNER_MAX_FILES_BYTES", 1_048_576),
+		MaxPathBytes:  envInt("RUNNER_MAX_PATH_BYTES", 180),
+		MaxPathDepth:  envInt("RUNNER_MAX_PATH_DEPTH", 8),
 
 		CompileTimeoutMs:    envInt("RUNNER_COMPILE_TIMEOUT_MS", 10_000),
 		MaxCompileTimeoutMs: envInt("RUNNER_MAX_COMPILE_TIMEOUT_MS", 20_000),

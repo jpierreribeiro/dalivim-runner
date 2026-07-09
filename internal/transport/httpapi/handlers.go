@@ -20,6 +20,7 @@ type handler struct {
 	metrics        *metrics.Metrics
 	maxSourceBytes int
 	maxStdinBytes  int
+	maxFilesBytes  int
 
 	// readiness posture (G4.3), resolved once at boot.
 	backend             string // active sandbox backend ("nsjail"/"netns"/"none")
@@ -78,17 +79,29 @@ func newRequestID() string {
 
 // decode reads and validates the request body, bounding it so an oversized
 // payload cannot exhaust memory before the length check. The body ceiling covers
-// source + stdin + JSON slack so a legitimate large stdin (judge inputs commonly
-// exceed 64 KiB) is not cut off at the transport layer before its own check.
+// the larger of the single-file source budget and the multi-file total budget,
+// plus stdin and JSON slack, so neither legitimate large stdin (judge inputs
+// commonly exceed 64 KiB) nor a full multi-file payload is cut off at the
+// transport before its own check.
+//
+// It performs only coarse, language-agnostic bounds here (raw source size, stdin
+// size). The submission-shape rules — exactly one of source_code/files, the path
+// grammar, per-file/total caps, extensions, and entrypoint — live in the executor
+// (Service.Run) so they are enforced in one place against the per-language policy;
+// a *executor.ValidationError from there is mapped to 400 by execute.
 func (h *handler) decode(w http.ResponseWriter, r *http.Request) (runnerapi.RunRequest, bool) {
-	r.Body = http.MaxBytesReader(w, r.Body, int64(h.maxSourceBytes)+int64(h.maxStdinBytes)+64*1024)
+	bodyCap := int64(h.maxSourceBytes)
+	if int64(h.maxFilesBytes) > bodyCap {
+		bodyCap = int64(h.maxFilesBytes)
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, bodyCap+int64(h.maxStdinBytes)+64*1024)
 	var req runnerapi.RunRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return runnerapi.RunRequest{}, false
 	}
-	if len(req.SourceCode) == 0 || len(req.SourceCode) > h.maxSourceBytes {
-		http.Error(w, "source_code missing or too large", http.StatusBadRequest)
+	if len(req.SourceCode) > h.maxSourceBytes {
+		http.Error(w, "source_code too large", http.StatusBadRequest)
 		return runnerapi.RunRequest{}, false
 	}
 	if h.maxStdinBytes > 0 && len(req.Stdin) > h.maxStdinBytes {
@@ -102,6 +115,14 @@ func (h *handler) execute(ctx context.Context, w http.ResponseWriter, req runner
 	res, err := h.svc.Run(ctx, req)
 	if errors.Is(err, executor.ErrUnsupportedLanguage) {
 		http.Error(w, "unsupported language", http.StatusBadRequest)
+		return
+	}
+	// A rejected submission (bad path, too many files, forbidden extension, missing
+	// entrypoint, both/neither of source_code/files, …) is a client error: 400 with
+	// the specific reason, never a run outcome.
+	var ve *executor.ValidationError
+	if errors.As(err, &ve) {
+		http.Error(w, ve.Msg, http.StatusBadRequest)
 		return
 	}
 	if err != nil {

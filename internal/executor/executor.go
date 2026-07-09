@@ -30,6 +30,11 @@ type Limits struct {
 	// languages ignore the resulting value.
 	DefaultCompileTimeout int // ms, applied when the request omits compile_timeout_ms
 	MaxCompileTimeoutMs   int // ms, hard ceiling
+
+	// Files are the multi-file submission caps (G3), enforced by the per-language
+	// FilePolicy during request validation — the one place, like the timeouts,
+	// that limits live.
+	Files FileCaps
 }
 
 // Floors are optional per-language lower bounds on a request's run limits,
@@ -99,6 +104,15 @@ func (s *Service) Run(ctx context.Context, req runnerapi.RunRequest) (runnerapi.
 	if !ok {
 		return runnerapi.RunResult{}, fmt.Errorf("%w: %q", ErrUnsupportedLanguage, req.Language)
 	}
+	// Validate and normalize the submission shape (single-file sugar vs multi-file)
+	// before anything runs. A *ValidationError here is a 400 the transport surfaces;
+	// it is the fail-fast gate in front of materialization.
+	normalized, err := s.normalize(req)
+	if err != nil {
+		return runnerapi.RunResult{}, err
+	}
+	req = normalized
+
 	req.TimeoutMs = clamp(req.TimeoutMs, s.limits.DefaultTimeout, s.limits.MaxTimeoutMs)
 	req.MemoryMB = clamp(req.MemoryMB, s.limits.DefaultMemory, s.limits.MaxMemoryMB)
 	req.CompileTimeoutMs = clamp(req.CompileTimeoutMs, s.limits.DefaultCompileTimeout, s.limits.MaxCompileTimeoutMs)
@@ -121,6 +135,40 @@ func (s *Service) Run(ctx context.Context, req runnerapi.RunRequest) (runnerapi.
 		res.PythonVersion = res.RuntimeVersion
 	}
 	return res, nil
+}
+
+// normalize enforces the submission contract and canonicalizes the request:
+// exactly one of source_code / files must be set, and when files is set it is
+// validated against the language's FilePolicy (path grammar, caps, extensions,
+// entrypoint) and replaced with the canonical, path-sorted list plus the resolved
+// entrypoint. A single-file source_code request passes through untouched so its
+// behaviour is byte-for-byte unchanged. Returns a *ValidationError (→ HTTP 400)
+// on any bad input.
+func (s *Service) normalize(req runnerapi.RunRequest) (runnerapi.RunRequest, error) {
+	hasSource := req.SourceCode != ""
+	hasFiles := len(req.Files) > 0
+	switch {
+	case hasSource && hasFiles:
+		return req, invalid("both_source_and_files", "exactly one of source_code or files must be set, not both")
+	case !hasSource && !hasFiles:
+		return req, invalid("no_program", "either source_code or files must be set")
+	case hasSource:
+		return req, nil // single-file sugar: unchanged legacy path
+	}
+
+	// Multi-file: validate against the per-language policy. The language is known
+	// (the runtime resolved), so policyFor cannot miss.
+	policy, ok := policyFor(req.Language, s.limits.Files)
+	if !ok {
+		return req, invalid("unsupported_language", "language %q does not support multi-file submissions", req.Language)
+	}
+	files, entry, err := validateFiles(req, policy)
+	if err != nil {
+		return req, err
+	}
+	req.Files = files
+	req.Entrypoint = entry
+	return req, nil
 }
 
 // clamp returns def when v <= 0, caps at max (when max > 0), else v.

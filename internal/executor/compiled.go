@@ -84,6 +84,17 @@ type compiledLangSpec struct {
 	// cgroup OOM event alone.
 	memErrSubstr string
 
+	// multiFile, when non-nil, provides this language's MULTI-FILE (files[]) build
+	// and run construction (G3). It is wired in compiled_multifile.go's init from
+	// the base spec so the single-file flow (the {src}/{out} templates above) stays
+	// untouched. nil means the language is single-file only.
+	multiFile *multiFileBuild
+
+	// multiFileCompileEnv is extra compile-jail environment applied only to a
+	// multi-file build (Go's offline module policy: GOPROXY=off, …). It never
+	// touches the single-file path, so legacy behaviour is unchanged.
+	multiFileCompileEnv []string
+
 	// minTimeoutMs/minMemoryMB are optional per-language floors on the clamped
 	// request limits (G6), raised in the service layer and never above the global
 	// ceilings. 0 = no floor. Java sets a memory floor: its fixed non-heap overhead
@@ -342,38 +353,84 @@ func (r *compiledRuntime) Run(ctx context.Context, req runnerapi.RunRequest) run
 	}
 	defer os.RemoveAll(workDir)
 
-	if err := os.WriteFile(filepath.Join(workDir, r.spec.sourceFile), []byte(req.SourceCode), 0o600); err != nil {
-		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "could not write source"}
+	// Materialize the program and resolve the compile/run plan. Single-file
+	// source_code takes the exact legacy path (one fixed-name file + the {src}/{out}
+	// templates); a files[] request materializes the validated tree under
+	// /sandbox/src and uses the language's multi-file builders.
+	plan, err := r.plan(workDir, req)
+	if err != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: err.Error()}
 	}
 
 	compileStart := time.Now()
-	res, ok := r.compile(ctx, req, workDir)
+	res, ok := r.compile(ctx, req, workDir, plan)
 	compileMs := int(time.Since(compileStart).Milliseconds())
 	if !ok {
 		res.CompileMs = compileMs
 		return res // compile_error or internal_error — nothing was executed
 	}
-	out := r.execute(ctx, req, workDir)
+	out := r.execute(ctx, req, workDir, plan)
 	out.CompileMs = compileMs
 	return out
 }
 
+// buildPlan is the resolved, language-specific compile/run recipe for one request
+// — the seam that lets compile()/execute() stay identical across single-file and
+// multi-file. All paths are absolute in-jail paths; runTemplate may still carry
+// the {out}/{dir}/{mem} placeholders execute() substitutes.
+type buildPlan struct {
+	compileArgv     []string // compile jail argv (argv[0] is the bare tool name unless compileArgv0Absolute)
+	artifactRel     string   // artifact path relative to workDir, validated after compile
+	runTemplate     []string // run jail argv, {out}/{dir}/{mem}-templated
+	extraCompileEnv []string // appended to the compile env (multi-file Go offline policy)
+}
+
+// plan materializes the submission into workDir and returns its buildPlan. The
+// single-file branch is byte-for-byte the original behaviour; the multi-file
+// branch drives the language's multiFile builders over the validated tree.
+func (r *compiledRuntime) plan(workDir string, req runnerapi.RunRequest) (buildPlan, error) {
+	if len(req.Files) == 0 {
+		if err := os.WriteFile(filepath.Join(workDir, r.spec.sourceFile), []byte(req.SourceCode), 0o600); err != nil {
+			return buildPlan{}, errors.New("could not write source")
+		}
+		// Link libraries go AFTER {src} so left-to-right symbol resolution works
+		// (see spec.link). {dir} is the per-run jail workdir (Java's -d / -cp target).
+		argv := subst(append(append([]string{}, r.spec.compile...), r.spec.link...),
+			"{src}", sandbox.JailPath(r.spec.sourceFile), "{out}", sandbox.JailPath(r.artifact), "{dir}", sandbox.JailMount)
+		return buildPlan{compileArgv: argv, artifactRel: r.artifact, runTemplate: r.spec.run}, nil
+	}
+
+	if r.spec.multiFile == nil {
+		return buildPlan{}, errors.New("language does not support multi-file submissions")
+	}
+	files, err := materializeSource(workDir, req)
+	if err != nil {
+		return buildPlan{}, err
+	}
+	mf := r.spec.multiFile
+	if mf.prep != nil {
+		if err := mf.prep(workDir, req.Entrypoint); err != nil {
+			return buildPlan{}, err
+		}
+	}
+	return buildPlan{
+		compileArgv:     mf.compileArgv(files, req.Entrypoint),
+		artifactRel:     mf.artifactRel(req.Entrypoint),
+		runTemplate:     mf.runTemplate(req.Entrypoint),
+		extraCompileEnv: r.spec.multiFileCompileEnv,
+	}, nil
+}
+
 // compile runs the compile jail. It returns (result, false) to short-circuit on
 // compile_error/internal_error, or (zero, true) when a valid artifact exists.
-func (r *compiledRuntime) compile(ctx context.Context, req runnerapi.RunRequest, workDir string) (runnerapi.RunResult, bool) {
+func (r *compiledRuntime) compile(ctx context.Context, req runnerapi.RunRequest, workDir string, plan buildPlan) (runnerapi.RunResult, bool) {
 	// req.CompileTimeoutMs is already clamped to [default, ceiling] by the service
 	// (mirrors req.TimeoutMs for the run phase).
 	timeout := req.CompileTimeoutMs
 	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Millisecond)
 	defer cancel()
 
-	srcJail := sandbox.JailPath(r.spec.sourceFile)
-	outJail := sandbox.JailPath(r.artifact)
-	// Link libraries go AFTER {src} on the line so left-to-right symbol resolution
-	// works regardless of which libs a future language adds (see spec.link).
-	// {dir} is the per-run jail workdir (Java's javac -d / -cp target).
-	argv := subst(append(append([]string{}, r.spec.compile...), r.spec.link...),
-		"{src}", srcJail, "{out}", outJail, "{dir}", sandbox.JailMount)
+	argv := append([]string{}, plan.compileArgv...)
 	if !r.spec.compileArgv0Absolute {
 		argv[0] = r.compilerBin // absolute compiler path; nsjail does no PATH search
 	}
@@ -403,8 +460,9 @@ func (r *compiledRuntime) compile(ctx context.Context, req runnerapi.RunRequest,
 	}
 	// PATH includes the Go toolchain dir; TMPDIR so gcc/go intermediates land in
 	// the size-capped tmpfs /tmp. Per-language compileEnv adds e.g. Go's isolated
-	// GOCACHE/GOPATH.
+	// GOCACHE/GOPATH; extraCompileEnv adds the multi-file-only offline module policy.
 	cmd.Env = append([]string{"PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin", "TMPDIR=/tmp"}, r.spec.compileEnv...)
+	cmd.Env = append(cmd.Env, plan.extraCompileEnv...)
 	stderr := &limitedBuffer{limit: r.outputLimit}
 	cmd.Stderr = stderr
 	cmd.Stdout = &limitedBuffer{limit: r.outputLimit}
@@ -426,7 +484,7 @@ func (r *compiledRuntime) compile(ctx context.Context, req runnerapi.RunRequest,
 
 	// Validate the artifact: it must exist and stay under the size cap (a compile
 	// bomb that somehow linked huge). Otherwise it is our failure, not the code's.
-	fi, err := os.Stat(filepath.Join(workDir, r.artifact))
+	fi, err := os.Stat(filepath.Join(workDir, plan.artifactRel))
 	if err != nil || fi.Size() == 0 {
 		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "compile produced no artifact"}, false
 	}
@@ -439,7 +497,7 @@ func (r *compiledRuntime) compile(ctx context.Context, req runnerapi.RunRequest,
 // execute runs the compiled program in the run jail and classifies the outcome.
 // Static languages (C/C++/Go) run the artifact directly in a minimal-rootfs jail;
 // a VM language (Java) runs its launcher on the full-rootfs denylist jail.
-func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest, workDir string) runnerapi.RunResult {
+func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest, workDir string, plan buildPlan) runnerapi.RunResult {
 	rctx, cancel := context.WithTimeout(ctx, time.Duration(req.TimeoutMs)*time.Millisecond)
 	defer cancel()
 	// Cause-carrying cancel so an output flood kills the artifact and is told apart
@@ -449,8 +507,8 @@ func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest,
 
 	// {out} is the artifact path (static run argv[0]); {dir} the jail workdir (Java's
 	// -cp target); {mem} the heap budget for the VM's -Xmx flag.
-	argv := subst(r.spec.run,
-		"{out}", sandbox.JailPath(r.artifact), "{dir}", sandbox.JailMount, "{mem}", strconv.Itoa(req.MemoryMB))
+	argv := subst(plan.runTemplate,
+		"{out}", sandbox.JailPath(plan.artifactRel), "{dir}", sandbox.JailMount, "{mem}", strconv.Itoa(req.MemoryMB))
 	if r.runBin != "" {
 		argv[0] = r.runBin // absolute VM launcher (java); nsjail does no PATH search
 	}

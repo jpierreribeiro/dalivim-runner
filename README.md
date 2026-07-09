@@ -62,13 +62,48 @@ Response:
 ```
 
 `status` ∈ `success | runtime_error | timeout | memory_exceeded | compile_error |
-output_limit_exceeded | internal_error`. Only `language` and `source_code` are
-required; each limit falls back to the service default and is clamped to the hard
-ceiling. A language may declare a *floor* on a limit (Java floors `memory_mb` at
-128 — the JVM's non-heap overhead sits on top of `-Xmx`, so a smaller budget
-cannot start the VM); an undersized request is lifted to the floor, never past
-the global ceiling. Unknown language → `400`. Oversized `source_code` or `stdin`
-→ `400` (bad request, not a run outcome).
+output_limit_exceeded | internal_error`. `language` is always required, plus
+**exactly one** of `source_code` (single-file) or `files` (multi-file, below);
+each limit falls back to the service default and is clamped to the hard ceiling.
+A language may declare a *floor* on a limit (Java floors `memory_mb` at 128 — the
+JVM's non-heap overhead sits on top of `-Xmx`, so a smaller budget cannot start
+the VM); an undersized request is lifted to the floor, never past the global
+ceiling. Unknown language → `400`. Oversized `source_code` or `stdin` → `400`
+(bad request, not a run outcome).
+
+#### Multi-file submissions (`files[]`)
+
+Instead of `source_code`, a request may carry a `files` array — own headers, extra
+translation units, a package split, sibling modules:
+
+```json
+{
+  "language": "c",
+  "files": [
+    { "path": "main.c", "content": "#include \"util.h\"\nint main(){ return add(2,3); }" },
+    { "path": "util.c", "content": "int add(int a,int b){ return a+b; }" },
+    { "path": "util.h", "content": "int add(int,int);" }
+  ],
+  "entrypoint": "main.c"
+}
+```
+
+- Exactly one of `source_code` / `files` is set (both or neither → `400`).
+- `entrypoint` names the program's main; it defaults per language (`main.c`,
+  `main.cpp`, `main.go`, `main.py`, `main.js`, and `Main` for Java). For Python,
+  JS, C, C++ and Go it is a path that must exist in `files`; for **Java** it is a
+  fully-qualified **class name** (`Main`, `com.acme.Main`), not a path.
+- Paths are relative, forward-slash, and validated against a conservative grammar
+  before anything is written: absolute paths, `..`, hidden/dotfiles, backslashes,
+  control/NUL/non-ASCII bytes, leading `-`/`@`, disallowed extensions, forbidden
+  manifests (`setup.py`, `package.json`, `go.mod`, `go.work`, …), forbidden
+  directories (`node_modules`, `vendor`), duplicates, and over-limit counts/sizes
+  all return `400`. Files are materialized with a **traversal-resistant** writer
+  (`openat2`/`os.Root`), so a malicious path can never escape the per-job root.
+- No dependency resolution, package managers, or build scripts run: Go builds an
+  offline synthesized module (`GOPROXY=off`), Python/JS never touch pip/npm.
+- See [`docs/G3_MULTIFILE.md`](docs/G3_MULTIFILE.md) for the contract, threat
+  model, security checklist, and residual-risk report.
 
 `output_limit_exceeded` means the run wrote past the output cap and was **killed**
 for it (rather than truncated and left to burn its timeout): `stdout`/`stderr`
@@ -230,6 +265,11 @@ deploy with `RUNNER_SANDBOX=require` is how you prove it engaged.
 | `RUNNER_DEFAULT_MEMORY_MB` / `RUNNER_MAX_MEMORY_MB` | `128` / `512` | Per-run memory default + hard cap. |
 | `RUNNER_MAX_SOURCE_BYTES` | `200000` | Max accepted `source_code` size; over → `400`. |
 | `RUNNER_MAX_STDIN_BYTES` | `1000000` | Max accepted `stdin` size, independent of the source budget; over → `400`. |
+| `RUNNER_MAX_FILES` | `50` | Multi-file: max files in one `files[]` request; over → `400`. |
+| `RUNNER_MAX_FILE_BYTES` | `262144` | Multi-file: max content bytes of a single file; over → `400`. |
+| `RUNNER_MAX_FILES_BYTES` | `1048576` | Multi-file: max summed content bytes across all files; over → `400`. |
+| `RUNNER_MAX_PATH_BYTES` | `180` | Multi-file: max length of a single file path; over → `400`. |
+| `RUNNER_MAX_PATH_DEPTH` | `8` | Multi-file: max path nesting (components); over → `400`. |
 | `RUNNER_MAX_OUTPUT_BYTES` | `65536` | Per-stream stdout/stderr capture cap; crossing it kills the run (`output_limit_exceeded`). |
 | `RUNNER_COMPILE_TIMEOUT_MS` / `RUNNER_MAX_COMPILE_TIMEOUT_MS` | `10000` / `20000` | Compiled languages: compile-phase wall/CPU budget + hard cap (separate from execution). |
 | `RUNNER_COMPILE_MEMORY_MB` | `512` | Compiled languages: `RLIMIT_AS`/cgroup for the compiler (tames template/macro bombs). |

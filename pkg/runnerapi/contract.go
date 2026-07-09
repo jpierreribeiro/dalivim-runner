@@ -6,18 +6,48 @@
 // structs across repositories.
 package runnerapi
 
+// RunFile is one file of a multi-file submission: a caller-supplied relative
+// path plus its content. The Path is the single most dangerous field in the
+// whole contract — it is attacker-controlled and drives a filesystem write — so
+// it is validated against a conservative grammar and materialized with a
+// traversal-resistant API before anything touches disk (see the executor's
+// file-policy and materialization layer). Path is relative to the per-run source
+// root and uses forward slashes, e.g. "util.h", "src/main.c",
+// "src/com/acme/Main.java".
+type RunFile struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
 // RunRequest is the body of POST /run.
 //
 // The runner is a language-AGNOSTIC executor, so the request names its own
-// language rather than the endpoint encoding it. Only Language and SourceCode
-// are required; each limit falls back to the service default when left zero, and
-// is clamped to the service's hard ceiling.
+// language rather than the endpoint encoding it. Exactly one of SourceCode or
+// Files carries the program; each limit falls back to the service default when
+// left zero, and is clamped to the service's hard ceiling.
 type RunRequest struct {
-	Language   string `json:"language"`
-	SourceCode string `json:"source_code"`
-	Stdin      string `json:"stdin,omitempty"`
-	TimeoutMs  int    `json:"timeout_ms,omitempty"`
-	MemoryMB   int    `json:"memory_mb,omitempty"`
+	Language string `json:"language"`
+
+	// SourceCode is the single-file form: the whole program as one string,
+	// written to the language's default entry file (main.py, Main.java, …). It is
+	// mutually exclusive with Files. This is the original, unchanged contract; a
+	// SourceCode request runs byte-for-byte as it always has.
+	SourceCode string `json:"source_code,omitempty"`
+
+	// Files is the multi-file form (G3): several named files materialized into a
+	// per-run source tree, so a submission can span headers, translation units, a
+	// package split, or sibling modules. Mutually exclusive with SourceCode.
+	Files []RunFile `json:"files,omitempty"`
+
+	// Entrypoint names which file (or, for Java, which class) is the program's
+	// main. Meaningful only with Files; defaults per language when empty:
+	//   - Python/JS/C/C++/Go: a relative path inside Files (main.py, main.go, …).
+	//   - Java: a fully-qualified class name, e.g. "Main" or "com.acme.Main".
+	Entrypoint string `json:"entrypoint,omitempty"`
+
+	Stdin     string `json:"stdin,omitempty"`
+	TimeoutMs int    `json:"timeout_ms,omitempty"`
+	MemoryMB  int    `json:"memory_mb,omitempty"`
 
 	// CompileTimeoutMs bounds the compile phase of a compiled language (C/C++),
 	// separate from TimeoutMs which bounds execution. Ignored for interpreted
