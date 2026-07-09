@@ -23,6 +23,7 @@ type Config struct {
 	Addr              string
 	Token             string
 	MaxSourceBytes    int
+	MaxStdinBytes     int
 	MaxConcurrentRuns int
 }
 
@@ -31,7 +32,7 @@ type Config struct {
 // probes. Method+path routing (Go 1.22+) makes a wrong method a 405 without any
 // per-handler checks.
 func New(svc *executor.Service, cfg Config) *Server {
-	h := &handler{svc: svc, maxSourceBytes: cfg.MaxSourceBytes}
+	h := &handler{svc: svc, maxSourceBytes: cfg.MaxSourceBytes, maxStdinBytes: cfg.MaxStdinBytes}
 
 	// gate wraps an execution handler: authenticate first (RequireToken), then
 	// bound concurrency. Ordering matters — only authenticated callers may consume

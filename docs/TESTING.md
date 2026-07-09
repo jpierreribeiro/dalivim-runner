@@ -25,7 +25,11 @@ default and are clamped to the hard ceiling. Response:
   "duration_ms": 42, "memory_kb": 8192, "runtime_name": "python", "runtime_version": "3.12.x" }
 ```
 
-`status` is one of `success | runtime_error | timeout | memory_exceeded | internal_error`.
+`status` is one of `success | runtime_error | timeout | memory_exceeded |
+compile_error | output_limit_exceeded | internal_error`. `output_limit_exceeded`
+means the run flooded output past `RUNNER_MAX_OUTPUT_BYTES` and was killed for it
+(partial output is still returned); `compile_error` is a compiled-language compile
+failure with diagnostics in `compile_output`.
 
 ---
 

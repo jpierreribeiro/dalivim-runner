@@ -56,10 +56,12 @@ func main() {
 	// (F-D) register the same way once their compile-phase runtime exists.
 	svc := executor.NewService(
 		executor.Limits{
-			DefaultTimeout: cfg.DefaultTimeoutMs,
-			MaxTimeoutMs:   cfg.MaxTimeoutMs,
-			DefaultMemory:  cfg.DefaultMemoryMB,
-			MaxMemoryMB:    cfg.MaxMemoryMB,
+			DefaultTimeout:        cfg.DefaultTimeoutMs,
+			MaxTimeoutMs:          cfg.MaxTimeoutMs,
+			DefaultMemory:         cfg.DefaultMemoryMB,
+			MaxMemoryMB:           cfg.MaxMemoryMB,
+			DefaultCompileTimeout: cfg.CompileTimeoutMs,
+			MaxCompileTimeoutMs:   cfg.MaxCompileTimeoutMs,
 		},
 		executor.NewPython(sb, cfg.MaxOutputBytes, cfg.MaxProcesses, cfg.MaxFileSizeMB),
 		executor.NewNode(sb, cfg.MaxOutputBytes, cfg.MaxProcesses, cfg.MaxFileSizeMB),
@@ -71,6 +73,7 @@ func main() {
 		Addr:              cfg.Addr,
 		Token:             cfg.ServiceToken,
 		MaxSourceBytes:    cfg.MaxSourceBytes,
+		MaxStdinBytes:     cfg.MaxStdinBytes,
 		MaxConcurrentRuns: cfg.MaxConcurrentRuns,
 	})
 
@@ -85,14 +88,12 @@ func main() {
 // compiledConfig gathers the compile-phase knobs for the C/C++ runtimes.
 func compiledConfig(cfg config.Config) executor.CompiledConfig {
 	return executor.CompiledConfig{
-		OutputLimit:       cfg.MaxOutputBytes,
-		MaxProcesses:      cfg.MaxProcesses,
-		MaxFileSizeMB:     cfg.MaxFileSizeMB,
-		CompileTimeoutMs:  cfg.CompileTimeoutMs,
-		MaxCompileTimeout: cfg.MaxCompileTimeoutMs,
-		CompileMemoryMB:   cfg.CompileMemoryMB,
-		MaxArtifactBytes:  cfg.MaxArtifactBytes,
-		RunSeccomp:        staticSeccompProfile(cfg.StaticSeccomp),
+		OutputLimit:      cfg.MaxOutputBytes,
+		MaxProcesses:     cfg.MaxProcesses,
+		MaxFileSizeMB:    cfg.MaxFileSizeMB,
+		CompileMemoryMB:  cfg.CompileMemoryMB,
+		MaxArtifactBytes: cfg.MaxArtifactBytes,
+		RunSeccomp:       staticSeccompProfile(cfg.StaticSeccomp),
 	}
 }
 

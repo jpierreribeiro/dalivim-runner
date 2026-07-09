@@ -62,15 +62,24 @@ Response:
 ```
 
 `status` ∈ `success | runtime_error | timeout | memory_exceeded | compile_error |
-internal_error`. Only `language` and `source_code` are required; each limit falls
-back to the service default and is clamped to the hard ceiling. Unknown
-language → `400`.
+output_limit_exceeded | internal_error`. Only `language` and `source_code` are
+required; each limit falls back to the service default and is clamped to the hard
+ceiling. Unknown language → `400`. Oversized `source_code` or `stdin` → `400`
+(bad request, not a run outcome).
 
-**Languages:** `python`, `javascript` (interpreted), `c`, `cpp` (compiled). A
-compiled request may set `compile_timeout_ms` (bounds the compile phase, separate
-from `timeout_ms`); a failed compile returns `status: compile_error` with the
-compiler diagnostics in `compile_output`, and nothing is executed. `signal` names
-the signal that killed a run (e.g. `SIGSEGV`) when it died by one.
+`output_limit_exceeded` means the run wrote past the output cap and was **killed**
+for it (rather than truncated and left to burn its timeout): `stdout`/`stderr`
+still carry the captured first `RUNNER_MAX_OUTPUT_BYTES` (with the truncation
+marker) and `duration_ms` is well under the timeout. It is additive — a caller
+that does not special-case it sees an unsuccessful run with partial output.
+
+**Languages:** `python`, `javascript` (interpreted), `c`, `cpp` (compiled). C is
+linked against libm, so ordinary `<math.h>` (`sqrt`, `pow`, …) works. A compiled
+request may set `compile_timeout_ms` (bounds the compile phase, separate from
+`timeout_ms`; lowers the compile bound within the ceiling, never raises it); a
+failed compile returns `status: compile_error` with the compiler diagnostics in
+`compile_output`, and nothing is executed. `signal` names the signal that killed a
+run (e.g. `SIGSEGV`) when it died by one.
 
 `python_version` is a **deprecated** alias of `runtime_version`, kept so the
 current gateway adapter works unchanged. New callers should read
@@ -122,7 +131,8 @@ deploy with `RUNNER_SANDBOX=require` is how you prove it engaged.
 - **Infra failover:** if the runner cannot stand up the sandbox for a run
   (`status: internal_error`), it replies `503` + `Retry-After`, not a terminal
   `200`, so the gateway treats it as a provider failure and can fall back. Student
-  outcomes (`success`/`runtime_error`/`timeout`/`memory_exceeded`) stay `200`.
+  outcomes (`success`/`runtime_error`/`timeout`/`memory_exceeded`/`output_limit_exceeded`)
+  stay `200`.
 - **Fork bombs:** contained **per-run** by the nsjail backend (`--rlimit_nproc`
   against a jail-private uid), never a process-wide `RLIMIT_NPROC` — a global cap
   is enforced per real-uid and would throttle the runner itself on a busy host
@@ -179,8 +189,9 @@ deploy with `RUNNER_SANDBOX=require` is how you prove it engaged.
 | `RUNNER_PORT` / `PORT` | `8090` | Listen port (`PORT` is the platform-injected fallback). |
 | `RUNNER_DEFAULT_TIMEOUT_MS` / `RUNNER_MAX_TIMEOUT_MS` | `3000` / `10000` | Per-run wall-clock default + hard cap. |
 | `RUNNER_DEFAULT_MEMORY_MB` / `RUNNER_MAX_MEMORY_MB` | `128` / `512` | Per-run memory default + hard cap. |
-| `RUNNER_MAX_SOURCE_BYTES` | `200000` | Max accepted `source_code` size. |
-| `RUNNER_MAX_OUTPUT_BYTES` | `65536` | Per-stream stdout/stderr capture cap. |
+| `RUNNER_MAX_SOURCE_BYTES` | `200000` | Max accepted `source_code` size; over → `400`. |
+| `RUNNER_MAX_STDIN_BYTES` | `1000000` | Max accepted `stdin` size, independent of the source budget; over → `400`. |
+| `RUNNER_MAX_OUTPUT_BYTES` | `65536` | Per-stream stdout/stderr capture cap; crossing it kills the run (`output_limit_exceeded`). |
 | `RUNNER_COMPILE_TIMEOUT_MS` / `RUNNER_MAX_COMPILE_TIMEOUT_MS` | `10000` / `20000` | Compiled languages: compile-phase wall/CPU budget + hard cap (separate from execution). |
 | `RUNNER_COMPILE_MEMORY_MB` | `512` | Compiled languages: `RLIMIT_AS`/cgroup for the compiler (tames template/macro bombs). |
 | `RUNNER_MAX_ARTIFACT_MB` | `32` | Compiled languages: reject a compiled artifact larger than this. |

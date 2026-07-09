@@ -23,6 +23,13 @@ type Limits struct {
 	MaxTimeoutMs   int // ms, hard ceiling
 	DefaultMemory  int // MB, applied when the request omits a memory limit
 	MaxMemoryMB    int // MB, hard ceiling
+
+	// Compile-phase budget for compiled languages (C/C++). Clamped here, in the
+	// one place limits are enforced, so a request may lower its compile bound but
+	// never raise it past the ceiling (a long compile is a DoS vector). Interpreted
+	// languages ignore the resulting value.
+	DefaultCompileTimeout int // ms, applied when the request omits compile_timeout_ms
+	MaxCompileTimeoutMs   int // ms, hard ceiling
 }
 
 // Runtime executes source code for exactly one language inside the sandbox.
@@ -75,6 +82,7 @@ func (s *Service) Run(ctx context.Context, req runnerapi.RunRequest) (runnerapi.
 	}
 	req.TimeoutMs = clamp(req.TimeoutMs, s.limits.DefaultTimeout, s.limits.MaxTimeoutMs)
 	req.MemoryMB = clamp(req.MemoryMB, s.limits.DefaultMemory, s.limits.MaxMemoryMB)
+	req.CompileTimeoutMs = clamp(req.CompileTimeoutMs, s.limits.DefaultCompileTimeout, s.limits.MaxCompileTimeoutMs)
 
 	res := rt.Run(ctx, req)
 	res.RuntimeName = rt.Language()

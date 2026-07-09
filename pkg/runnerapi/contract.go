@@ -64,4 +64,12 @@ const (
 	StatusMemoryExceeded = "memory_exceeded"
 	StatusCompileError   = "compile_error" // compiled languages: the compile phase failed
 	StatusInternalError  = "internal_error"
+
+	// StatusOutputLimitExceeded means the run wrote more than the output cap and
+	// was killed for it, rather than truncated-and-left-running. It is a fail-fast
+	// verdict for an unbounded print loop: the captured Stdout/Stderr hold the
+	// first cap bytes (with the truncation marker) and DurationMs is well under the
+	// timeout. Additive — a caller that does not special-case it sees an
+	// unsuccessful run with partial output.
+	StatusOutputLimitExceeded = "output_limit_exceeded"
 )

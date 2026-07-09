@@ -95,17 +95,26 @@ func TestPython_Timeout(t *testing.T) {
 	}
 }
 
-func TestPython_OutputTruncation(t *testing.T) {
+// TestPython_OutputFloodKilled pins the locked G1.4 behavior: an unbounded print
+// loop is KILLED once it crosses the output cap and classified
+// output_limit_exceeded, rather than truncated-and-left-running to burn the whole
+// timeout. The captured prefix (first cap bytes + marker) is still returned, and
+// the run ends well before the deadline.
+func TestPython_OutputFloodKilled(t *testing.T) {
 	requirePython(t)
-	res := run(t, newPython(t), runnerapi.RunRequest{SourceCode: "print('a' * 200000)", TimeoutMs: 5000, MemoryMB: 128})
-	if res.Status != runnerapi.StatusSuccess {
-		t.Fatalf("expected success, got %q", res.Status)
+	res := run(t, newPython(t), runnerapi.RunRequest{SourceCode: "while True:\n    print('x' * 1024)", TimeoutMs: 5000, MemoryMB: 128})
+	if res.Status != runnerapi.StatusOutputLimitExceeded {
+		t.Fatalf("expected output_limit_exceeded, got %q (stderr=%q)", res.Status, res.Stderr)
 	}
 	if !strings.HasSuffix(res.Stdout, "[output truncated]") {
 		t.Fatalf("expected truncation marker, stdout tail=%q", tail(res.Stdout, 40))
 	}
 	if max := 64*1024 + len("\n[output truncated]"); len(res.Stdout) > max {
 		t.Fatalf("stdout %d bytes exceeds cap %d", len(res.Stdout), max)
+	}
+	// Fail-fast: the kill lands far short of the 5s deadline.
+	if res.DurationMs >= 4000 {
+		t.Fatalf("expected fast kill well under timeout, got %dms", res.DurationMs)
 	}
 }
 
