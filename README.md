@@ -61,9 +61,16 @@ Response:
 }
 ```
 
-`status` ∈ `success | runtime_error | timeout | memory_exceeded | internal_error`.
-Only `language` and `source_code` are required; each limit falls back to the
-service default and is clamped to the hard ceiling. Unknown language → `400`.
+`status` ∈ `success | runtime_error | timeout | memory_exceeded | compile_error |
+internal_error`. Only `language` and `source_code` are required; each limit falls
+back to the service default and is clamped to the hard ceiling. Unknown
+language → `400`.
+
+**Languages:** `python`, `javascript` (interpreted), `c`, `cpp` (compiled). A
+compiled request may set `compile_timeout_ms` (bounds the compile phase, separate
+from `timeout_ms`); a failed compile returns `status: compile_error` with the
+compiler diagnostics in `compile_output`, and nothing is executed. `signal` names
+the signal that killed a run (e.g. `SIGSEGV`) when it died by one.
 
 `python_version` is a **deprecated** alias of `runtime_version`, kept so the
 current gateway adapter works unchanged. New callers should read
@@ -126,6 +133,15 @@ deploy with `RUNNER_SANDBOX=require` is how you prove it engaged.
   the source is written to a file (never the command line); restricted PATH/env;
   runs as a non-root uid. Interpreted runtimes are single-file: `python3 -I` and
   `node --disable-proto=throw` (no npm / `node_modules`).
+- **Compiled languages (C/C++), two jails (F-D):** the compiler is itself hostile
+  input (template/macro bombs, recursive `#include`), so it runs in its own jail —
+  read-only rootfs, no network, a `-static` link, and its own CPU/mem/time budget
+  (`RUNNER_COMPILE_*`); a non-zero exit or compile timeout is `compile_error` and
+  **nothing runs**. The validated static artifact then executes in a **separate,
+  stricter run jail with a *minimal rootfs*** — only the binary + tmpfs `/tmp`, no
+  libc, and crucially **no toolchain**, so a submission cannot re-invoke the
+  compiler or exec anything else at runtime (D-4). *(A tight seccomp allowlist for
+  the static run jail — stronger than the shared denylist — is the F-D follow-up.)*
 - **Memory:** CPython runs under a hard `RLIMIT_AS` (a memory bomb → deterministic
   `memory_exceeded`). Node cannot — V8 reserves a multi-GB virtual cage at startup
   that a tight `RLIMIT_AS` refuses — so Node skips the address-space cap and bounds
@@ -157,6 +173,9 @@ deploy with `RUNNER_SANDBOX=require` is how you prove it engaged.
 | `RUNNER_DEFAULT_MEMORY_MB` / `RUNNER_MAX_MEMORY_MB` | `128` / `512` | Per-run memory default + hard cap. |
 | `RUNNER_MAX_SOURCE_BYTES` | `200000` | Max accepted `source_code` size. |
 | `RUNNER_MAX_OUTPUT_BYTES` | `65536` | Per-stream stdout/stderr capture cap. |
+| `RUNNER_COMPILE_TIMEOUT_MS` / `RUNNER_MAX_COMPILE_TIMEOUT_MS` | `10000` / `20000` | Compiled languages: compile-phase wall/CPU budget + hard cap (separate from execution). |
+| `RUNNER_COMPILE_MEMORY_MB` | `512` | Compiled languages: `RLIMIT_AS`/cgroup for the compiler (tames template/macro bombs). |
+| `RUNNER_MAX_ARTIFACT_MB` | `32` | Compiled languages: reject a compiled artifact larger than this. |
 
 ## Run locally
 

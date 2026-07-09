@@ -62,6 +62,8 @@ func main() {
 		},
 		executor.NewPython(sb, cfg.MaxOutputBytes, cfg.MaxProcesses, cfg.MaxFileSizeMB),
 		executor.NewNode(sb, cfg.MaxOutputBytes, cfg.MaxProcesses, cfg.MaxFileSizeMB),
+		executor.NewC(sb, compiledConfig(cfg)),
+		executor.NewCpp(sb, compiledConfig(cfg)),
 	)
 
 	srv := httpapi.New(svc, httpapi.Config{
@@ -76,5 +78,18 @@ func main() {
 	if err := srv.ListenAndServe(ctx); err != nil {
 		slog.Error("server", "err", err)
 		os.Exit(1)
+	}
+}
+
+// compiledConfig gathers the compile-phase knobs for the C/C++ runtimes.
+func compiledConfig(cfg config.Config) executor.CompiledConfig {
+	return executor.CompiledConfig{
+		OutputLimit:       cfg.MaxOutputBytes,
+		MaxProcesses:      cfg.MaxProcesses,
+		MaxFileSizeMB:     cfg.MaxFileSizeMB,
+		CompileTimeoutMs:  cfg.CompileTimeoutMs,
+		MaxCompileTimeout: cfg.MaxCompileTimeoutMs,
+		CompileMemoryMB:   cfg.CompileMemoryMB,
+		MaxArtifactBytes:  cfg.MaxArtifactBytes,
 	}
 }

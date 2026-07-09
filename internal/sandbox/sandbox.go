@@ -22,6 +22,15 @@ import (
 	"os/exec"
 )
 
+// JailMount is the fixed path the per-run WorkDir is bind-mounted to inside every
+// jail. Runtimes reference their in-jail files (source, compiled artifact)
+// relative to it via JailPath so the caller and the sandbox agree on one path.
+const JailMount = "/sandbox"
+
+// JailPath joins name onto the in-jail mount, e.g. JailPath("main.c") ->
+// "/sandbox/main.c".
+func JailPath(name string) string { return JailMount + "/" + name }
+
 // Spec describes one run for the sandbox to contain. It carries only what the
 // containment decision needs; the caller sets Stdin/Env/Stdout/Stderr on the
 // returned command itself (those are the runtime's concern, not the jail's).
@@ -70,6 +79,21 @@ type Spec struct {
 	// (RLIMIT_FSIZE). Honoured only by the nsjail backend (where writes land in a
 	// size-capped tmpfs /tmp); 0 leaves it unset.
 	MaxFileSizeMB int
+
+	// Writable binds WorkDir into the jail READ-WRITE at /sandbox instead of the
+	// default read-only. Only the compile phase of a compiled language needs it —
+	// so the compiler can write its artifact into the per-run dir, which the host
+	// then reads and hands (read-only) to the separate run jail. Execution phases
+	// always leave this false (invariant: student code never writes the rootfs).
+	Writable bool
+
+	// MinimalRootfs omits the read-only host-rootfs bind, so the jail root is only
+	// a fresh tmpfs plus /sandbox and /tmp — no interpreter, no libraries, and
+	// crucially NO TOOLCHAIN. It is the F-D run jail for a statically-linked
+	// artifact: the binary needs nothing but itself, and with nothing else present
+	// there is nothing to execve and no compiler to re-invoke at runtime (D-4).
+	// Interpreted runs and the compile phase need the full rootfs, so leave false.
+	MinimalRootfs bool
 }
 
 // RunAccounting exposes authoritative per-run resource facts a backend gathered

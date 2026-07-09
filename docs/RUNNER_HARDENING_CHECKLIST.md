@@ -23,7 +23,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked
 | Refactor | Invert Sandbox: `SysProcAttr()` provider → `Command(Spec)` constructor | [x] done |
 | F-B | `nsjailSandbox`: seccomp, tmpfs-capped `/tmp`, `no_new_privs`, per-jail nproc | [x] done (validated in CI: image builds nsjail, `RUNNER_SANDBOX=require` boots `nsjail ENABLED`, escape corpus contained) |
 | F-C | Interpreted polyglot (Node): `languageSpec` registry + JS runtime on the shared jail | [x] done (unit green; JS smoke + jail-inheritance gated in CI) |
-| F-D | Compiled polyglot (C/C++): compile-jail + run-jail, `signal`, `compile_output` | [ ] todo |
+| F-D | Compiled polyglot (C/C++): compile-jail + run-jail, `signal`, `compile_output` | [x] core done (two jails, static, minimal-rootfs run jail; CI smoke). Strict seccomp allowlist = follow-up |
 | F-E / F-F | cgroups accounting, deterministic `memory_exceeded` classification | [x] R6 done (`RUNNER_CGROUP` v2 dial: per-run `memory.max`/`pids.max`, OOM-event classification; VPS-validated). F-F CPU accounting: todo |
 
 ---
@@ -187,10 +187,28 @@ Criterion (plan §5): **smoke JS green; JS inherits the jail.**
 
 ## F-D — compiled languages (C/C++)
 
-- [ ] Wire `compile_timeout_ms` / `compile_output` contract fields (already reserved).
-- [ ] Add `signal` to `RunResult` for SIGKILL/SIGSEGV disambiguation.
-- [ ] Second runtime (C/C++) behind the `language` dispatch: compile-jail +
-      run-jail (the compiler is untrusted too — D-4/§3.4).
+- [x] Wire `compile_timeout_ms` (request) + `compile_output` / `signal` (result) +
+      `StatusCompileError` in the contract.
+- [x] `compiledRuntime` (`internal/executor/compiled.go`) behind the same
+      `language` dispatch: **two jails** (D-4/§3.4). Phase 1 compiles in its own
+      jail — full rootfs (the toolchain), a **writable** `/sandbox` for the
+      artifact, `-static` link, separate compile CPU/mem/time budget
+      (`RUNNER_COMPILE_*`); non-zero exit or compile timeout ⇒ `compile_error`,
+      nothing runs; the artifact is size-validated. Phase 2 runs the static binary
+      in a **minimal-rootfs** jail (new `Spec.MinimalRootfs`) — no libc, **no
+      toolchain**, so the run cannot re-invoke the compiler or exec anything else.
+- [x] Sandbox seam extended additively: `Spec.Writable` (rw `/sandbox` for compile)
+      and `Spec.MinimalRootfs` (drop the host rootfs bind for the static run jail);
+      `sandbox.JailPath` shares the mount path with runtimes. Arg-builder + `subst`
+      + `signalName` unit-tested; `c`/`cpp` in `registry`. Dockerfile adds
+      `gcc g++ libc6-dev`.
+- [x] CI runner-smoke exercises the real two-phase path: C & C++ `2+2` ⇒
+      `success`/`"4\n"`, a syntax error ⇒ `compile_error` (nothing executed), and
+      `execl("/usr/bin/gcc")` from the run jail fails (no toolchain present).
+- [ ] **F-D follow-up (target-validated):** tighten the static run jail to a strict
+      seccomp **allowlist** (read/write/exit/brk/mmap/rt_sigreturn/…), stronger than
+      the shared denylist, with the C escape corpus proving it. Java (javac+JVM) is
+      demand-gated (§3.4).
 
 ## F-E / F-F — accounting & classification
 
