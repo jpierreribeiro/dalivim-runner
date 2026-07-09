@@ -15,14 +15,13 @@ means the perfect *executor*, never absorbing the judge.
 
 ## Roadmap at a glance
 
-**Wave 1 — the original roadmap.** G1, G2, and G4 are **merged to `main`**; G3 is
-in progress.
+**Wave 1 — the original roadmap.** G1, G2, G3, and G4 are **merged to `main`**.
 
 | Phase | Theme | Value | Size | Breaks contract? | Status |
 |---|---|---|---|---|---|
 | **[G1](G1-executor-robustness.md)** | Executor correctness & robustness | 🔴 high | small | no (adds one status) | ✅ merged |
 | **[G2](G2-language-coverage.md)** | Language coverage — Go, Java | 🟡 high | medium | no (additive) | ✅ merged |
-| **[G3](G3-multi-file-submissions.md)** | Multi-file submissions | 🟠 high | large | **yes** (adds `files[]`) | 🔨 in progress |
+| **[G3](G3-multi-file-submissions.md)** | Multi-file submissions | 🟠 high | large | **yes** (adds `files[]`) | ✅ merged |
 | **[G4](G4-observability.md)** | Observability & operability | 🟢 medium | medium | no | ✅ merged |
 | **[G5](G5-deferred.md)** | Deferred / demand-gated | ⚪ low | — | — | — |
 
@@ -32,11 +31,11 @@ code-grounded before planning — two of the four candidate directions turned ou
 be **already done** (graceful drain, escape corpus), so G8 captures only the real
 residuals.
 
-| Phase | Theme | Value | Size | Breaks contract? |
-|---|---|---|---|---|
-| **[G6](G6-batch-execution.md)** | Batch execution (compile-once, run N stdins) | ⚪ gated¹ | medium | no (additive `stdins[]`) |
-| **[G7](G7-execution-determinism.md)** | Execution determinism (locale / TZ / env) | 🟢 hygiene¹ | **XS/S** | no |
-| **[G8](G8-ops-containment-maintenance.md)** | Ops & containment maintenance | 🟢 medium | small | no |
+| Phase | Theme | Value | Size | Breaks contract? | Status |
+|---|---|---|---|---|---|
+| **[G6](G6-batch-execution.md)** | Batch execution (compile-once, run N stdins) | ⚪ gated¹ | medium | no (additive `stdins[]`) | ✅ implemented² |
+| **[G7](G7-execution-determinism.md)** | Execution determinism (locale / TZ / env) | 🟢 hygiene¹ | **XS/S** | no | — |
+| **[G8](G8-ops-containment-maintenance.md)** | Ops & containment maintenance | 🟢 medium | small | no | — |
 
 | Guide | | | | |
 |---|---|---|---|---|
@@ -48,9 +47,14 @@ run per submission. That **demand-gates G6** (batch `stdins[]` has no caller unt
 test-case model exists) and **reframes G7** from "fixes silent WA" to cheap hygiene
 that becomes a prerequisite once judging lands.
 
-Recommended order for Wave 2: **G8 → G7 → G6**. G8's residuals (esp. token rotation
-and the language-parametrized escape corpus) are real now; G7 is cheap hygiene to
-bank ahead of any judge; G6 waits on the backend judge decision. The higher-leverage
+² **G6 landed 2026-07-09** by owner decision, ahead of the demand gate: the
+contract is additive (`stdins[]` + batch envelope), so shipping the executor side
+early costs nothing and it's ready the moment a backend test-case model exists.
+See the implementation notes in [G6](G6-batch-execution.md).
+
+Recommended order for the remaining Wave 2: **G8 → G7**. G8's residuals (esp.
+token rotation and the language-parametrized escape corpus) are real now; G7 is
+cheap hygiene to bank ahead of any judge. The higher-leverage
 near-term work is now at the **system** level (seam consolidation, runner migration,
 abuse/quota hardening) — tracked outside this runner-only roadmap.
 

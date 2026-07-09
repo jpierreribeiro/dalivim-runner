@@ -374,6 +374,52 @@ func (r *compiledRuntime) Run(ctx context.Context, req runnerapi.RunRequest) run
 	return out
 }
 
+// RunBatch is the compiled-language batch path (G6) — where the batch win
+// concentrates: the artifact is compiled ONCE and then executed once per stdin
+// against the same workDir. Each iteration is a fresh nsjail invocation with its
+// own timeout ctx, output buffers, and cgroup (execute() builds all of that per
+// call), so nothing carries between inputs except the read-only artifact.
+func (r *compiledRuntime) RunBatch(ctx context.Context, req runnerapi.RunRequest, totalBudgetMs int) runnerapi.BatchResult {
+	start := time.Now() // batch epoch: the compile counts against the total budget
+
+	workDir, err := os.MkdirTemp("", "dalivim-build-*")
+	if err != nil {
+		return runnerapi.BatchResult{Status: runnerapi.StatusInternalError, Results: []runnerapi.RunResult{}}
+	}
+	defer os.RemoveAll(workDir)
+
+	plan, err := r.plan(workDir, req)
+	if err != nil {
+		return runnerapi.BatchResult{Status: runnerapi.StatusInternalError, Results: []runnerapi.RunResult{}}
+	}
+
+	compileStart := time.Now()
+	res, ok := r.compile(ctx, req, workDir, plan)
+	compileMs := int(time.Since(compileStart).Milliseconds())
+	if !ok {
+		// compile_error (or internal_error) fails the WHOLE batch once — nothing
+		// was executed, so there are no per-input results.
+		return runnerapi.BatchResult{
+			Status:        res.Status,
+			CompileMs:     compileMs,
+			CompileOutput: res.CompileOutput,
+			Results:       []runnerapi.RunResult{},
+		}
+	}
+
+	results, aborted := batchLoop(ctx, req.Stdins, start, totalBudgetMs, func(ctx context.Context, stdin string) runnerapi.RunResult {
+		rq := req
+		rq.Stdin = stdin
+		return r.execute(ctx, rq, workDir, plan)
+	})
+	return runnerapi.BatchResult{
+		Status:    runnerapi.BatchStatusOK,
+		CompileMs: compileMs,
+		Results:   results,
+		Aborted:   aborted,
+	}
+}
+
 // buildPlan is the resolved, language-specific compile/run recipe for one request
 // — the seam that lets compile()/execute() stay identical across single-file and
 // multi-file. All paths are absolute in-jail paths; runTemplate may still carry

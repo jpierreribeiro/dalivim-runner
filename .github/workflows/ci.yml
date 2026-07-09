@@ -398,6 +398,49 @@ jobs:
           done
           echo "SMOKE OK   [G3] hostile files[] payloads all rejected with 400"
 
+      # ---- G6 batch execution (stdins[]) on the shipped image ----
+      # One program, N inputs: compiled once, executed once per element, each in
+      # a fresh jail. The envelope carries the shared compile telemetry once and
+      # index-aligned raw results.
+
+      - name: G6 C batch — compile once, run per stdin, index-aligned
+        run: |
+          src=$'#include <stdio.h>\nint main(void){ int a,b; scanf("%d %d",&a,&b); printf("%d\\n", a+b); return 0; }'
+          body="$(jq -nc --arg s "$src" '{language:"c",source_code:$s,stdins:["1 2","3 4","5 6"]}')"
+          resp="$(curl -fsS localhost:8090/run -H 'content-type: application/json' -d "$body")"
+          echo "$resp" | jq '{status, compile_ms, aborted, stdouts:[.results[].stdout]}'
+          echo "$resp" | jq -e '
+            .status=="ok" and .compile_ms > 0 and (.aborted // false | not)
+            and (.results | length) == 3
+            and .results[0].stdout=="3\n" and .results[1].stdout=="7\n" and .results[2].stdout=="11\n"
+            and ([.results[].compile_ms // 0] | add) == 0' >/dev/null \
+            || { echo "::error::batch envelope wrong (compile-once / index alignment)"; exit 1; }
+
+      # The batch isolation crux: inputs share the prepared workDir (that is the
+      # amortization) but each runs in a NEW jail with its own tmpfs /tmp and a
+      # read-only /sandbox — nothing an input does may be visible to the next.
+      - name: G6 batch isolation — no state survives between inputs
+        run: |
+          src=$'import sys, os\ns = sys.stdin.read().strip()\nif s == "write":\n    open("/tmp/mark","w").write("x")\n    print("wrote")\nelse:\n    print(os.path.exists("/tmp/mark"))'
+          body="$(jq -nc --arg s "$src" '{language:"python",source_code:$s,stdins:["write","read"]}')"
+          resp="$(curl -fsS localhost:8090/run -H 'content-type: application/json' -d "$body")"
+          echo "$resp" | jq '{status, stdouts:[.results[].stdout]}'
+          echo "$resp" | jq -e '.results[0].stdout=="wrote\n" and .results[1].stdout=="False\n"' >/dev/null \
+            || { echo "::error::state leaked between batch inputs — cross-input isolation broken"; exit 1; }
+
+      # DoS caps: over-count batches and stdin+stdins together are 400s at the
+      # gate, before anything compiles or runs.
+      - name: G6 batch caps — oversize batch and stdin+stdins => 400
+        run: |
+          over="$(jq -nc '{language:"python",source_code:"print(1)",stdins:[range(101)|tostring]}')"
+          both='{"language":"python","source_code":"print(1)","stdin":"a","stdins":["b"]}'
+          for body in "$over" "$both"; do
+            code="$(curl -s -o /dev/null -w '%{http_code}' localhost:8090/run \
+              -H 'content-type: application/json' -d "$body")"
+            [ "$code" = "400" ] || { echo "::error::expected 400 for hostile batch payload, got $code"; exit 1; }
+          done
+          echo "SMOKE OK   [G6] batch caps rejected with 400"
+
       # F-D follow-up: the static run jail can take a tight seccomp ALLOWLIST
       # (DEFAULT KILL) instead of the shared denylist. Prove on a dedicated
       # RUNNER_STATIC_SECCOMP=enforce container that (a) the kafel allowlist

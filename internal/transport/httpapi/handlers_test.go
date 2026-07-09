@@ -35,7 +35,7 @@ func testServer(t *testing.T, token string) http.Handler {
 		},
 		executor.NewPython(sb, 64*1024, 256, 64),
 	)
-	return New(svc, Config{Addr: ":0", Token: token, MaxSourceBytes: 200_000, MaxStdinBytes: 1_000_000, MaxFilesBytes: 1_048_576}).Handler()
+	return New(svc, Config{Addr: ":0", Token: token, MaxSourceBytes: 200_000, MaxStdinBytes: 1_000_000, MaxFilesBytes: 1_048_576, MaxBatch: 100, MaxBatchStdinBytes: 4_000_000}).Handler()
 }
 
 func post(h http.Handler, path, token, body string) *httptest.ResponseRecorder {
@@ -363,5 +363,69 @@ func TestHealthz_NoAuth(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || rec.Body.String() != "ok" {
 		t.Fatalf("healthz should be 200 ok without a token, got %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+// TestRun_BatchEnvelope drives a stdins[] request end-to-end (G6): 200 with the
+// batch envelope — shared provenance, index-aligned raw results, no aborted flag.
+func TestRun_BatchEnvelope(t *testing.T) {
+	requirePython(t)
+	h := testServer(t, "")
+	body, _ := json.Marshal(runnerapi.RunRequest{
+		Language:   "python",
+		SourceCode: "import sys\nprint('got:' + sys.stdin.read().strip())\n",
+		Stdins:     []string{"a", "b"},
+		TimeoutMs:  8000, MemoryMB: 128,
+	})
+	rec := post(h, "/run", "", string(body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("batch must be 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var res runnerapi.BatchResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode batch envelope: %v", err)
+	}
+	if res.Status != runnerapi.BatchStatusOK || res.RuntimeName != "python" || res.Aborted {
+		t.Fatalf("envelope wrong: %+v", res)
+	}
+	if len(res.Results) != 2 || res.Results[0].Stdout != "got:a\n" || res.Results[1].Stdout != "got:b\n" {
+		t.Fatalf("results not index-aligned: %+v", res.Results)
+	}
+}
+
+// TestRun_BatchCaps pins the transport-level batch bounds (G6): input count,
+// per-element stdin size (same cap as a single run), and the summed budget —
+// each a 400 before anything executes.
+func TestRun_BatchCaps(t *testing.T) {
+	sb, err := sandbox.Configure("off", "off", "off", "")
+	if err != nil {
+		t.Fatalf("configure sandbox: %v", err)
+	}
+	svc := executor.NewService(
+		executor.Limits{DefaultTimeout: 3000, MaxTimeoutMs: 10000, DefaultMemory: 128, MaxMemoryMB: 512},
+		executor.NewPython(sb, 64*1024, 256, 64),
+	)
+	h := New(svc, Config{Addr: ":0", MaxSourceBytes: 200_000, MaxStdinBytes: 100, MaxBatch: 2, MaxBatchStdinBytes: 150}).Handler()
+
+	cases := map[string]runnerapi.RunRequest{
+		"too many stdins":       {Language: "python", SourceCode: "print(1)", Stdins: []string{"a", "b", "c"}},
+		"element over the cap":  {Language: "python", SourceCode: "print(1)", Stdins: []string{strings.Repeat("x", 101)}},
+		"total over the budget": {Language: "python", SourceCode: "print(1)", Stdins: []string{strings.Repeat("x", 80), strings.Repeat("x", 80)}},
+	}
+	for name, req := range cases {
+		body, _ := json.Marshal(req)
+		if rec := post(h, "/run", "", string(body)); rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: expected 400, got %d (%s)", name, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// TestRun_BatchStdinExclusive pins the shape rule: stdin and stdins are
+// mutually exclusive (the executor's ValidationError → 400 mapping).
+func TestRun_BatchStdinExclusive(t *testing.T) {
+	h := testServer(t, "")
+	body := `{"language":"python","source_code":"print(1)","stdin":"a","stdins":["b"]}`
+	if rec := post(h, "/run", "", body); rec.Code != http.StatusBadRequest {
+		t.Fatalf("stdin+stdins must be 400, got %d (%s)", rec.Code, rec.Body.String())
 	}
 }

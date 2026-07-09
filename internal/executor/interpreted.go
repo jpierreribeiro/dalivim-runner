@@ -87,7 +87,41 @@ func (r *interpretedRuntime) Run(ctx context.Context, req runnerapi.RunRequest) 
 	if err != nil {
 		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: err.Error()}
 	}
+	return r.execute(ctx, req, workDir, runArgsTail, env)
+}
 
+// RunBatch is the interpreted batch path (G6): the source is written (or the
+// files[] tree materialized) once, then the interpreter is launched once per
+// stdin, each in its own fresh jail. There is no artifact to amortize, so the
+// saving is the repeated HTTP round-trip and source setup — smaller than the
+// compiled win, kept for API symmetry.
+func (r *interpretedRuntime) RunBatch(ctx context.Context, req runnerapi.RunRequest, totalBudgetMs int) runnerapi.BatchResult {
+	start := time.Now()
+
+	workDir, err := os.MkdirTemp("", "dalivim-run-*")
+	if err != nil {
+		return runnerapi.BatchResult{Status: runnerapi.StatusInternalError, Results: []runnerapi.RunResult{}}
+	}
+	defer os.RemoveAll(workDir)
+
+	runArgsTail, env, err := r.prepare(workDir, req)
+	if err != nil {
+		return runnerapi.BatchResult{Status: runnerapi.StatusInternalError, Results: []runnerapi.RunResult{}}
+	}
+
+	results, aborted := batchLoop(ctx, req.Stdins, start, totalBudgetMs, func(ctx context.Context, stdin string) runnerapi.RunResult {
+		rq := req
+		rq.Stdin = stdin
+		return r.execute(ctx, rq, workDir, runArgsTail, env)
+	})
+	return runnerapi.BatchResult{Status: runnerapi.BatchStatusOK, Results: results, Aborted: aborted}
+}
+
+// execute launches one interpreter process in the sandbox against the prepared
+// workDir and classifies the outcome. It is a pure function of (req, workDir,
+// runArgsTail, env): every call builds a fresh timeout ctx, output buffers, and
+// jail, which is what lets RunBatch loop it safely.
+func (r *interpretedRuntime) execute(ctx context.Context, req runnerapi.RunRequest, workDir string, runArgsTail, env []string) runnerapi.RunResult {
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(req.TimeoutMs)*time.Millisecond)
 	defer cancel()
 	// A second, cause-carrying cancel so an output flood can kill the child (via

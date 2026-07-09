@@ -110,7 +110,8 @@ Contenção *dura* por-run vem do `--rlimit_nproc` **dentro do jail** (F-B) + `p
 | `source_code` | string | ✅ | Vazio ou > `RUNNER_MAX_SOURCE_BYTES` → **400**. |
 | `stdin` | string | — | Entrada padrão (vazio = sem entrada). |
 | `timeout_ms` | int | — | `≤0` → default (`RUNNER_DEFAULT_TIMEOUT_MS`); clamped ao teto (`MaxTimeoutMs`). Linguagens podem declarar um piso (G6); o teto global sempre vence. |
-| `memory_mb` | int | — | `≤0` → default; clamped a `MaxMemoryMB`. Piso por linguagem (G6): Java eleva pedidos < 128 MB para 128 (overhead não-heap da JVM); nunca acima do teto. |
+| `memory_mb` | int | — | `≤0` → default; clamped a `MaxMemoryMB`. Piso por linguagem: Java eleva pedidos < 128 MB para 128 (overhead não-heap da JVM); nunca acima do teto. |
+| `stdins` | []string | — | **Batch (G6)**: um programa, N entradas — compila uma vez, executa uma vez por elemento (jail novo a cada execução). Mutuamente exclusivo com `stdin`. Caps: `RUNNER_MAX_BATCH` (contagem), `RUNNER_MAX_STDIN_BYTES` (por elemento), `RUNNER_MAX_BATCH_STDIN_BYTES` (soma) → **400**. A resposta vira um envelope `BatchResult` (status `ok`/`compile_error`, telemetria de compilação compartilhada, `results[]` alinhado por índice, `aborted` quando o orçamento `RUNNER_MAX_BATCH_TOTAL_MS` estoura). |
 
 **Forward-compatible (F-C/F-D):**
 - `compile_timeout_ms` (int, — ): `0` = interpretada (padrão); > 0 = compilada.

@@ -105,6 +105,38 @@ translation units, a package split, sibling modules:
 - See [`docs/G3_MULTIFILE.md`](docs/G3_MULTIFILE.md) for the contract, threat
   model, security checklist, and residual-risk report.
 
+#### Batch execution (`stdins[]`)
+
+Instead of a single `stdin`, a request may carry a `stdins` array: the program is
+prepared **once** — for compiled languages, compiled once — and executed once per
+element, each run in its own fresh jail with per-run limits unchanged. This
+collapses an N-input submission from `N·(compile + run)` to `compile + N·run`.
+`stdin` and `stdins` are mutually exclusive (both → `400`).
+
+```json
+{ "language": "c", "source_code": "…", "stdins": ["1 2", "3 4", "5 6"] }
+```
+
+The response becomes a batch envelope: the shared compile telemetry once, plus
+one raw `RunResult` per input, index-aligned (`results[i]` ran against
+`stdins[i]`):
+
+```json
+{ "status": "ok", "runtime_name": "c", "runtime_version": "13.3.0",
+  "compile_ms": 312,
+  "results": [ { "status": "success", "stdout": "3\n", "…": "…" }, … ] }
+```
+
+- Per-input failures are **independent** — one `timeout` or `runtime_error`
+  never affects the other inputs. A compile failure fails the whole batch once
+  (`"status": "compile_error"`, empty `results`, nothing executed).
+- Inputs run **sequentially** and the batch holds **one** concurrency slot for
+  its whole duration; the batch-wide wall budget (`RUNNER_MAX_BATCH_TOTAL_MS`,
+  compile included) stops an over-long batch with `"aborted": true` and a
+  partial `results` prefix — the caller re-submits the rest.
+- The runner returns **raw** outputs only: it never holds expected output and
+  never renders a verdict — comparison stays in the backend.
+
 `output_limit_exceeded` means the run wrote past the output cap and was **killed**
 for it (rather than truncated and left to burn its timeout): `stdout`/`stderr`
 still carry the captured first `RUNNER_MAX_OUTPUT_BYTES` (with the truncation
@@ -271,6 +303,9 @@ deploy with `RUNNER_SANDBOX=require` is how you prove it engaged.
 | `RUNNER_MAX_PATH_BYTES` | `180` | Multi-file: max length of a single file path; over → `400`. |
 | `RUNNER_MAX_PATH_DEPTH` | `8` | Multi-file: max path nesting (components); over → `400`. |
 | `RUNNER_MAX_OUTPUT_BYTES` | `65536` | Per-stream stdout/stderr capture cap; crossing it kills the run (`output_limit_exceeded`). |
+| `RUNNER_MAX_BATCH` | `100` | Batch: max `stdins[]` inputs in one request; over → `400`. |
+| `RUNNER_MAX_BATCH_TOTAL_MS` | `60000` | Batch: batch-wide wall budget (compile included). Crossing it stops the batch with `aborted: true` and a partial `results` prefix — the containment control against one request holding a concurrency slot for `N × timeout`. |
+| `RUNNER_MAX_BATCH_STDIN_BYTES` | `4000000` | Batch: max summed `stdins[]` bytes (each element also obeys `RUNNER_MAX_STDIN_BYTES`); over → `400`. |
 | `RUNNER_COMPILE_TIMEOUT_MS` / `RUNNER_MAX_COMPILE_TIMEOUT_MS` | `10000` / `20000` | Compiled languages: compile-phase wall/CPU budget + hard cap (separate from execution). |
 | `RUNNER_COMPILE_MEMORY_MB` | `512` | Compiled languages: `RLIMIT_AS`/cgroup for the compiler (tames template/macro bombs). |
 | `RUNNER_MAX_ARTIFACT_MB` | `32` | Compiled languages: reject a compiled artifact larger than this. |
