@@ -124,6 +124,11 @@ var filePolicies = map[string]FilePolicy{
 		ForbiddenComponents: names("node_modules"),
 		DefaultEntry:        "main.js",
 	},
+	"lua": {
+		Language:     "lua",
+		AllowedExts:  exts(".lua"),
+		DefaultEntry: "main.lua",
+	},
 	"c": {
 		Language:     "c",
 		AllowedExts:  exts(".c", ".h"),

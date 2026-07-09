@@ -103,7 +103,7 @@ func TestNode_ReportsVersion(t *testing.T) {
 // no spec inlines source: the argv is fixed flags plus the source FILENAME, and
 // the code is written to a file. Runs without any interpreter.
 func TestSpecRegistry_ArgvIsFileReferenced(t *testing.T) {
-	for _, spec := range []languageSpec{pythonSpec, javascriptSpec} {
+	for _, spec := range []languageSpec{pythonSpec, javascriptSpec, luaSpec} {
 		if spec.name == "" || spec.sourceFile == "" || len(spec.binNames) == 0 || len(spec.runArgs) == 0 {
 			t.Fatalf("spec %+v is missing required fields", spec)
 		}
@@ -124,6 +124,9 @@ func TestVersionParsers(t *testing.T) {
 	}
 	if got := trimLeadingV("v20.11.0\n"); got != "20.11.0" {
 		t.Fatalf("trimLeadingV: got %q", got)
+	}
+	if got := secondField("Lua 5.4.6  Copyright (C) 1994-2023 Lua.org, PUC-Rio\n"); got != "5.4.6" {
+		t.Fatalf("secondField on lua banner: got %q", got)
 	}
 }
 

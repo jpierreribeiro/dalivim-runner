@@ -20,7 +20,7 @@
 #   mem-bomb                                    — ASSERTED FOR EVERY LANGUAGE, but
 #       HOW depends on the memory-bound posture, which this script PROBES from
 #       /readyz (memory_accounting) instead of assuming:
-#         * python/c/cpp get a hard RLIMIT_AS, so a bomb is contained
+#         * python/c/cpp/lua get a hard RLIMIT_AS, so a bomb is contained
 #           DETERMINISTICALLY regardless of cgroup — asserted here in EVERY run.
 #         * go/js/java opt OUT of RLIMIT_AS (they reserve a huge virtual cage a
 #           tight RLIMIT_AS refuses) and are bounded by the delegated cgroup
@@ -34,7 +34,7 @@
 #           the coverage gap is visible, never hidden.
 #
 #       COVERAGE MATRIX (mem-bomb):
-#         python/c/cpp  RLIMIT_AS           contained everywhere (asserted every run)
+#         python/c/cpp/lua  RLIMIT_AS       contained everywhere (asserted every run)
 #         go/js/java    cgroup memory.max   memory_exceeded — asserted where cgroup
 #                                           is engaged (VPS deploy verify +
 #                                           runner-smoke-cgroup); explicitly skipped
@@ -61,7 +61,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # The full language set. Override with ESCAPE_LANGS to run a subset (e.g. when a
 # toolchain is absent in a stripped image).
-LANGS=(${ESCAPE_LANGS:-python javascript c cpp go java})
+LANGS=(${ESCAPE_LANGS:-python javascript c cpp go java lua})
 
 auth=()
 if [ -n "${RUNNER_SERVICE_TOKEN:-}" ]; then
@@ -192,6 +192,19 @@ public class Main {
 }
 JAVA
     ;;
+    lua) cat <<'LUA'
+-- Pure Lua 5.4 has no socket library — a submission cannot open a connection from
+-- Lua itself. Its only network vector is os.execute; we attempt an outbound
+-- connect through it and confirm nothing reaches the net (no OPEN). Containment is
+-- layered: no native sockets, a minimal shell, and the empty netns behind it.
+local function probe(host)
+  local ok = os.execute("cat < /dev/tcp/" .. host .. "/80 >/dev/null 2>&1")
+  return ok and "OPEN" or "blocked"
+end
+print("egress=" .. probe("1.1.1.1"))
+print("metadata=" .. probe("169.254.169.254"))
+LUA
+    ;;
     *) echo "UNSUPPORTED_LANG:$1" >&2; return 1 ;;
   esac
 }
@@ -272,6 +285,16 @@ public class Main {
 }
 JAVA
     ;;
+    lua) cat <<'LUA'
+local out = {}
+for _, p in ipairs({"/usr/pwned", "/bin/pwned", "/app/pwned", "/sandbox/pwned"}) do
+  local f = io.open(p, "w")
+  if f then f:write("x"); f:close(); out[#out+1] = p .. "=WRITTEN"
+  else out[#out+1] = p .. "=denied" end
+end
+print(table.concat(out, " "))
+LUA
+    ;;
     *) echo "UNSUPPORTED_LANG:$1" >&2; return 1 ;;
   esac
 }
@@ -337,6 +360,12 @@ public class Main {
 }
 JAVA
     ;;
+    lua) cat <<'LUA'
+local f = io.open("/etc/shadow", "r")
+if f then f:read("a"); f:close(); print("shadow=readable")
+else print("shadow=denied") end
+LUA
+    ;;
     *) echo "UNSUPPORTED_LANG:$1" >&2; return 1 ;;
   esac
 }
@@ -349,6 +378,7 @@ src_spin() {
     c|cpp)      printf 'int main(void) { for (;;) {} }\n' ;;
     go)         printf 'package main\n\nfunc main() { for {} }\n' ;;
     java)       printf 'public class Main { public static void main(String[] a) { while (true) {} } }\n' ;;
+    lua)        printf 'while true do end\n' ;;
     *) echo "UNSUPPORTED_LANG:$1" >&2; return 1 ;;
   esac
 }
@@ -421,6 +451,10 @@ public class Main {
 }
 JAVA
     ;;
+    # Lua: grow a table until the hard RLIMIT_AS refuses the allocation — PUC-Lua's
+    # allocator raises "not enough memory" (a nonzero exit), contained deterministically
+    # like python/c/cpp. Silent (no per-iteration print) so the output cap can't trip first.
+    lua) printf 'local t = {}\nfor i = 1, 1e9 do t[i] = i end\nprint(#t)\n' ;;
     *) echo "UNSUPPORTED_LANG:$1" >&2; return 1 ;;
   esac
 }
@@ -508,7 +542,7 @@ deferred=()
 for lang in "${LANGS[@]}"; do
   case " $lang " in
     # RLIMIT_AS languages: contained deterministically, every run.
-    " python "|" c "|" cpp ") run_membomb "$lang" ;;
+    " python "|" c "|" cpp "|" lua ") run_membomb "$lang" ;;
     # RLIMIT_AS-incompatible languages: memory_exceeded ONLY under a live cgroup.
     " go "|" javascript "|" java ")
       if [ "$CG_ENGAGED" = 1 ]; then

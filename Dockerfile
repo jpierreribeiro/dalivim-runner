@@ -28,7 +28,7 @@ RUN git clone --depth 1 --branch "${NSJAIL_VERSION}" https://github.com/google/n
 
 # ---- runtime stage: interpreters + nsjail + non-root user ----
 # Bookworm base so the nsjail runtime libs (copied from the build stage above)
-# match ABI. Interpreted runtimes: python3 (in this base) + nodejs (F-C).
+# match ABI. Interpreted runtimes: python3 (in this base) + nodejs (F-C) + lua5.4.
 # Compiled runtimes: gcc/g++ + libc6-dev for STATIC linking (F-D); Go (G2.1) via
 # the toolchain copied from the build stage.
 FROM python:3.12-slim-bookworm
@@ -44,6 +44,7 @@ FROM python:3.12-slim-bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libprotobuf32 libnl-route-3-200 \
       nodejs \
+      lua5.4 \
       gcc g++ libc6-dev \
       openjdk-17-jdk-headless \
  && rm -rf /var/lib/apt/lists/*
