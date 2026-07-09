@@ -259,6 +259,43 @@ jobs:
       - name: G2.1 Go compile error => compile_error (nothing executed)
         run: ./scripts/smoke-run.sh go $'package main\nfunc main(){ undefined() }' '' compile_error
 
+      # ---- G2.2 Java (VM-compiled) on the shipped image ----
+
+      # Ordinary Java: javac compiles Main.java to bytecode in the compile jail, then
+      # the JVM runs it on the FULL-rootfs denylist jail (the third runtime shape) —
+      # println + Collections.sort proving the whole javac->JVM path end to end.
+      - name: G2.2 Java success (Collections.sort) => "6\n"
+        run: |
+          src=$'import java.util.*;\npublic class Main {\n public static void main(String[] a) {\n  List<Integer> xs = new ArrayList<>(List.of(3, 1, 2));\n  Collections.sort(xs);\n  System.out.println(xs.get(0) + xs.get(1) + xs.get(2));\n }\n}'
+          ./scripts/smoke-run.sh java "$src" $'6\n'
+
+      # Java reads stdin via Scanner (shared execute() stdin path).
+      - name: G2.2 Java reads stdin (Scanner) => sum
+        run: |
+          src=$'import java.util.Scanner;\npublic class Main {\n public static void main(String[] a) {\n  Scanner s = new Scanner(System.in);\n  int n = 0; while (s.hasNextInt()) n += s.nextInt();\n  System.out.println(n);\n }\n}'
+          SMOKE_STDIN="$(printf '10 20 12\n')" ./scripts/smoke-run.sh java "$src" $'42\n'
+
+      # Java inherits the jail's empty netns: an outbound Socket connect fails, so
+      # egress is contained (prints "blocked", never "OPEN").
+      - name: G2.2 Java egress contained (empty netns) => "blocked\n"
+        run: |
+          src=$'import java.net.*;\npublic class Main {\n public static void main(String[] a) {\n  try (Socket s = new Socket()) {\n   s.connect(new InetSocketAddress("1.1.1.1", 80), 2000);\n   System.out.println("OPEN");\n  } catch (Exception e) {\n   System.out.println("blocked");\n  }\n }\n}'
+          ./scripts/smoke-run.sh java "$src" $'blocked\n'
+
+      # Java infinite loop is stopped by the wall/CPU limit, reported as timeout.
+      - name: G2.2 Java infinite loop => timeout
+        run: |
+          src=$'public class Main { public static void main(String[] a){ while(true){} } }'
+          body="$(jq -nc --arg s "$src" '{language:"java",source_code:$s,timeout_ms:3000}')"
+          resp="$(curl -fsS localhost:8090/run -H 'content-type: application/json' -d "$body")"
+          echo "$resp" | jq '{status, duration_ms}'
+          echo "$resp" | jq -e '.status=="timeout"' >/dev/null \
+            || { echo "::error::Java infinite loop not stopped by timeout"; exit 1; }
+
+      # A Java compile error short-circuits to compile_error WITHOUT executing.
+      - name: G2.2 Java compile error => compile_error (nothing executed)
+        run: ./scripts/smoke-run.sh java $'public class Main { public static void main(String[] a){ undefined(); } }' '' compile_error
+
       # F-D follow-up: the static run jail can take a tight seccomp ALLOWLIST
       # (DEFAULT KILL) instead of the shared denylist. Prove on a dedicated
       # RUNNER_STATIC_SECCOMP=enforce container that (a) the kafel allowlist

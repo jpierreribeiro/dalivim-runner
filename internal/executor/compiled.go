@@ -60,6 +60,29 @@ type compiledLangSpec struct {
 	// (e.g. /bin/sh for Go's cache-seeding prelude), so the compile builder must NOT
 	// replace it with the resolved compiler binary.
 	compileArgv0Absolute bool
+
+	// artifact is the basename the compile phase must produce, validated to exist
+	// (and size-capped) before the run jail launches. "" defaults to "bin" (the
+	// C/C++/Go static binary); Java's is "Main.class".
+	artifact string
+
+	// runBin, when set, is resolved to an absolute path and used as the run argv[0]
+	// (the VM launcher — Java: ["java"]). Empty for static languages, whose run
+	// argv[0] IS the artifact path ({out}), already absolute.
+	runBin []string
+
+	// runFullRootfs keeps the read-only host rootfs in the RUN jail instead of the
+	// minimal one. FALSE for a static artifact (C/C++/Go: minimal rootfs, no
+	// toolchain — D-4). TRUE for a VM language (Java): the JVM is dynamically linked
+	// and needs its runtime libraries, so it runs on the same full-rootfs posture as
+	// the interpreted languages (contained by ro-rootfs + empty netns + cgroup +
+	// denylist), not the tighter static jail.
+	runFullRootfs bool
+
+	// memErrSubstr is an OOM stderr marker for the no-cgroup fallback classification
+	// (Java: "OutOfMemoryError"), mirroring the interpreted path. Empty relies on the
+	// cgroup OOM event alone.
+	memErrSubstr string
 }
 
 var cSpec = compiledLangSpec{
@@ -139,6 +162,38 @@ var goSpec = compiledLangSpec{
 	compileTmpfsMB: 256,
 }
 
+// javaSpec is the VM-compiled shape (G2.2): javac compiles Main.java to bytecode,
+// then the JVM runs it — the run step is `java -cp {dir} Main`, not "exec the
+// artifact". Java is dynamically linked with a huge syscall surface, so it runs on
+// the DENYLIST and the FULL rootfs (like the interpreted languages), not the tight
+// static jail; and the JVM reserves a large virtual space, so it opts out of
+// RLIMIT_AS and is bounded by -Xmx + the cgroup.
+//
+// Entrypoint convention: the student's public class must be `Main`, written to
+// Main.java (javac ties the filename to the public class name). Multi-class
+// single-file is fine; multiple public classes / packages are G3.
+var javaSpec = compiledLangSpec{
+	name:       "java",
+	sourceFile: "Main.java",
+	artifact:   "Main.class",
+	// javac writes .class files into {dir} (the per-run /sandbox, writable at
+	// compile). {src} is Main.java.
+	compile:  []string{"javac", "-d", "{dir}", "{src}"},
+	binNames: []string{"javac"},
+	// The JVM runs the compiled class. -Xmx{mem}m bounds the heap (the cgroup is the
+	// authoritative OOM); SerialGC + ActiveProcessorCount=1 keep threads/GC minimal
+	// for a judged program; -XX:-UsePerfData avoids the /tmp hsperfdata write (and
+	// its getpwuid on a jail uid with no passwd entry).
+	run:               []string{"-XX:+UseSerialGC", "-XX:-UsePerfData", "-XX:ActiveProcessorCount=1", "-Xmx{mem}m", "-cp", "{dir}", "Main"},
+	runBin:            []string{"java"},
+	runFullRootfs:     true,  // the JVM is dynamically linked — needs its runtime libs
+	capAddressSpace:   false, // the JVM reserves a large virtual space; RLIMIT_AS kills startup
+	staticAllowlistOK: false, // widest syscall surface of any target → denylist
+	memErrSubstr:      "OutOfMemoryError",
+	versionArgs:       []string{"-version"},
+	parseVersion:      parseJavaVersion,
+}
+
 // parseGoVersion pulls the bare version out of `go version` output
 // ("go version go1.26 linux/amd64" → "1.26"), degrading to the trimmed raw
 // string if the shape is unexpected.
@@ -151,9 +206,22 @@ func parseGoVersion(out string) string {
 	return strings.TrimSpace(out)
 }
 
-// artifactName is the compiled binary's basename inside the per-run workdir; it
-// is written by the compile jail and read (read-only) by the run jail.
-const artifactName = "bin"
+// parseJavaVersion pulls the version out of `javac -version` ("javac 21.0.10" →
+// "21.0.10"), or the first dotted-number token, degrading to the trimmed raw
+// string.
+func parseJavaVersion(out string) string {
+	for _, f := range strings.Fields(out) {
+		if len(f) > 0 && f[0] >= '0' && f[0] <= '9' && strings.Contains(f, ".") {
+			return f
+		}
+	}
+	return strings.TrimSpace(out)
+}
+
+// defaultArtifact is the compiled artifact basename when a spec leaves it unset:
+// the C/C++/Go static binary. It is written by the compile jail and read
+// (read-only) by the run jail.
+const defaultArtifact = "bin"
 
 // compiledRuntime executes a compiled language in TWO separate jails: an
 // untrusted compile jail (the compiler is itself hostile input — template/macro
@@ -164,6 +232,8 @@ type compiledRuntime struct {
 	spec             compiledLangSpec
 	sandbox          sandbox.Sandbox
 	compilerBin      string // absolute compiler path (nsjail execve's argv[0] directly)
+	runBin           string // absolute VM launcher path for run argv[0] (Java); "" for static
+	artifact         string // artifact basename produced/validated (spec.artifact or "bin")
 	version          string
 	outputLimit      int
 	maxProcesses     int
@@ -203,10 +273,20 @@ func newCompiled(spec compiledLangSpec, sb sandbox.Sandbox, cfg CompiledConfig) 
 	if !spec.staticAllowlistOK {
 		runSeccomp = sandbox.SeccompDenylist
 	}
+	artifact := spec.artifact
+	if artifact == "" {
+		artifact = defaultArtifact
+	}
+	var runBin string
+	if len(spec.runBin) > 0 {
+		runBin = resolveBin(spec.runBin) // VM launcher (java); nsjail does no PATH search
+	}
 	return &compiledRuntime{
 		spec:             spec,
 		sandbox:          sb,
 		compilerBin:      bin,
+		runBin:           runBin,
+		artifact:         artifact,
 		version:          detectVersion(bin, languageSpec{versionArgs: spec.versionArgs, parseVersion: spec.parseVersion}),
 		outputLimit:      cfg.OutputLimit,
 		maxProcesses:     cfg.MaxProcesses,
@@ -221,6 +301,12 @@ func newCompiled(spec compiledLangSpec, sb sandbox.Sandbox, cfg CompiledConfig) 
 // the denylist (not the static allowlist) and without RLIMIT_AS — see goSpec.
 func NewGo(sb sandbox.Sandbox, cfg CompiledConfig) *compiledRuntime {
 	return newCompiled(goSpec, sb, cfg)
+}
+
+// NewJava builds the Java (VM-compiled) runtime: javac to bytecode, then the JVM
+// runs it on the full-rootfs denylist jail, -Xmx+cgroup bounded — see javaSpec.
+func NewJava(sb sandbox.Sandbox, cfg CompiledConfig) *compiledRuntime {
+	return newCompiled(javaSpec, sb, cfg)
 }
 
 func (r *compiledRuntime) Language() string { return r.spec.name }
@@ -256,10 +342,12 @@ func (r *compiledRuntime) compile(ctx context.Context, req runnerapi.RunRequest,
 	defer cancel()
 
 	srcJail := sandbox.JailPath(r.spec.sourceFile)
-	outJail := sandbox.JailPath(artifactName)
+	outJail := sandbox.JailPath(r.artifact)
 	// Link libraries go AFTER {src} on the line so left-to-right symbol resolution
 	// works regardless of which libs a future language adds (see spec.link).
-	argv := subst(append(append([]string{}, r.spec.compile...), r.spec.link...), srcJail, outJail)
+	// {dir} is the per-run jail workdir (Java's javac -d / -cp target).
+	argv := subst(append(append([]string{}, r.spec.compile...), r.spec.link...),
+		"{src}", srcJail, "{out}", outJail, "{dir}", sandbox.JailMount)
 	if !r.spec.compileArgv0Absolute {
 		argv[0] = r.compilerBin // absolute compiler path; nsjail does no PATH search
 	}
@@ -312,7 +400,7 @@ func (r *compiledRuntime) compile(ctx context.Context, req runnerapi.RunRequest,
 
 	// Validate the artifact: it must exist and stay under the size cap (a compile
 	// bomb that somehow linked huge). Otherwise it is our failure, not the code's.
-	fi, err := os.Stat(filepath.Join(workDir, artifactName))
+	fi, err := os.Stat(filepath.Join(workDir, r.artifact))
 	if err != nil || fi.Size() == 0 {
 		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "compile produced no artifact"}, false
 	}
@@ -322,8 +410,9 @@ func (r *compiledRuntime) compile(ctx context.Context, req runnerapi.RunRequest,
 	return runnerapi.RunResult{}, true
 }
 
-// execute runs the validated static artifact in the stricter, minimal-rootfs run
-// jail (no toolchain, no libs) and classifies the outcome.
+// execute runs the compiled program in the run jail and classifies the outcome.
+// Static languages (C/C++/Go) run the artifact directly in a minimal-rootfs jail;
+// a VM language (Java) runs its launcher on the full-rootfs denylist jail.
 func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest, workDir string) runnerapi.RunResult {
 	rctx, cancel := context.WithTimeout(ctx, time.Duration(req.TimeoutMs)*time.Millisecond)
 	defer cancel()
@@ -332,11 +421,18 @@ func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest,
 	rctx, cancelCause := context.WithCancelCause(rctx)
 	defer cancelCause(nil)
 
-	argv := subst(r.spec.run, "", sandbox.JailPath(artifactName))
+	// {out} is the artifact path (static run argv[0]); {dir} the jail workdir (Java's
+	// -cp target); {mem} the heap budget for the VM's -Xmx flag.
+	argv := subst(r.spec.run,
+		"{out}", sandbox.JailPath(r.artifact), "{dir}", sandbox.JailMount, "{mem}", strconv.Itoa(req.MemoryMB))
+	if r.runBin != "" {
+		argv[0] = r.runBin // absolute VM launcher (java); nsjail does no PATH search
+	}
 
-	// A glibc static binary (C/C++) tolerates a hard RLIMIT_AS; the Go runtime does
-	// not (it reserves a huge virtual arena and dies), so Go opts out and is bounded
-	// by the cgroup memory.max only — see goSpec.capAddressSpace.
+	// A glibc static binary (C/C++) tolerates a hard RLIMIT_AS; the Go runtime and
+	// the JVM do not (they reserve a huge virtual space and die on startup), so they
+	// opt out and are bounded by -Xmx (JVM) + the cgroup memory.max — see
+	// capAddressSpace.
 	runAS := 0
 	if r.spec.capAddressSpace {
 		runAS = req.MemoryMB
@@ -350,16 +446,22 @@ func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest,
 		MaxProcesses:   r.maxProcesses,
 		MaxFileSizeMB:  r.maxFileSizeMB,
 		Writable:       false,
-		MinimalRootfs:  true,         // no toolchain in the run jail (D-4)
-		Seccomp:        r.runSeccomp, // tight static allowlist when enabled (default: denylist)
+		// Static artifacts get the minimal rootfs (no toolchain to re-invoke, D-4); a
+		// dynamically-linked VM needs its runtime libs, so Java keeps the full rootfs
+		// (same posture as the interpreted languages).
+		MinimalRootfs: !r.spec.runFullRootfs,
+		Seccomp:       r.runSeccomp, // tight static allowlist when enabled (default: denylist)
 	})
 	if acct != nil {
 		defer acct.Close()
 	}
 	cmd.Stdin = strings.NewReader(req.Stdin)
 	// The run env is per-language: C/C++ disable glibc rseq (see runEnv); Go pins
-	// GOMAXPROCS. A static artifact otherwise needs no environment.
-	cmd.Env = r.spec.runEnv
+	// GOMAXPROCS; Java needs none. Never nil — an empty non-nil slice keeps the child
+	// from inheriting the runner's environment.
+	if cmd.Env = r.spec.runEnv; cmd.Env == nil {
+		cmd.Env = []string{}
+	}
 
 	onFlood := func() { cancelCause(errOutputLimit) }
 	stdout := &limitedBuffer{limit: r.outputLimit, onLimit: onFlood}
@@ -389,6 +491,9 @@ func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest,
 		res.Status = runnerapi.StatusSuccess
 	case acct != nil && acct.OOMKilled():
 		res.Status = runnerapi.StatusMemoryExceeded
+	case r.spec.memErrSubstr != "" && strings.Contains(res.Stderr, r.spec.memErrSubstr):
+		// No-cgroup fallback: -Xmx bounded the heap and the VM threw OutOfMemoryError.
+		res.Status = runnerapi.StatusMemoryExceeded
 	case errors.Is(context.Cause(rctx), errOutputLimit):
 		res.Status = runnerapi.StatusOutputLimitExceeded
 	default:
@@ -397,9 +502,10 @@ func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest,
 	return res
 }
 
-// subst returns a copy of argv with each {src}/{out} placeholder token replaced.
-func subst(argv []string, src, out string) []string {
-	repl := strings.NewReplacer("{src}", src, "{out}", out)
+// subst returns a copy of argv with each placeholder token replaced. pairs are
+// old,new,old,new… ({src}, {out}, {dir}, {mem} — see the callers).
+func subst(argv []string, pairs ...string) []string {
+	repl := strings.NewReplacer(pairs...)
 	cp := make([]string, len(argv))
 	for i, a := range argv {
 		cp[i] = repl.Replace(a)
