@@ -24,7 +24,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked
 | F-B | `nsjailSandbox`: seccomp, tmpfs-capped `/tmp`, `no_new_privs`, per-jail nproc | [x] done (validated in CI: image builds nsjail, `RUNNER_SANDBOX=require` boots `nsjail ENABLED`, escape corpus contained) |
 | F-C | Interpreted polyglot (Node): `languageSpec` registry + JS runtime on the shared jail | [x] done (unit green; JS smoke + jail-inheritance gated in CI) |
 | F-D | Compiled polyglot (C/C++): compile-jail + run-jail, `signal`, `compile_output` | [ ] todo |
-| F-E / F-F | cgroups accounting, deterministic `memory_exceeded` classification | [ ] todo |
+| F-E / F-F | cgroups accounting, deterministic `memory_exceeded` classification | [x] R6 done (`RUNNER_CGROUP` v2 dial: per-run `memory.max`/`pids.max`, OOM-event classification; VPS-validated). F-F CPU accounting: todo |
 
 ---
 
@@ -196,8 +196,26 @@ Criterion (plan §5): **smoke JS green; JS inherits the jail.**
 
 Fixes **R6** (fragile `memory_exceeded` substring heuristic).
 
-- [ ] cgroups v2 memory/CPU accounting for authoritative `memory_kb`.
-- [ ] Classify `memory_exceeded` from OOM signal / cgroup event, not stderr text.
+- [x] cgroups v2 memory/pids accounting behind the `RUNNER_CGROUP=auto|require|off`
+      dial (`internal/sandbox/cgroup_linux.go`). The runner self-manages each run's
+      leaf cgroup — create → `memory.max`/`pids.max` → clone nsjail in via
+      `CLONE_INTO_CGROUP` (`exec.Cmd.UseCgroupFD`) → read `memory.events`/`memory.peak`
+      → remove — so the OOM counter is readable after the run (nsjail's own
+      `--cgroup` flags delete the cgroup on exit, making it racy). `memory.peak`
+      becomes the authoritative `memory_kb`. Boot probe proves the whole mechanism
+      end-to-end (delegated-child create + limits + clone-into-cgroup); `require`
+      fails closed, `auto` falls back to `RLIMIT_AS`. Dial + parsers unit-tested;
+      cgroup execution is target-validated (no delegated cgroup in `go test`/CI).
+- [x] Classify `memory_exceeded` from the cgroup OOM event (`memory.events`
+      oom_kill/oom_group_kill), not stderr text — authoritative when a cgroup is
+      present; the stderr substring remains only as the no-cgroup fallback. This
+      also gives **Node** a real memory bound (`memory.max` counts RSS, which
+      `RLIMIT_AS` can't apply to V8's virtual cage).
+- [x] Validated on the production VPS: cgroup v2 with `memory`+`pids` delegated to
+      the runner uid; delegation + `child_mkdir`/`memory.max`/`pids.max` proven.
+      Deploy runbook + throwaway validation in `docs/DEPLOY.md` §8b. *(nsjail
+      ENABLED already confirmed in prod — F-B target-validated.)*
+- [ ] F-F: per-run CPU accounting (`cpu.stat`) is future work; not needed for R6.
 
 ---
 
@@ -210,4 +228,4 @@ Fixes **R6** (fragile `memory_exceeded` substring heuristic).
 | R3 | `/tmp` unbounded → host OOM | F-B ✅ closed (tmpfs `/tmp`; CI output-flood truncated, no OOM) |
 | R4 | No `no_new_privs` | F-B ✅ closed (nsjail default; CI `RUNNER_SANDBOX=require` boot asserts jail engaged) |
 | R5 | Runner has no backpressure (never emits 503) | F-A ✅ closed |
-| R6 | `memory_exceeded` from fragile stderr substring | F-E/F-F |
+| R6 | `memory_exceeded` from fragile stderr substring | F-E ✅ closed (cgroup v2 OOM event via `RUNNER_CGROUP`; stderr only the no-cgroup fallback) |

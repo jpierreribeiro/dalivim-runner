@@ -25,7 +25,7 @@ func requireNode(t *testing.T) {
 // guarantee is language-agnostic and already covered in netns_test.go).
 func newNode(t *testing.T) *interpretedRuntime {
 	t.Helper()
-	sb, err := sandbox.Configure("off", "off")
+	sb, err := sandbox.Configure("off", "off", "off", "")
 	if err != nil {
 		t.Fatalf("configure sandbox: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestVersionParsers(t *testing.T) {
 // (netns_test.go). Skips where unprivileged namespaces are unavailable.
 func TestNode_InheritsNetnsJail(t *testing.T) {
 	requireNode(t)
-	sb, err := sandbox.Configure("off", "auto")
+	sb, err := sandbox.Configure("off", "auto", "off", "")
 	if err != nil {
 		t.Fatalf("configure sandbox: %v", err)
 	}

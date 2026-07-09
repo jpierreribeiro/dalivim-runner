@@ -27,7 +27,7 @@ func newPython(t *testing.T) *interpretedRuntime {
 	t.Helper()
 	// netns backend (RUNNER_SANDBOX=off) with network isolation off, so the test
 	// depends on neither nsjail nor the platform permitting namespaces.
-	sb, err := sandbox.Configure("off", "off")
+	sb, err := sandbox.Configure("off", "off", "off", "")
 	if err != nil {
 		t.Fatalf("configure sandbox: %v", err)
 	}

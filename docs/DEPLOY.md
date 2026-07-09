@@ -129,6 +129,77 @@ curl -s 127.0.0.1:8090/run -H "X-Runner-Token: $TOKEN" \
 
 All three passing = the runner is executing untrusted code, contained.
 
+## 8b. (Optional, recommended on a real VPS) Per-run cgroup accounting — R6
+
+On a host where a cgroup v2 subtree can be **delegated** to the runner's uid, each
+run gets its own `memory.max`/`pids.max` and `memory_exceeded` is read from the
+kernel OOM event instead of a stderr substring — authoritative accounting that
+also gives **Node** a hard memory ceiling `RLIMIT_AS` cannot. This is the F-E/R6
+upgrade; it needs cgroup v2 with the `memory`+`pids` controllers (Railway can't
+delegate these, a root VPS can). It is **fail-safe**: without it the runner uses
+the rlimit/heap bound exactly as before, so this section is purely additive.
+
+**Prereqs** (confirm once): `stat -fc %T /sys/fs/cgroup` prints `cgroup2fs`, and
+`cat /sys/fs/cgroup/cgroup.subtree_control` lists `memory` and `pids`. And the
+image must be **built from a version that has R6** — rebuild first (this only
+retags `dalivim-runner`; the running `runner` container is untouched until you
+redeploy it):
+
+```sh
+cd ~/dalivim-runner && git fetch origin && git pull   # or: git checkout <branch>
+docker build -t dalivim-runner .                      # add --network=host if apt DNS fails
+```
+
+```sh
+# 1) Delegate a writable subtree to the runner's IN-CONTAINER uid (1000).
+sudo mkdir -p /sys/fs/cgroup/dalivim
+echo "+memory +pids" | sudo tee /sys/fs/cgroup/dalivim/cgroup.subtree_control
+sudo chown -R 1000:1000 /sys/fs/cgroup/dalivim
+
+# 2) PROVE it end-to-end on a throwaway before touching the real runner: a Node
+#    memory bomb must come back memory_exceeded (the case rlimits could not catch).
+#    --cgroupns=host is required so the delegated subtree is in the container's
+#    cgroup namespace; the -v bind-mounts it read-write over Docker's ro cgroupfs.
+docker run -d --name runner-cgtest --rm \
+  -e RUNNER_ENV=development \
+  -e RUNNER_SANDBOX=require \
+  -e RUNNER_CGROUP=require \
+  -e RUNNER_CGROUP_MOUNT=/sys/fs/cgroup/dalivim \
+  --cgroupns=host \
+  -v /sys/fs/cgroup/dalivim:/sys/fs/cgroup/dalivim \
+  --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+  --pids-limit=512 --cpus=1 --memory=1g \
+  -p 8091:8090 dalivim-runner
+
+sleep 2
+docker logs runner-cgtest 2>&1 | grep -E "nsjail ENABLED|cgroup memory accounting ENABLED"
+#   -> both lines must appear; "require" would have crashed the container otherwise
+
+curl -s 127.0.0.1:8091/run -H 'content-type: application/json' \
+  -d '{"language":"javascript","source_code":"const a=[];while(true){a.push(new Array(1e6).fill(7))}"}'
+#   -> {"status":"memory_exceeded",...}   (was runtime_error before R6)
+
+docker rm -f runner-cgtest
+```
+
+If step 2 shows `cgroup memory accounting ENABLED` and `memory_exceeded`, re-run
+the **section 7** `docker run` for the real `runner` with these four additions,
+and it will use cgroups automatically:
+
+```sh
+  -e RUNNER_CGROUP=require \
+  -e RUNNER_CGROUP_MOUNT=/sys/fs/cgroup/dalivim \
+  --cgroupns=host \
+  -v /sys/fs/cgroup/dalivim:/sys/fs/cgroup/dalivim \
+```
+
+Notes: the delegation is **not** persistent across reboot — re-run the three step-1
+commands on boot (a `tmpfiles.d`/systemd oneshot is the durable way; ask if you
+want it). `--cgroupns=host` lets the container see the host cgroup tree (read-only
+except the delegated subtree); the runner still runs as non-root uid 1000 with no
+added caps. If you'd rather stay conservative, use `RUNNER_CGROUP=auto` instead of
+`require` — it turns cgroups on when present and silently falls back otherwise.
+
 ## 9. Expose over HTTPS (Caddy) + firewall
 
 The backend (Railway) reaches the runner over the public internet, so it must be

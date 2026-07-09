@@ -24,7 +24,7 @@ func requirePython(t *testing.T) {
 // testServer builds a real server (isolation off) with the given token.
 func testServer(t *testing.T, token string) http.Handler {
 	t.Helper()
-	sb, err := sandbox.Configure("off", "off")
+	sb, err := sandbox.Configure("off", "off", "off", "")
 	if err != nil {
 		t.Fatalf("configure sandbox: %v", err)
 	}

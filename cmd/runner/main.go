@@ -44,7 +44,7 @@ func main() {
 	// fork ("errno=11") on a busy host. Per-run process caps belong to the nsjail
 	// backend (--rlimit_nproc against a jail-private uid); overload is bounded
 	// instead by the transport's concurrency limit (RUNNER_MAX_CONCURRENT_RUNS).
-	sb, err := sandbox.Configure(cfg.SandboxPolicy, cfg.NetworkPolicy)
+	sb, err := sandbox.Configure(cfg.SandboxPolicy, cfg.NetworkPolicy, cfg.CgroupPolicy, cfg.CgroupMount)
 	if err != nil {
 		slog.Error("sandbox", "err", err)
 		os.Exit(1)

@@ -51,6 +51,14 @@ type Spec struct {
 	// memory limit. CPython tolerates the hard cap, so Python passes its budget.
 	AddressSpaceMB int
 
+	// MemoryMB is the run's real-memory budget in MB. When the nsjail backend has a
+	// delegated cgroup v2 subtree (F-E/R6), it becomes the per-run `memory.max`:
+	// authoritative RSS accounting that bounds runtimes RLIMIT_AS cannot (V8/Node)
+	// and lets `memory_exceeded` be classified from the kernel OOM event instead of
+	// a stderr substring. 0, or no delegated cgroup, leaves it unenforced here and
+	// the AddressSpaceMB/heap-flag path remains the only bound.
+	MemoryMB int
+
 	// MaxProcesses is the per-run process cap for fork-bomb containment
 	// (RLIMIT_NPROC inside the jail). Honoured only by the nsjail backend against
 	// a jail-private uid; the netns backend ignores it on purpose — a process-wide
@@ -64,6 +72,31 @@ type Spec struct {
 	MaxFileSizeMB int
 }
 
+// RunAccounting exposes authoritative per-run resource facts a backend gathered
+// out-of-band — today, cgroup v2 memory accounting under the nsjail backend. It
+// is returned alongside the command and consulted AFTER the run completes:
+//
+//	cmd, acct := sb.Command(ctx, spec)
+//	if acct != nil { defer acct.Close() }
+//	... run cmd ...
+//	if acct != nil && acct.OOMKilled() { /* memory_exceeded, authoritatively */ }
+//
+// A nil RunAccounting means the backend has no out-of-band accounting for this
+// run (no delegated cgroup, or the netns/stub backend); callers must nil-check.
+type RunAccounting interface {
+	// OOMKilled reports whether the kernel OOM-killed a process in this run's
+	// cgroup (memory.events oom_kill/oom_group_kill > 0). This is the
+	// deterministic memory_exceeded signal that replaces the stderr heuristic.
+	OOMKilled() bool
+
+	// PeakMemoryKB is the run's peak memory (cgroup memory.peak) in KiB, or 0 when
+	// unavailable — authoritative RSS, unlike the best-effort getrusage Maxrss.
+	PeakMemoryKB() int
+
+	// Close releases the per-run cgroup. Safe to call exactly once after the run.
+	Close()
+}
+
 // Sandbox is the containment backend. Command turns a Spec into a ready-to-run
 // command with every OS-level control applied; the caller only wires I/O.
 // Implementations are safe for concurrent use (state is resolved once at
@@ -71,8 +104,10 @@ type Spec struct {
 type Sandbox interface {
 	// Command builds the contained command for one run, bound to ctx for the
 	// wall-clock deadline. It sets the process group and cancel-kill so a timeout
-	// takes down the whole tree; it does not touch Stdin/Env/Stdout/Stderr.
-	Command(ctx context.Context, spec Spec) *exec.Cmd
+	// takes down the whole tree; it does not touch Stdin/Env/Stdout/Stderr. The
+	// returned RunAccounting is non-nil only when the backend attached out-of-band
+	// accounting (a per-run cgroup) to this command; callers must nil-check it.
+	Command(ctx context.Context, spec Spec) (*exec.Cmd, RunAccounting)
 
 	// NetworkIsolated reports whether runs execute with egress denied by THIS
 	// process (empty network namespace), independent of the deploy network.

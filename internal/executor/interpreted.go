@@ -97,14 +97,18 @@ func (r *interpretedRuntime) Run(ctx context.Context, req runnerapi.RunRequest) 
 		addressSpaceMB = req.MemoryMB
 	}
 
-	cmd := r.sandbox.Command(ctx, sandbox.Spec{
+	cmd, acct := r.sandbox.Command(ctx, sandbox.Spec{
 		Argv:           argv,
 		WorkDir:        workDir,
 		TimeoutMs:      req.TimeoutMs,
 		AddressSpaceMB: addressSpaceMB,
+		MemoryMB:       req.MemoryMB, // cgroup memory.max when a delegated cgroup is present
 		MaxProcesses:   r.maxProcesses,
 		MaxFileSizeMB:  r.maxFileSizeMB,
 	})
+	if acct != nil {
+		defer acct.Close()
+	}
 	cmd.Stdin = strings.NewReader(req.Stdin)
 	cmd.Env = r.spec.env
 
@@ -121,23 +125,39 @@ func (r *interpretedRuntime) Run(ctx context.Context, req runnerapi.RunRequest) 
 		Stdout:     stdout.String(),
 		Stderr:     stderr.String(),
 		DurationMs: duration,
-		MemoryKB:   sandbox.MaxRSSkb(cmd),
+		MemoryKB:   memoryKB(acct, cmd),
 	}
 	if cmd.ProcessState != nil {
 		res.ExitCode = cmd.ProcessState.ExitCode()
 	}
 
+	// Classification order: a clean exit is success regardless of anything else;
+	// otherwise the cgroup OOM event is the AUTHORITATIVE memory verdict (F-E/R6),
+	// and the stderr substring is only the fallback for the no-cgroup path.
 	switch {
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		res.Status = runnerapi.StatusTimeout
 	case runErr == nil:
 		res.Status = runnerapi.StatusSuccess
+	case acct != nil && acct.OOMKilled():
+		res.Status = runnerapi.StatusMemoryExceeded
 	case r.spec.memErrSubstr != "" && strings.Contains(res.Stderr, r.spec.memErrSubstr):
 		res.Status = runnerapi.StatusMemoryExceeded
 	default:
 		res.Status = runnerapi.StatusRuntimeError
 	}
 	return res
+}
+
+// memoryKB prefers the cgroup's authoritative peak (memory.peak) when a delegated
+// cgroup accounted the run, falling back to the best-effort getrusage Maxrss.
+func memoryKB(acct sandbox.RunAccounting, cmd *exec.Cmd) int {
+	if acct != nil {
+		if peak := acct.PeakMemoryKB(); peak > 0 {
+			return peak
+		}
+	}
+	return sandbox.MaxRSSkb(cmd)
 }
 
 // resolveBin resolves the first available interpreter to an ABSOLUTE path. The
