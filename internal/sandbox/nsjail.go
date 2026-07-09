@@ -16,10 +16,16 @@ import "strconv"
 // creation and posix_spawn, so killing it breaks the interpreter itself. Fork
 // bombs are contained by --rlimit_nproc + the concurrency cap, not by blocking
 // the clone family.
+//
+// The unmount syscall is spelled `umount` here, not `umount2`: kafel's amd64
+// table names syscall 166 (the only unmount syscall on x86-64) `umount`, and it
+// rejects the identifier `umount2` at policy-compile time — which, with
+// RUNNER_SANDBOX=require, fails the boot probe closed. Caught by the CI smoke
+// job the first time nsjail actually ran.
 const seccompPolicy = `POLICY dalivim {
 	KILL {
 		ptrace, process_vm_readv, process_vm_writev,
-		mount, umount2, pivot_root, chroot,
+		mount, umount, pivot_root, chroot,
 		kexec_load, init_module, finit_module, delete_module,
 		bpf, setns, unshare,
 		add_key, keyctl, request_key,
