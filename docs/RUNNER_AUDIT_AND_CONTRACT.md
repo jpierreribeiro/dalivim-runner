@@ -146,7 +146,7 @@ Go). Fallback dispara **apenas** em `errors.Is(err, contract.ErrProviderUnavaila
 | **Deadline coordenada do Gateway estourou** (pendurado) | — | N/A | **Sim** | Provider não respondeu → falha infra. |
 | **Runner inalcançável / 5xx** | 000/5xx | N/A | **Sim** | Falha de provider. |
 | Runner responde **JSON inválido** | 200 | N/A | ⚠️ **Não** | `ErrDecode` ≠ `ErrProviderUnavailable`; requer fix (2.4.1). |
-| Runner falha init de sandbox (mkdtemp fail) | 200 | `internal_error` | ⚠️ **Não** | Sem erro Go → sem fallback (2.4.1). |
+| Runner falha init de sandbox (mkdtemp fail) | **503** | `internal_error` | ✅ **Sim** | Runner emite `503` + `Retry-After` para `internal_error` (§2.4.1 **implementado**); 5xx é fallback-elegível. |
 
 #### 2.4.1 Dois problemas de clareza (armadilhas)
 
@@ -156,14 +156,18 @@ Go). Fallback dispara **apenas** em `errors.Is(err, contract.ErrProviderUnavaila
 - **Garantia:** o runner deve sempre responder *antes* da deadline coordenada do Gateway
   (timeout_ms + margem_rede). Lógica de deadline no Gateway: [gateway.go](../../dalivim-backend/backend/internal/runner/gateway.go#L120).
 
-**Armadilha 2: falha de infra que devolve 200 não faz fallback**
-- Hoje: falha de init de sandbox por-run (mkdtemp fail) → `200 {status:internal_error}`.
-- Gateway trata como terminal → **não** cai pro Judge0.
-- **Recomendação (alinhada a "falha fechado"):** runner deve emitir **`503`** para
-  suas próprias falhas de infra por-run (sandbox não subiu, jail não engatou).
-  Reservar `200 + internal_error` para genuinamente irrecuperável.
-  - **Alternativa (menos limpa):** Gateway tratar `StatusInternalError`-resultado como
-    fallback-elegível — mas isso mexe no core.
+**Armadilha 2: falha de infra que devolve 200 não faz fallback — ✅ RESOLVIDO**
+- Antes: falha de init de sandbox por-run (mkdtemp fail) → `200 {status:internal_error}`,
+  que o Gateway tratava como terminal → **não** caía pro fallback.
+- **Implementado (`httpapi.handler.execute`):** um resultado com
+  `status == internal_error` (a falha de infra do PRÓPRIO runner — o sandbox/jail
+  não subiu para aquele run) agora é servido como **`503` + `Retry-After`**, não
+  `200`. O corpo ainda carrega o `RunResult` para log. Desfechos determinísticos do
+  aluno (`success`/`runtime_error`/`timeout`/`memory_exceeded`/`compile_error`)
+  permanecem `200` — repetir não mudaria o resultado. Assim o Gateway (que já cai
+  no fallback em 5xx, §2.4) passa a poder desviar em falha de infra do runner, sem
+  tocar o core. Testes: `handlers_test.go`
+  (`TestRun_InternalErrorIsFailover`, `TestRun_StudentOutcomesStay200`).
 
 #### 2.4.2 Melhorias forward-compatible
 

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -131,6 +132,61 @@ func TestRun_TokenRequired(t *testing.T) {
 	requirePython(t)
 	if rec := post(h, "/run", "sekret", body); rec.Code != http.StatusOK {
 		t.Fatalf("correct token must be accepted, got %d", rec.Code)
+	}
+}
+
+// fixedRuntime is a stub Runtime that returns a preset result, so the transport's
+// status→HTTP mapping can be tested without a real interpreter.
+type fixedRuntime struct{ res runnerapi.RunResult }
+
+func (fixedRuntime) Language() string { return "python" }
+func (fixedRuntime) Version() string  { return "0.0.0" }
+func (f fixedRuntime) Run(context.Context, runnerapi.RunRequest) runnerapi.RunResult {
+	return f.res
+}
+
+func serverWithRuntime(rt executor.Runtime) http.Handler {
+	svc := executor.NewService(
+		executor.Limits{DefaultTimeout: 3000, MaxTimeoutMs: 10000, DefaultMemory: 128, MaxMemoryMB: 512},
+		rt,
+	)
+	return New(svc, Config{Addr: ":0", MaxSourceBytes: 200_000}).Handler()
+}
+
+// TestRun_InternalErrorIsFailover pins RUNNER_AUDIT_AND_CONTRACT §2.4.1: the
+// runner's OWN per-run infra failure (internal_error) must surface as 503 +
+// Retry-After so the Gateway can fall back, not a terminal 200.
+func TestRun_InternalErrorIsFailover(t *testing.T) {
+	h := serverWithRuntime(fixedRuntime{res: runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "sandbox down"}})
+	rec := post(h, "/run", "", `{"language":"python","source_code":"x"}`)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("internal_error must be 503 for failover, got %d", rec.Code)
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Fatal("503 must carry a Retry-After header")
+	}
+	// The body still carries the RunResult for a Gateway that logs it.
+	var res runnerapi.RunResult
+	if err := json.NewDecoder(rec.Body).Decode(&res); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if res.Status != runnerapi.StatusInternalError {
+		t.Fatalf("body should still carry internal_error, got %q", res.Status)
+	}
+}
+
+// TestRun_StudentOutcomesStay200 confirms deterministic student-code outcomes are
+// NOT turned into failover 5xx — only the runner's own infra failure is.
+func TestRun_StudentOutcomesStay200(t *testing.T) {
+	for _, status := range []string{
+		runnerapi.StatusSuccess, runnerapi.StatusRuntimeError,
+		runnerapi.StatusTimeout, runnerapi.StatusMemoryExceeded,
+	} {
+		h := serverWithRuntime(fixedRuntime{res: runnerapi.RunResult{Status: status}})
+		rec := post(h, "/run", "", `{"language":"python","source_code":"x"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %q must stay 200, got %d", status, rec.Code)
+		}
 	}
 }
 
