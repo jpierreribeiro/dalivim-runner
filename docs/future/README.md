@@ -15,19 +15,44 @@ means the perfect *executor*, never absorbing the judge.
 
 ## Roadmap at a glance
 
+**Wave 1 — the original roadmap.** G1, G2, and G4 are **merged to `main`**; G3 is
+in progress.
+
+| Phase | Theme | Value | Size | Breaks contract? | Status |
+|---|---|---|---|---|---|
+| **[G1](G1-executor-robustness.md)** | Executor correctness & robustness | 🔴 high | small | no (adds one status) | ✅ merged |
+| **[G2](G2-language-coverage.md)** | Language coverage — Go, Java | 🟡 high | medium | no (additive) | ✅ merged |
+| **[G3](G3-multi-file-submissions.md)** | Multi-file submissions | 🟠 high | large | **yes** (adds `files[]`) | 🔨 in progress |
+| **[G4](G4-observability.md)** | Observability & operability | 🟢 medium | medium | no | ✅ merged |
+| **[G5](G5-deferred.md)** | Deferred / demand-gated | ⚪ low | — | — | — |
+
+**Wave 2 — correctness & operability at scale.** What makes the runner a *great*
+executor for a grading platform, not just a correct one. Each item was
+code-grounded before planning — two of the four candidate directions turned out to
+be **already done** (graceful drain, escape corpus), so G8 captures only the real
+residuals.
+
 | Phase | Theme | Value | Size | Breaks contract? |
 |---|---|---|---|---|
-| **[G1](G1-executor-robustness.md)** | Executor correctness & robustness | 🔴 high | small | no (adds one status) |
-| **[G2](G2-language-coverage.md)** | Language coverage — Go, Java | 🟡 high | medium | no (additive) |
-| **[G3](G3-multi-file-submissions.md)** ✅ | Multi-file submissions (runner side done — see [G3_MULTIFILE.md](../G3_MULTIFILE.md)) | 🟠 high | large | **yes** (adds `files[]`) |
-| **[G4](G4-observability.md)** | Observability & operability | 🟢 medium | medium | no |
-| **[G5](G5-deferred.md)** | Deferred / demand-gated | ⚪ low | — | — |
-| **[G6](G6-per-language-limits.md)** | Per-language limit floors (promoted from G5) | 🟢 medium | small | no |
+| **[G6](G6-batch-execution.md)** | Batch execution (compile-once, run N stdins) | ⚪ gated¹ | medium | no (additive `stdins[]`) |
+| **[G7](G7-execution-determinism.md)** | Execution determinism (locale / TZ / env) | 🟢 hygiene¹ | **XS/S** | no |
+| **[G8](G8-ops-containment-maintenance.md)** | Ops & containment maintenance | 🟢 medium | small | no |
+
+| Guide | | | | |
+|---|---|---|---|---|
 | **[Adding a language](ADDING-A-LANGUAGE.md)** | Extension guide (the 3 runtime shapes) | — | — | — |
 
-Recommended order is the value order above: **G1 → G2 → G3 → G4**. G1 is small and
-removes real student-facing bugs; do it first. G3 is the biggest and touches the
-backend; schedule it deliberately.
+¹ **Grounded correction (2026-07-09).** A backend sweep found the platform has
+**no judge today** — no expected-output/test-case model, no output comparison, one
+run per submission. That **demand-gates G6** (batch `stdins[]` has no caller until a
+test-case model exists) and **reframes G7** from "fixes silent WA" to cheap hygiene
+that becomes a prerequisite once judging lands.
+
+Recommended order for Wave 2: **G8 → G7 → G6**. G8's residuals (esp. token rotation
+and the language-parametrized escape corpus) are real now; G7 is cheap hygiene to
+bank ahead of any judge; G6 waits on the backend judge decision. The higher-leverage
+near-term work is now at the **system** level (seam consolidation, runner migration,
+abuse/quota hardening) — tracked outside this runner-only roadmap.
 
 ## How each spec is written
 
