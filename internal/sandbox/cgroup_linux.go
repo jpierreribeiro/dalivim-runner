@@ -83,16 +83,35 @@ func probeCgroup(mount string) (*cgroupManager, string, bool) {
 
 	// Prove the mechanism real runs depend on end to end: clone a throwaway
 	// process straight into the leaf cgroup (CLONE_INTO_CGROUP via UseCgroupFD).
-	// mkdir+write can succeed while this still fails — most often a cgroup-namespace
-	// mismatch (the container needs --cgroupns=host so the delegated subtree is in
-	// its cgroup namespace). Catching it here makes RUNNER_CGROUP=require fail
-	// closed at boot instead of breaking the first real run.
+	// mkdir+write (above) proves we OWN the leaf, but the clone additionally needs
+	// write access to the common ancestor of the runner's own cgroup and the
+	// target — so it fails EPERM when the runner's cgroup sits OUTSIDE the
+	// delegated subtree (its common ancestor is then the root, owned by uid 0),
+	// even though --cgroupns=host is set and the leaf is chowned. Catching it here
+	// makes RUNNER_CGROUP=require fail closed at boot with an actionable reason
+	// instead of breaking the first real run.
 	probe := exec.Command("/bin/true")
 	probe.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: rc.fd()}
 	if err := probe.Run(); err != nil {
-		return nil, fmt.Sprintf("could not launch a process into the delegated cgroup under %q (a container likely needs --cgroupns=host): %v", mount, err), false
+		return nil, fmt.Sprintf("could not launch a process into the delegated cgroup under %q: %v — CLONE_INTO_CGROUP needs write access to the common ancestor of the runner's own cgroup (%s) and the target, so the runner's cgroup must live INSIDE the delegated subtree. Start the container within it (Docker: --cgroup-parent=%s, which needs the cgroupfs driver — the systemd driver wants a delegated .slice instead) so they share a writable ancestor; a chown of the leaf alone is not enough. (--cgroupns=host is also required.)",
+			mount, err, selfCgroup(), filepath.Base(mount)), false
 	}
 	return m, "", true
+}
+
+// selfCgroup returns the runner's own cgroup v2 path (the "0::<path>" line of
+// /proc/self/cgroup), or "unknown" — used to explain a CLONE_INTO_CGROUP EPERM.
+func selfCgroup() string {
+	b, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		return "unknown"
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if path, ok := strings.CutPrefix(line, "0::"); ok {
+			return path
+		}
+	}
+	return "unknown"
 }
 
 // begin creates one run's leaf cgroup, applies its limits, and opens the
