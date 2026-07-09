@@ -29,7 +29,8 @@ RUN git clone --depth 1 --branch "${NSJAIL_VERSION}" https://github.com/google/n
 # ---- runtime stage: interpreters + nsjail + non-root user ----
 # Bookworm base so the nsjail runtime libs (copied from the build stage above)
 # match ABI. Interpreted runtimes: python3 (in this base) + nodejs (F-C).
-# Compiled runtimes: gcc/g++ + libc6-dev for STATIC linking (F-D).
+# Compiled runtimes: gcc/g++ + libc6-dev for STATIC linking (F-D); Go (G2.1) via
+# the toolchain copied from the build stage.
 FROM python:3.12-slim-bookworm
 # nsjail's runtime shared libraries (protobuf + libnl-route); the Node interpreter
 # for the JavaScript runtime (bookworm's v18 supports --disable-proto=throw); and
@@ -55,6 +56,25 @@ RUN useradd --create-home --shell /usr/sbin/nologin runner
 RUN mkdir /sandbox
 COPY --from=build       /runner         /usr/local/bin/runner
 COPY --from=nsjail-build /nsjail/nsjail /usr/local/bin/nsjail
+# Go toolchain (G2.1) for the `go` compile jail. The go command and its sub-tools
+# are statically-linked Go programs, portable from the alpine build stage to this
+# bookworm base; CGO_ENABLED=0 builds never touch the host libc. The toolchain is
+# bound into the COMPILE jail only (read-only rootfs); the minimal-rootfs run jail
+# runs the resulting static artifact and never sees it.
+COPY --from=build       /usr/local/go   /usr/local/go
+ENV PATH="/usr/local/go/bin:${PATH}"
+# Pre-warm a read-only Go build cache (G2.1) covering the common stdlib a judged
+# program imports. Each run gets a FRESH tmpfs GOCACHE, so without this every Go
+# compile would pay a ~14 s cold stdlib rebuild (over the compile budget). The Go
+# compile jail seeds its writable /tmp/gocache from this (see goSpec); a warm build
+# is ~0.3 s. World-readable so the jail-private uid can copy it.
+RUN set -eux; \
+    mkdir -p /opt/gowarm; \
+    printf 'package main\nimport (\n_ "bufio"\n_ "bytes"\n_ "container/heap"\n_ "container/list"\n_ "encoding/json"\n_ "errors"\n_ "fmt"\n_ "math"\n_ "math/rand"\n_ "net"\n_ "os"\n_ "regexp"\n_ "sort"\n_ "strconv"\n_ "strings"\n_ "sync"\n_ "time"\n)\nfunc main(){}\n' > /opt/gowarm/warm.go; \
+    cd /opt/gowarm; \
+    CGO_ENABLED=0 GOCACHE=/opt/gocache GOPATH=/opt/gopath GOTOOLCHAIN=local GOENV=off go build -o /dev/null warm.go; \
+    chmod -R a+rX /opt/gocache; \
+    rm -rf /opt/gowarm /opt/gopath
 USER runner
 EXPOSE 8090
 ENTRYPOINT ["/usr/local/bin/runner"]

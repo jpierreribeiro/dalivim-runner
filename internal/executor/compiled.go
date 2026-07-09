@@ -27,6 +27,39 @@ type compiledLangSpec struct {
 	link       []string // link libraries appended AFTER {src} (e.g. "-lm"); order matters
 	run        []string // {out}-templated run argv; runs in the stricter run jail
 	binNames   []string // compiler lookup candidates (for version provenance)
+
+	// compileEnv is extra environment for the COMPILE jail, appended to the base
+	// PATH+TMPDIR (e.g. Go's isolated GOCACHE/GOPATH under the size-capped /tmp).
+	compileEnv []string
+	// runEnv is the environment for the RUN jail (a static artifact needs almost
+	// none; C/C++ disable glibc rseq for the seccomp allowlist).
+	runEnv []string
+	// capAddressSpace applies a hard RLIMIT_AS (== MemoryMB) to the run jail. True
+	// for C/C++ (a static glibc binary tolerates it). FALSE for Go: the Go runtime
+	// reserves a huge virtual arena at startup and dies under any RLIMIT_AS ("failed
+	// to reserve page summary memory"), exactly like V8 — so Go is bounded by the
+	// cgroup memory.max only, despite being a static binary.
+	capAddressSpace bool
+	// staticAllowlistOK is whether this language MAY run under the tight static
+	// seccomp allowlist. True for C/C++. FALSE for Go: its scheduler needs clone and
+	// a wider syscall set than the C allowlist names, so Go stays on the denylist
+	// (still strong: ro-rootfs + empty netns + no_new_privs + cgroup).
+	staticAllowlistOK bool
+
+	// versionArgs/parseVersion detect the compiler version for provenance (gcc
+	// -dumpfullversion vs `go version`); parseVersion turns the raw output into the
+	// reported runtime_version.
+	versionArgs  []string
+	parseVersion func(string) string
+
+	// compileTmpfsMB sizes the compile jail's /tmp when the toolchain needs more
+	// scratch than nsjail's default (Go's GOCACHE). 0 keeps the default.
+	compileTmpfsMB int
+
+	// compileArgv0Absolute means compile[0] is already an absolute path to execve
+	// (e.g. /bin/sh for Go's cache-seeding prelude), so the compile builder must NOT
+	// replace it with the resolved compiler binary.
+	compileArgv0Absolute bool
 }
 
 var cSpec = compiledLangSpec{
@@ -43,15 +76,79 @@ var cSpec = compiledLangSpec{
 	link:     []string{"-lm"},
 	run:      []string{"{out}"},
 	binNames: []string{"gcc", "cc"},
+	// Disable glibc's rseq registration so __libc_start_main doesn't issue the rseq
+	// syscall — nsjail 3.4's kafel cannot name rseq for the static allowlist, and
+	// rseq is a pure perf optimisation. Harmless under the denylist too.
+	runEnv:            []string{"GLIBC_TUNABLES=glibc.pthread.rseq=0"},
+	capAddressSpace:   true,
+	staticAllowlistOK: true,
+	versionArgs:       []string{"-dumpfullversion"},
+	parseVersion:      strings.TrimSpace,
 }
 
 var cppSpec = compiledLangSpec{
 	name:       "cpp",
 	sourceFile: "main.cpp",
 	// No explicit link libs: the g++ driver folds -lm in and links libstdc++.
-	compile:  []string{"g++", "-O2", "-static", "-std=c++20", "-o", "{out}", "{src}"},
+	compile:           []string{"g++", "-O2", "-static", "-std=c++20", "-o", "{out}", "{src}"},
+	run:               []string{"{out}"},
+	binNames:          []string{"g++"},
+	runEnv:            []string{"GLIBC_TUNABLES=glibc.pthread.rseq=0"},
+	capAddressSpace:   true,
+	staticAllowlistOK: true,
+	versionArgs:       []string{"-dumpfullversion"},
+	parseVersion:      strings.TrimSpace,
+}
+
+var goSpec = compiledLangSpec{
+	name:       "go",
+	sourceFile: "main.go",
+	// `go build` of a single file needs no go.mod (module/multi-file is G3).
+	// CGO_ENABLED=0 yields a pure-static binary (no libc link), so the run jail
+	// stays minimal-rootfs like C/C++.
+	//
+	// Every run gets a FRESH tmpfs /tmp, so GOCACHE would be cold on every compile —
+	// a cold single-file build recompiles the stdlib deps and takes ~14 s on one
+	// CPU, blowing the compile budget. So the compile seeds a writable /tmp/gocache
+	// from the image's pre-warmed read-only /opt/gocache (Dockerfile), which turns a
+	// warm build into ~0.3 s. The copy runs in the jail via /bin/sh; the argv is
+	// absolute so nsjail execve's it directly (compileArgv0Absolute).
+	// cp -r (not -a): the jail-private uid can't preserve root ownership, and -a
+	// would exit non-zero trying, breaking the && chain. -r copies content with the
+	// files owned by the jail uid and the dirs writable, which is what go build needs.
+	compile:  []string{"/bin/sh", "-c", "cp -r /opt/gocache /tmp/gocache && exec go build -o {out} {src}"},
 	run:      []string{"{out}"},
-	binNames: []string{"g++"},
+	binNames: []string{"go"},
+	compileEnv: []string{
+		"CGO_ENABLED=0",
+		"GOCACHE=/tmp/gocache", // seeded from /opt/gocache by the compile prelude
+		"GOPATH=/tmp/gopath",
+		"GOTOOLCHAIN=local", // no network toolchain fetch (the jail has no egress)
+		"GOENV=off",         // no $HOME dependency the compile jail doesn't have
+	},
+	compileArgv0Absolute: true,
+	// GOMAXPROCS=1 keeps the scheduler to one OS thread — fewer clone/thread churn
+	// under the denylist and the per-run pids cap, plenty for judged programs.
+	runEnv:            []string{"GOMAXPROCS=1"},
+	capAddressSpace:   false, // Go dies under RLIMIT_AS; cgroup memory.max bounds it
+	staticAllowlistOK: false, // Go's scheduler needs a wider syscall set → denylist
+	versionArgs:       []string{"version"},
+	parseVersion:      parseGoVersion,
+	// The seeded GOCACHE (~40 MB) plus incremental build output lives on /tmp; give
+	// the compile jail a roomy tmpfs so it doesn't hit "no space left".
+	compileTmpfsMB: 256,
+}
+
+// parseGoVersion pulls the bare version out of `go version` output
+// ("go version go1.26 linux/amd64" → "1.26"), degrading to the trimmed raw
+// string if the shape is unexpected.
+func parseGoVersion(out string) string {
+	for _, f := range strings.Fields(out) {
+		if v, ok := strings.CutPrefix(f, "go"); ok && len(v) > 0 && v[0] >= '0' && v[0] <= '9' {
+			return v
+		}
+	}
+	return strings.TrimSpace(out)
 }
 
 // artifactName is the compiled binary's basename inside the per-run workdir; it
@@ -99,18 +196,31 @@ func NewCpp(sb sandbox.Sandbox, cfg CompiledConfig) *compiledRuntime {
 
 func newCompiled(spec compiledLangSpec, sb sandbox.Sandbox, cfg CompiledConfig) *compiledRuntime {
 	bin := resolveBin(spec.binNames)
+	// A language that cannot take the tight static allowlist is pinned to the
+	// denylist regardless of RUNNER_STATIC_SECCOMP, so enabling the allowlist for
+	// C/C++ never SIGSYS-kills a Go run for a syscall the C set omits.
+	runSeccomp := cfg.RunSeccomp
+	if !spec.staticAllowlistOK {
+		runSeccomp = sandbox.SeccompDenylist
+	}
 	return &compiledRuntime{
 		spec:             spec,
 		sandbox:          sb,
 		compilerBin:      bin,
-		version:          detectVersion(bin, languageSpec{versionArgs: []string{"-dumpfullversion"}, parseVersion: strings.TrimSpace}),
+		version:          detectVersion(bin, languageSpec{versionArgs: spec.versionArgs, parseVersion: spec.parseVersion}),
 		outputLimit:      cfg.OutputLimit,
 		maxProcesses:     cfg.MaxProcesses,
 		maxFileSizeMB:    cfg.MaxFileSizeMB,
 		compileMemoryMB:  cfg.CompileMemoryMB,
 		maxArtifactBytes: cfg.MaxArtifactBytes,
-		runSeccomp:       cfg.RunSeccomp,
+		runSeccomp:       runSeccomp,
 	}
+}
+
+// NewGo builds the Go runtime. It reuses the two-jail compiled flow but runs on
+// the denylist (not the static allowlist) and without RLIMIT_AS — see goSpec.
+func NewGo(sb sandbox.Sandbox, cfg CompiledConfig) *compiledRuntime {
+	return newCompiled(goSpec, sb, cfg)
 }
 
 func (r *compiledRuntime) Language() string { return r.spec.name }
@@ -150,24 +260,37 @@ func (r *compiledRuntime) compile(ctx context.Context, req runnerapi.RunRequest,
 	// Link libraries go AFTER {src} on the line so left-to-right symbol resolution
 	// works regardless of which libs a future language adds (see spec.link).
 	argv := subst(append(append([]string{}, r.spec.compile...), r.spec.link...), srcJail, outJail)
-	argv[0] = r.compilerBin // absolute path; nsjail does no PATH search
+	if !r.spec.compileArgv0Absolute {
+		argv[0] = r.compilerBin // absolute compiler path; nsjail does no PATH search
+	}
 
+	// The Go toolchain (`go build`) is itself a Go program and dies under any
+	// RLIMIT_AS the same way its output does, so the compile jail skips the
+	// address-space cap for a language that opts out and leans on the cgroup
+	// memory.max (compileMemoryMB) instead.
+	compileAS := 0
+	if r.spec.capAddressSpace {
+		compileAS = r.compileMemoryMB
+	}
 	cmd, acct := r.sandbox.Command(cctx, sandbox.Spec{
 		Argv:           argv,
 		WorkDir:        workDir,
 		TimeoutMs:      timeout,
-		AddressSpaceMB: r.compileMemoryMB,
+		AddressSpaceMB: compileAS,
 		MemoryMB:       r.compileMemoryMB,
 		MaxProcesses:   r.maxProcesses,
 		MaxFileSizeMB:  r.maxFileSizeMB,
+		TmpfsSizeMB:    r.spec.compileTmpfsMB,
 		Writable:       true, // the compiler writes its artifact into /sandbox
 		MinimalRootfs:  false,
 	})
 	if acct != nil {
 		defer acct.Close()
 	}
-	// TMPDIR so gcc's intermediates land in the size-capped tmpfs /tmp.
-	cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "TMPDIR=/tmp"}
+	// PATH includes the Go toolchain dir; TMPDIR so gcc/go intermediates land in
+	// the size-capped tmpfs /tmp. Per-language compileEnv adds e.g. Go's isolated
+	// GOCACHE/GOPATH.
+	cmd.Env = append([]string{"PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin", "TMPDIR=/tmp"}, r.spec.compileEnv...)
 	stderr := &limitedBuffer{limit: r.outputLimit}
 	cmd.Stderr = stderr
 	cmd.Stdout = &limitedBuffer{limit: r.outputLimit}
@@ -211,11 +334,18 @@ func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest,
 
 	argv := subst(r.spec.run, "", sandbox.JailPath(artifactName))
 
+	// A glibc static binary (C/C++) tolerates a hard RLIMIT_AS; the Go runtime does
+	// not (it reserves a huge virtual arena and dies), so Go opts out and is bounded
+	// by the cgroup memory.max only — see goSpec.capAddressSpace.
+	runAS := 0
+	if r.spec.capAddressSpace {
+		runAS = req.MemoryMB
+	}
 	cmd, acct := r.sandbox.Command(rctx, sandbox.Spec{
 		Argv:           argv,
 		WorkDir:        workDir,
 		TimeoutMs:      req.TimeoutMs,
-		AddressSpaceMB: req.MemoryMB, // a static binary tolerates a hard RLIMIT_AS
+		AddressSpaceMB: runAS,
 		MemoryMB:       req.MemoryMB,
 		MaxProcesses:   r.maxProcesses,
 		MaxFileSizeMB:  r.maxFileSizeMB,
@@ -227,12 +357,9 @@ func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest,
 		defer acct.Close()
 	}
 	cmd.Stdin = strings.NewReader(req.Stdin)
-	// A static artifact needs no environment, except: disable glibc's rseq
-	// registration so __libc_start_main doesn't issue the rseq syscall — nsjail
-	// 3.4's kafel cannot name rseq for the static seccomp allowlist, and rseq is a
-	// pure perf optimisation, so turning it off costs nothing and keeps the
-	// allowlist tight. Harmless under the denylist too.
-	cmd.Env = []string{"GLIBC_TUNABLES=glibc.pthread.rseq=0"}
+	// The run env is per-language: C/C++ disable glibc rseq (see runEnv); Go pins
+	// GOMAXPROCS. A static artifact otherwise needs no environment.
+	cmd.Env = r.spec.runEnv
 
 	onFlood := func() { cancelCause(errOutputLimit) }
 	stdout := &limitedBuffer{limit: r.outputLimit, onLimit: onFlood}

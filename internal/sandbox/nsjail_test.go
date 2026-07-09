@@ -137,6 +137,30 @@ func TestNsjailArgs_ZeroAddressSpaceOmitsRlimitAS(t *testing.T) {
 	}
 }
 
+// TestNsjailArgs_TmpfsSize pins the Go compile path: TmpfsSizeMB sizes /tmp via
+// the arbitrary-mount form (nsjail 3.4 has no --tmpfs_size flag) so a cold
+// `go build` fits its GOCACHE; 0 leaves the plain --tmpfsmount at nsjail's default.
+func TestNsjailArgs_TmpfsSize(t *testing.T) {
+	spec := sampleSpec()
+	spec.TmpfsSizeMB = 256
+	args := nsjailArgs(1000, 1000, spec)
+	if got := argValue(args, "--mount"); got != "none:/tmp:tmpfs:size=268435456" {
+		t.Fatalf("TmpfsSizeMB=256 must size /tmp via --mount, got %q", got)
+	}
+	if hasArg(args, "--tmpfsmount") {
+		t.Fatal("a sized /tmp uses --mount, not the default --tmpfsmount")
+	}
+
+	spec.TmpfsSizeMB = 0
+	zero := nsjailArgs(1000, 1000, spec)
+	if !pairAt(zero, "--tmpfsmount", "/tmp") {
+		t.Fatal("TmpfsSizeMB=0 must use the default --tmpfsmount /tmp")
+	}
+	if hasArg(zero, "--mount") {
+		t.Fatal("TmpfsSizeMB=0 must not emit a sized --mount")
+	}
+}
+
 // pairAt reports whether args contains flag immediately followed by value.
 func pairAt(args []string, flag, value string) bool {
 	for i := 0; i+1 < len(args); i++ {
