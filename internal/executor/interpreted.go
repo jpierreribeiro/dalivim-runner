@@ -61,6 +61,12 @@ func newInterpreted(spec languageSpec, sb sandbox.Sandbox, outputLimit, maxProce
 func (r *interpretedRuntime) Language() string { return r.spec.name }
 func (r *interpretedRuntime) Version() string  { return r.version }
 
+// LimitFloors exposes the spec's per-language limit floors (G6); zero values
+// mean the service's clamped limits are used as-is.
+func (r *interpretedRuntime) LimitFloors() Floors {
+	return Floors{TimeoutMs: r.spec.minTimeoutMs, MemoryMB: r.spec.minMemoryMB}
+}
+
 // Run writes the source to a throwaway directory and executes it under the
 // sandbox: its own process group, an empty network namespace (when available), a
 // wall-clock deadline, a CPU-seconds cap, and an address-space cap. Timeout and

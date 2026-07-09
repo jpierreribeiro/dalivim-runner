@@ -22,6 +22,7 @@ means the perfect *executor*, never absorbing the judge.
 | **[G3](G3-multi-file-submissions.md)** | Multi-file submissions | 🟠 high | large | **yes** (adds `files[]`) |
 | **[G4](G4-observability.md)** | Observability & operability | 🟢 medium | medium | no |
 | **[G5](G5-deferred.md)** | Deferred / demand-gated | ⚪ low | — | — |
+| **[G6](G6-per-language-limits.md)** | Per-language limit floors (promoted from G5) | 🟢 medium | small | no |
 | **[Adding a language](ADDING-A-LANGUAGE.md)** | Extension guide (the 3 runtime shapes) | — | — | — |
 
 Recommended order is the value order above: **G1 → G2 → G3 → G4**. G1 is small and

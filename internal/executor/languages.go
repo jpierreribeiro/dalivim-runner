@@ -63,6 +63,13 @@ type languageSpec struct {
 	// memoryArgs returns per-run interpreter flags derived from the memory budget
 	// (MB), inserted before runArgs. nil when the language needs none.
 	memoryArgs func(memoryMB int) []string
+
+	// minTimeoutMs/minMemoryMB are optional per-language floors on the clamped
+	// request limits (G6), raised in the service layer and never above the global
+	// ceilings. 0 = no floor. No interpreted language needs one today; the seam
+	// mirrors compiledLangSpec, where the JVM's baseline overhead does.
+	minTimeoutMs int
+	minMemoryMB  int
 }
 
 // pythonSpec runs CPython in isolated mode. Behaviour-identical to the original

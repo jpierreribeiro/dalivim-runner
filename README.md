@@ -64,8 +64,11 @@ Response:
 `status` ∈ `success | runtime_error | timeout | memory_exceeded | compile_error |
 output_limit_exceeded | internal_error`. Only `language` and `source_code` are
 required; each limit falls back to the service default and is clamped to the hard
-ceiling. Unknown language → `400`. Oversized `source_code` or `stdin` → `400`
-(bad request, not a run outcome).
+ceiling. A language may declare a *floor* on a limit (Java floors `memory_mb` at
+128 — the JVM's non-heap overhead sits on top of `-Xmx`, so a smaller budget
+cannot start the VM); an undersized request is lifted to the floor, never past
+the global ceiling. Unknown language → `400`. Oversized `source_code` or `stdin`
+→ `400` (bad request, not a run outcome).
 
 `output_limit_exceeded` means the run wrote past the output cap and was **killed**
 for it (rather than truncated and left to burn its timeout): `stdout`/`stderr`
