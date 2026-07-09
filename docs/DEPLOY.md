@@ -221,21 +221,63 @@ container is still outside the subtree (check `--cgroup-parent` and the driver).
 ### Cut the real runner over
 
 Once the throwaway shows `cgroup memory accounting ENABLED` + `memory_exceeded`,
-re-run the **section 7** `docker run` for the real `runner` with these additions:
+re-run the **section 7** `docker run` for the real `runner` with these additions.
+Start with `RUNNER_CGROUP=auto` — it uses the cgroup when present and falls back to
+rlimits otherwise, so it is safe even before persistence is set up:
 
 ```sh
   --cgroup-parent=/dalivim \
   --cgroupns=host \
   -v /sys/fs/cgroup/dalivim:/sys/fs/cgroup/dalivim \
-  -e RUNNER_CGROUP=require \
+  -e RUNNER_CGROUP=auto \
   -e RUNNER_CGROUP_MOUNT=/sys/fs/cgroup/dalivim \
 ```
 
-Notes: the delegation is **not** persistent across reboot — re-run the step-1
-commands on boot (a `tmpfiles.d` entry or a systemd oneshot is the durable way;
-ask if you want it). The container still runs as non-root uid 1000 with no added
-caps. Prefer `RUNNER_CGROUP=auto` over `require` if you want the runner to boot
-even when the delegation isn't in place (it just falls back to rlimits).
+Switch that `auto` to `require` **only after** the reboot-safe step below — with
+`require`, a missing subtree fails the boot closed, which downs the runner on the
+next reboot unless the subtree is recreated automatically.
+
+### Make it reboot-safe — REQUIRED before you switch to `require`
+
+> **`/sys/fs/cgroup` is tmpfs: the delegated subtree is gone after every reboot.**
+> With `RUNNER_CGROUP=require` + `--restart unless-stopped` and no persistence, a
+> reboot means: subtree gone → Docker restarts the runner → the R6 boot probe
+> finds no delegated cgroup → **fail-closed → the runner does not come back up**
+> until you re-create the subtree by hand. So `require` without the unit below is
+> an availability time bomb, not hardening. Stay on `RUNNER_CGROUP=auto` until the
+> subtree is recreated automatically on every boot.
+
+Recreate the delegated subtree **before Docker starts**, with a systemd oneshot:
+
+```ini
+# /etc/systemd/system/dalivim-cgroup.service
+[Unit]
+Description=Delegate a cgroup v2 subtree to the dalivim runner (uid 1000)
+Before=docker.service
+After=sysinit.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/mkdir -p /sys/fs/cgroup/dalivim
+ExecStart=/bin/sh -c 'echo "+cpu +memory +pids" > /sys/fs/cgroup/dalivim/cgroup.subtree_control'
+ExecStart=/usr/bin/chown -R 1000:1000 /sys/fs/cgroup/dalivim
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+sudo systemctl daemon-reload && sudo systemctl enable --now dalivim-cgroup.service
+# prove it survives a reboot BEFORE trusting require:
+sudo reboot                          # then, after it's back:
+stat /sys/fs/cgroup/dalivim && ls -ld /sys/fs/cgroup/dalivim   # exists, owned by 1000
+```
+
+**Only after** the subtree is recreated automatically on boot, flip the real
+runner to `-e RUNNER_CGROUP=require` — now the fail-closed behaviour is a feature
+(it refuses to run untrusted code without the memory ceiling) rather than a
+reboot trap, because the cgroup is guaranteed present.
+
+The container runs as non-root uid 1000 with no added caps throughout.
 
 ## 9. Expose over HTTPS (Caddy) + firewall
 
