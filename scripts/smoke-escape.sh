@@ -67,7 +67,10 @@ try:
         f.read()
 except OSError:
     shadow = "denied"
-allowed = {"PATH", "PYTHONUNBUFFERED"}
+# The runner sets exactly PATH + PYTHONUNBUFFERED on the child; CPython then
+# injects LC_CTYPE itself via PEP 538 locale coercion when it starts in a C
+# locale. Anything OUTSIDE this set would be a genuine host-env leak.
+allowed = {"PATH", "PYTHONUNBUFFERED", "LC_CTYPE"}
 leaked = sorted(k for k in os.environ if k not in allowed)
 print("shadow=" + shadow)
 print("leaked=" + (",".join(leaked) or "none"))
