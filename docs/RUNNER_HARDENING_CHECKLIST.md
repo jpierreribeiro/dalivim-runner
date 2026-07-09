@@ -215,6 +215,13 @@ Fixes **R6** (fragile `memory_exceeded` substring heuristic).
       the runner uid; delegation + `child_mkdir`/`memory.max`/`pids.max` proven.
       Deploy runbook + throwaway validation in `docs/DEPLOY.md` §8b. *(nsjail
       ENABLED already confirmed in prod — F-B target-validated.)*
+    - **Deploy finding (VPS):** `CLONE_INTO_CGROUP` needs write on the common
+      ancestor of the runner's own cgroup and the target leaf, so the container
+      must be **born inside** the delegated subtree (`--cgroup-parent`) — chowning
+      the leaf alone yields `EPERM`; and the systemd cgroup driver fights a
+      hand-`mkdir`'d subtree (use the cgroupfs driver or a delegated `.slice`). The
+      boot probe catches this end-to-end and `require` fails closed; its error now
+      names the runner's own cgroup and the `--cgroup-parent` remedy. §8b updated.
 - [ ] F-F: per-run CPU accounting (`cpu.stat`) is future work; not needed for R6.
 
 ---

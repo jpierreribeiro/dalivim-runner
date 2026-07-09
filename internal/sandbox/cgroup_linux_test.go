@@ -5,6 +5,7 @@ package sandbox
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -35,6 +36,19 @@ func TestCgroupLabel(t *testing.T) {
 	}
 	if got := cgroupLabel(&cgroupManager{parent: "/sys/fs/cgroup/dalivim"}); got != "cgroup-v2:/sys/fs/cgroup/dalivim" {
 		t.Fatalf("cgroupLabel = %q", got)
+	}
+}
+
+// TestSelfCgroup reports the runner's own cgroup path (used to explain a
+// CLONE_INTO_CGROUP EPERM); on any cgroup v2 host it is an absolute path, and it
+// degrades to "unknown" rather than erroring.
+func TestSelfCgroup(t *testing.T) {
+	got := selfCgroup()
+	if got == "" {
+		t.Fatal("selfCgroup() must never be empty")
+	}
+	if got != "unknown" && !strings.HasPrefix(got, "/") {
+		t.Fatalf("selfCgroup() = %q, want an absolute path or \"unknown\"", got)
 	}
 }
 

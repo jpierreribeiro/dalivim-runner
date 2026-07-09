@@ -134,71 +134,108 @@ All three passing = the runner is executing untrusted code, contained.
 On a host where a cgroup v2 subtree can be **delegated** to the runner's uid, each
 run gets its own `memory.max`/`pids.max` and `memory_exceeded` is read from the
 kernel OOM event instead of a stderr substring — authoritative accounting that
-also gives **Node** a hard memory ceiling `RLIMIT_AS` cannot. This is the F-E/R6
-upgrade; it needs cgroup v2 with the `memory`+`pids` controllers (Railway can't
-delegate these, a root VPS can). It is **fail-safe**: without it the runner uses
-the rlimit/heap bound exactly as before, so this section is purely additive.
+also gives **Node** a hard memory ceiling `RLIMIT_AS` cannot. It needs cgroup v2
+with the `memory`+`pids` controllers (Railway can't delegate these, a root VPS
+can). It is **fail-safe**: without it the runner uses the rlimit/heap bound
+exactly as before.
 
-**Prereqs** (confirm once): `stat -fc %T /sys/fs/cgroup` prints `cgroup2fs`, and
-`cat /sys/fs/cgroup/cgroup.subtree_control` lists `memory` and `pids`. And the
-image must be **built from a version that has R6** — rebuild first (this only
-retags `dalivim-runner`; the running `runner` container is untouched until you
-redeploy it):
+**Ship prod now with `RUNNER_CGROUP=auto`** (or leave it unset — `auto` is the
+default). If no delegated cgroup is present it silently falls back to rlimits, and
+your `--memory=1g` on the container is already a coarse OOM ceiling. Turning on the
+full per-run accounting below is a maintenance-window task; don't block the launch
+on it.
+
+### The one gotcha: the runner's cgroup must live INSIDE the delegated subtree
+
+`CLONE_INTO_CGROUP` (how the runner places nsjail into a run's cgroup) requires
+write access to the **common ancestor** of the runner's own cgroup and the target
+leaf. If the runner's cgroup is a *sibling* of the delegated subtree (the default —
+its Docker scope lives under `system.slice`), the common ancestor is the **root**
+`/sys/fs/cgroup` (root:root) and uid 1000 gets `permission denied` — a `chown` of
+the leaf alone cannot fix it. The container must be **born inside** the subtree via
+`--cgroup-parent`, so the common ancestor becomes the delegated (uid-1000-owned)
+node. This also means the delegation approach depends on Docker's cgroup driver:
+
+```sh
+docker info --format '{{.CgroupDriver}}'    # cgroupfs  or  systemd
+```
+
+- **`cgroupfs`** (recipe below): a plain delegated directory + `--cgroup-parent`
+  works. Simplest on a box dedicated to the runner.
+- **`systemd`** (Ubuntu 24.04 default): systemd owns the hierarchy, so a hand-made
+  `/sys/fs/cgroup/dalivim` fights it. Either switch the driver to `cgroupfs` (step 0
+  below — fine for a single-purpose runner box) or delegate a real
+  `dalivim.slice` with `Delegate=yes` and pass `--cgroup-parent=dalivim.slice`
+  (more moving parts; ask and I'll write the unit).
+
+**Rebuild the image from an R6 version first** (only retags `dalivim-runner`; the
+live container is untouched until you redeploy it):
 
 ```sh
 cd ~/dalivim-runner && git fetch origin && git pull   # or: git checkout <branch>
 docker build -t dalivim-runner .                      # add --network=host if apt DNS fails
 ```
 
+### Full enable (cgroupfs-driver route)
+
 ```sh
-# 1) Delegate a writable subtree to the runner's IN-CONTAINER uid (1000).
+# 0) Use the cgroupfs driver (skip if `docker info` already shows cgroupfs).
+#    NOTE: restarting docker restarts your containers — do it in a window.
+echo '{ "exec-opts": ["native.cgroupdriver=cgroupfs"] }' | sudo tee /etc/docker/daemon.json
+sudo systemctl restart docker
+docker info --format '{{.CgroupDriver}}'              # -> cgroupfs
+
+# 1) Delegate a writable subtree to the runner's in-container uid (1000).
 sudo mkdir -p /sys/fs/cgroup/dalivim
 echo "+memory +pids" | sudo tee /sys/fs/cgroup/dalivim/cgroup.subtree_control
 sudo chown -R 1000:1000 /sys/fs/cgroup/dalivim
 
-# 2) PROVE it end-to-end on a throwaway before touching the real runner: a Node
-#    memory bomb must come back memory_exceeded (the case rlimits could not catch).
-#    --cgroupns=host is required so the delegated subtree is in the container's
-#    cgroup namespace; the -v bind-mounts it read-write over Docker's ro cgroupfs.
-docker run -d --name runner-cgtest --rm \
+# 2) PROVE it end-to-end on a throwaway (NO --rm, so a fail-closed boot leaves
+#    logs to read). The key flag is --cgroup-parent=/dalivim: it puts the
+#    container's OWN cgroup under the delegated subtree, so the common ancestor
+#    with the per-run leaves is /dalivim (uid 1000), and CLONE_INTO_CGROUP passes.
+docker run -d --name runner-cgtest \
+  --cgroup-parent=/dalivim \
+  --cgroupns=host \
+  -v /sys/fs/cgroup/dalivim:/sys/fs/cgroup/dalivim \
   -e RUNNER_ENV=development \
   -e RUNNER_SANDBOX=require \
   -e RUNNER_CGROUP=require \
   -e RUNNER_CGROUP_MOUNT=/sys/fs/cgroup/dalivim \
-  --cgroupns=host \
-  -v /sys/fs/cgroup/dalivim:/sys/fs/cgroup/dalivim \
   --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
   --pids-limit=512 --cpus=1 --memory=1g \
   -p 8091:8090 dalivim-runner
 
 sleep 2
-docker logs runner-cgtest 2>&1 | grep -E "nsjail ENABLED|cgroup memory accounting ENABLED"
-#   -> both lines must appear; "require" would have crashed the container otherwise
-
+docker logs runner-cgtest 2>&1 | tail -30     # want: nsjail ENABLED + cgroup memory accounting ENABLED
 curl -s 127.0.0.1:8091/run -H 'content-type: application/json' \
-  -d '{"language":"javascript","source_code":"const a=[];while(true){a.push(new Array(1e6).fill(7))}"}'
+  -d '{"language":"javascript","source_code":"const a=[];while(true){a.push(new Array(1e6).fill(7))}"}'; echo
 #   -> {"status":"memory_exceeded",...}   (was runtime_error before R6)
-
 docker rm -f runner-cgtest
 ```
 
-If step 2 shows `cgroup memory accounting ENABLED` and `memory_exceeded`, re-run
-the **section 7** `docker run` for the real `runner` with these four additions,
-and it will use cgroups automatically:
+If the container exits at boot, `docker logs` prints exactly why (with `require`
+it fails closed) — a persisting `permission denied` on the clone means the
+container is still outside the subtree (check `--cgroup-parent` and the driver).
+
+### Cut the real runner over
+
+Once the throwaway shows `cgroup memory accounting ENABLED` + `memory_exceeded`,
+re-run the **section 7** `docker run` for the real `runner` with these additions:
 
 ```sh
-  -e RUNNER_CGROUP=require \
-  -e RUNNER_CGROUP_MOUNT=/sys/fs/cgroup/dalivim \
+  --cgroup-parent=/dalivim \
   --cgroupns=host \
   -v /sys/fs/cgroup/dalivim:/sys/fs/cgroup/dalivim \
+  -e RUNNER_CGROUP=require \
+  -e RUNNER_CGROUP_MOUNT=/sys/fs/cgroup/dalivim \
 ```
 
-Notes: the delegation is **not** persistent across reboot — re-run the three step-1
-commands on boot (a `tmpfiles.d`/systemd oneshot is the durable way; ask if you
-want it). `--cgroupns=host` lets the container see the host cgroup tree (read-only
-except the delegated subtree); the runner still runs as non-root uid 1000 with no
-added caps. If you'd rather stay conservative, use `RUNNER_CGROUP=auto` instead of
-`require` — it turns cgroups on when present and silently falls back otherwise.
+Notes: the delegation is **not** persistent across reboot — re-run the step-1
+commands on boot (a `tmpfiles.d` entry or a systemd oneshot is the durable way;
+ask if you want it). The container still runs as non-root uid 1000 with no added
+caps. Prefer `RUNNER_CGROUP=auto` over `require` if you want the runner to boot
+even when the delegation isn't in place (it just falls back to rlimits).
 
 ## 9. Expose over HTTPS (Caddy) + firewall
 
