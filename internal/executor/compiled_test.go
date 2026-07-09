@@ -12,14 +12,19 @@ import (
 // depends on — only whole placeholder tokens are replaced, order preserved.
 func TestSubst(t *testing.T) {
 	got := subst([]string{"gcc", "-O2", "-static", "-o", "{out}", "{src}"},
-		"/sandbox/main.c", "/sandbox/bin")
+		"{src}", "/sandbox/main.c", "{out}", "/sandbox/bin")
 	want := []string{"gcc", "-O2", "-static", "-o", "/sandbox/bin", "/sandbox/main.c"}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("subst = %v, want %v", got, want)
 	}
 	// The run argv has only {out}.
-	if r := subst([]string{"{out}"}, "", "/sandbox/bin"); r[0] != "/sandbox/bin" {
+	if r := subst([]string{"{out}"}, "{out}", "/sandbox/bin"); r[0] != "/sandbox/bin" {
 		t.Fatalf("run subst = %v", r)
+	}
+	// Java's {dir}/{mem} placeholders.
+	j := subst([]string{"-Xmx{mem}m", "-cp", "{dir}", "Main"}, "{dir}", "/sandbox", "{mem}", "128")
+	if strings.Join(j, " ") != "-Xmx128m -cp /sandbox Main" {
+		t.Fatalf("java subst = %v", j)
 	}
 }
 
@@ -54,7 +59,7 @@ func TestCompiledLinkFlags(t *testing.T) {
 		t.Fatalf("cpp must not add explicit link libs, got %v", cppSpec.link)
 	}
 	// Mirror the compile()-time render: compile argv + link, then substitute.
-	argv := subst(append(append([]string{}, cSpec.compile...), cSpec.link...), "/sandbox/main.c", "/sandbox/bin")
+	argv := subst(append(append([]string{}, cSpec.compile...), cSpec.link...), "{src}", "/sandbox/main.c", "{out}", "/sandbox/bin")
 	joined := strings.Join(argv, " ")
 	want := "gcc -O2 -static -o /sandbox/bin /sandbox/main.c -lm"
 	if joined != want {
@@ -109,6 +114,55 @@ func TestCompiledSeccompPerLanguage(t *testing.T) {
 	}
 	if got := newCompiled(goSpec, nil, cfg).runSeccomp; got != sandbox.SeccompDenylist {
 		t.Fatalf("Go must be forced to the denylist regardless of config, got %v", got)
+	}
+}
+
+// TestJavaSpec pins G2.2's VM-compiled shape: compile to Main.class, run the JVM
+// (not the artifact) on the FULL rootfs + denylist, no RLIMIT_AS (-Xmx + cgroup),
+// with the OOM stderr marker for the no-cgroup path.
+func TestJavaSpec(t *testing.T) {
+	if javaSpec.sourceFile != "Main.java" || javaSpec.artifact != "Main.class" {
+		t.Fatalf("java entrypoint convention must be Main.java → Main.class: %q/%q", javaSpec.sourceFile, javaSpec.artifact)
+	}
+	if !javaSpec.runFullRootfs {
+		t.Fatal("java run jail must keep the full rootfs (the JVM is dynamically linked)")
+	}
+	if javaSpec.capAddressSpace {
+		t.Fatal("java must NOT cap address space: the JVM dies under RLIMIT_AS")
+	}
+	if javaSpec.staticAllowlistOK {
+		t.Fatal("java must stay on the denylist (widest syscall surface)")
+	}
+	if len(javaSpec.runBin) == 0 || javaSpec.runBin[0] != "java" {
+		t.Fatalf("java run argv0 must resolve the java launcher: %v", javaSpec.runBin)
+	}
+	if javaSpec.memErrSubstr != "OutOfMemoryError" {
+		t.Fatalf("java needs the OutOfMemoryError marker for the no-cgroup path: %q", javaSpec.memErrSubstr)
+	}
+	joinedRun := strings.Join(javaSpec.run, " ")
+	for _, want := range []string{"-Xmx{mem}m", "-cp {dir}", "Main"} {
+		if !strings.Contains(joinedRun, want) {
+			t.Fatalf("java run must contain %q: %v", want, javaSpec.run)
+		}
+	}
+	// Java uses the denylist even if the allowlist is enabled, and its run argv0 is
+	// the resolved java launcher, not the artifact.
+	if got := newCompiled(javaSpec, nil, CompiledConfig{RunSeccomp: sandbox.SeccompStaticEnforce}).runSeccomp; got != sandbox.SeccompDenylist {
+		t.Fatalf("java must be forced to the denylist, got %v", got)
+	}
+}
+
+// TestParseJavaVersion pins the `javac -version` → version parse.
+func TestParseJavaVersion(t *testing.T) {
+	cases := map[string]string{
+		"javac 21.0.10":   "21.0.10",
+		"javac 17.0.9\n":  "17.0.9",
+		"nonsense output": "nonsense output",
+	}
+	for in, want := range cases {
+		if got := parseJavaVersion(in); got != want {
+			t.Fatalf("parseJavaVersion(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

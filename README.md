@@ -73,12 +73,17 @@ still carry the captured first `RUNNER_MAX_OUTPUT_BYTES` (with the truncation
 marker) and `duration_ms` is well under the timeout. It is additive — a caller
 that does not special-case it sees an unsuccessful run with partial output.
 
-**Languages:** `python`, `javascript` (interpreted), `c`, `cpp`, `go` (compiled).
-C is linked against libm, so ordinary `<math.h>` (`sqrt`, `pow`, …) works. `go`
-compiles a single `main.go` with `CGO_ENABLED=0` (static binary, no `go.mod`
-needed — modules are a later phase); it runs on the seccomp denylist and is
-bounded by the cgroup rather than `RLIMIT_AS` (the Go runtime cannot start under a
-hard address-space cap). A compiled request may set `compile_timeout_ms` (bounds
+**Languages:** `python`, `javascript` (interpreted), `c`, `cpp`, `go` (static
+compiled), `java` (VM compiled). C is linked against libm, so ordinary `<math.h>`
+(`sqrt`, `pow`, …) works. `go` compiles a single `main.go` with `CGO_ENABLED=0`
+(static binary, no `go.mod` needed — modules are a later phase); it runs on the
+seccomp denylist and is bounded by the cgroup rather than `RLIMIT_AS` (the Go
+runtime cannot start under a hard address-space cap). `java` compiles `Main.java`
+with `javac` and runs the class on the JVM — **the public class must be named
+`Main`** (the source is written to `Main.java`); it runs on the denylist, full
+rootfs (the JVM is dynamically linked), heap bounded by `-Xmx` plus the cgroup.
+Provision a generous `memory_mb` for `java` — the JVM's non-heap overhead is on
+top of the heap. A compiled request may set `compile_timeout_ms` (bounds
 the compile phase, separate from `timeout_ms`; lowers the compile bound within the
 ceiling, never raises it); a failed compile returns `status: compile_error` with
 the compiler diagnostics in `compile_output`, and nothing is executed. `signal`

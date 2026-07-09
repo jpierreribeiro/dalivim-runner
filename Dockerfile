@@ -33,15 +33,19 @@ RUN git clone --depth 1 --branch "${NSJAIL_VERSION}" https://github.com/google/n
 # the toolchain copied from the build stage.
 FROM python:3.12-slim-bookworm
 # nsjail's runtime shared libraries (protobuf + libnl-route); the Node interpreter
-# for the JavaScript runtime (bookworm's v18 supports --disable-proto=throw); and
-# the C/C++ toolchain. libc6-dev provides libc.a + crt objects so `gcc -static`
-# links a self-contained binary — which lets the run jail drop the whole rootfs
-# (F-D). The toolchain lives in the image but is bound into the COMPILE jail only;
-# the minimal-rootfs run jail never sees it. The jail execve's resolved abs paths.
+# for the JavaScript runtime (bookworm's v18 supports --disable-proto=throw); the
+# C/C++ toolchain; and a headless JDK for Java (G2.2 — javac + the JVM). libc6-dev
+# provides libc.a + crt objects so `gcc -static` links a self-contained binary —
+# which lets the run jail drop the whole rootfs (F-D). The C/C++/Go toolchains are
+# bound into the COMPILE jail only (minimal-rootfs run jail). Java is the exception:
+# the JVM is dynamically linked, so its RUN jail keeps the full rootfs (like the
+# interpreters). openjdk-17 comes from bookworm main so its native libs are ABI-
+# matched to this base. The jail execve's resolved abs paths.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libprotobuf32 libnl-route-3-200 \
       nodejs \
       gcc g++ libc6-dev \
+      openjdk-17-jdk-headless \
  && rm -rf /var/lib/apt/lists/*
 # Non-root, no interactive login shell: the runner never needs a session, and
 # dropping privileges shrinks the blast radius of any escape from a run. nsjail

@@ -92,35 +92,53 @@ reference — see [G2.1](G2-language-coverage.md).
 
 ---
 
-## Shape C — VM-compiled (reference: `java`; also C#, Kotlin)
+## Shape C — VM-compiled (landed reference: `java`; next: C#, Kotlin)
 
-This shape needs the **generalised compiled runtime** (G2.2): the run step is a
-spec-provided argv, not "exec the artifact", because you run the VM against the
-bytecode.
+This shape uses the **generalised compiled runtime**: the run step is a
+spec-provided argv (`runBin` + `run` template with `{dir}`/`{mem}`), not "exec the
+artifact", because you run the VM against the bytecode. Java is the landed
+reference; these are the worked findings.
 
-1. **Image**: install the SDK (compile) and ideally a slim runtime (run). Heavy
-   (JDK ≈ 200 MB) — consider a dedicated image tag.
-2. **Spec** needs:
-   - `compile`: e.g. `javac -d {dir} {src}`.
-   - `run`: e.g. `java -XX:+UseSerialGC -Xmx{memMB}m -cp {dir} {Entrypoint}`.
-   - `capAddressSpace: false` (the VM reserves a big virtual space, like Node) →
-     bound with the VM's heap flag (`-Xmx`) + cgroup for the authoritative OOM.
-   - an **entrypoint convention** (Java: public class `Main`, source written to
-     `Main.java` — `javac` ties filename to public class name). Document it; the
-     backend enforces/injects it.
-   - a per-language **timeout/memory floor** — VM cold start (100–300 ms) eats the
-     default budget; give VM languages a higher floor (needs per-language limits,
-     see G5).
+1. **Image**: install the JDK (`compile` = `javac`, `run` = the JVM). Debian's
+   `openjdk-17-jdk-headless` from bookworm main is ABI-matched to the base — simpler
+   and safer than a Temurin backport/stage; bump the version later. Heavy (~300 MB);
+   a slim-JRE-for-run / JDK-for-compile split is a size follow-up.
+2. **Spec** (`compiledLangSpec`):
+   - `compile`: `javac -d {dir} {src}` (writes `Main.class` into the per-run dir).
+   - `artifact`: `Main.class` (validated to exist after compile).
+   - `run`: `java -XX:+UseSerialGC -XX:-UsePerfData -XX:ActiveProcessorCount=1
+     -Xmx{mem}m -cp {dir} Main`; `runBin: ["java"]` (resolved to the absolute
+     launcher for the run argv0). `-XX:-UsePerfData` avoids a `/tmp` hsperfdata
+     write + `getpwuid` on a jail uid with no passwd entry.
+   - `runFullRootfs: true` — the JVM is dynamically linked, so it keeps the full
+     read-only rootfs (same posture as the interpreters), NOT the minimal static
+     jail.
+   - `capAddressSpace: false` — the JVM (and `javac`, itself a JVM) reserve a large
+     virtual space and **die under any RLIMIT_AS** ("Could not reserve enough space
+     for code cache"). Bound with `-Xmx` + the cgroup.
+   - `memErrSubstr: "OutOfMemoryError"` for the no-cgroup fallback OOM classify.
+   - **entrypoint convention**: public class `Main`, source written to `Main.java`
+     (`javac` ties filename to the public class). Document it; the backend
+     enforces/injects it.
+   - **memory**: `-Xmx{mem}m` uses the request's `memory_mb`, but JVM non-heap
+     overhead (metaspace, code cache, stacks) is ON TOP, so the backend should send
+     a generous `memory_mb` for Java. A per-language floor is a follow-up (G5).
+   - **timeout**: measured JVM cold start is well under a second here, so no floor
+     was needed — but re-check on the target.
 3. **Register** in `main.go`.
 4. **Seccomp — denylist only.** VMs need `clone`, `openat`, JIT mappings — the
-   static allowlist cannot apply. Verify the denylist's KILLs
-   (`perf_event_open`, `ptrace`, `bpf`, module ops, `mount`) don't break ordinary
-   VM programs (they shouldn't; profiling/JFR would, students don't need it).
-5. **Test**: `success` (println, stdin, collections); `memory_exceeded` (big
-   alloc, via `-Xmx`+cgroup); `timeout`; **egress contained** (mandatory — VMs
-   have rich net stacks); confirm cold start fits the (raised) timeout.
+   static allowlist cannot apply. Verified (via `strace`) that the JVM trips NONE
+   of the denylist's KILLs (`perf_event_open`, `ptrace`, `bpf`, module ops,
+   `mount`) at startup — do the same check for a new VM before trusting it.
+5. **Env**: set the run env explicitly and never inherit — in particular do NOT let
+   `JAVA_TOOL_OPTIONS` leak in (it prints to stderr and injects flags). The runtime
+   forces a non-nil (possibly empty) env so the child never inherits the runner's.
+6. **Test**: `success` (println, stdin, collections); `memory_exceeded` (deploy-time
+   via `-Xmx`+cgroup, like Go — not the `cgroup=auto` CI); `timeout`; **egress
+   contained** (mandatory).
 
-**Effort**: L. See [G2.2 (Java)](G2-language-coverage.md).
+**Effort**: L (new runtime shape + heavy image). Java is the landed reference — see
+[G2.2](G2-language-coverage.md).
 
 ---
 
