@@ -70,7 +70,7 @@ USE dalivim DEFAULT ALLOW`
 // empty rootfs, not a blocked execve. execveat stays out (nsjail uses execve).
 const staticAllowSyscalls = `execve,
 		read, write, readv, writev, pread64, pwrite64,
-		close, newfstat, newfstatat, lseek, ioctl, fcntl,
+		close, newfstat, newfstatat, lseek, ioctl, fcntl, readlink, readlinkat,
 		dup, dup2, dup3, poll, ppoll, pselect6, select,
 		brk, mmap, munmap, mprotect, mremap, madvise,
 		rt_sigaction, rt_sigprocmask, rt_sigreturn, sigaltstack,
