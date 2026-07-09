@@ -205,9 +205,16 @@ Criterion (plan §5): **smoke JS green; JS inherits the jail.**
 - [x] CI runner-smoke exercises the real two-phase path: C & C++ `2+2` ⇒
       `success`/`"4\n"`, a syntax error ⇒ `compile_error` (nothing executed), and
       `execl("/usr/bin/gcc")` from the run jail fails (no toolchain present).
-- [ ] **F-D follow-up (target-validated):** tighten the static run jail to a strict
-      seccomp **allowlist** (read/write/exit/brk/mmap/rt_sigreturn/…), stronger than
-      the shared denylist, with the C escape corpus proving it. Java (javac+JVM) is
+- [x] **F-D follow-up — strict seccomp allowlist for the static run jail.** A kafel
+      ALLOWLIST (DEFAULT KILL) of the minimal set a self-contained binary needs
+      (read/write/mmap/brk/rt_sigreturn/exit_group/glibc-static startup/…),
+      excluding `execve`/`execveat`/socket/`open`/`openat`/`ptrace`/`clone` — much
+      tighter than the interpreter denylist. Behind `RUNNER_STATIC_SECCOMP=off|
+      enforce|complain` (default off; `complain` = DEFAULT LOG for tuning the set on
+      the target). Policy selection + banned/essential syscalls unit-tested; CI
+      boots a dedicated `enforce` container and proves ordinary C **and** C++ still
+      run under it (a SIGSYS kill would fail the gate). Set tuned on the target via
+      `complain` before flipping prod to `enforce`. Java (javac+JVM) stays
       demand-gated (§3.4).
 
 ## F-E / F-F — accounting & classification

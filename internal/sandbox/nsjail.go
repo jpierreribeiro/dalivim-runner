@@ -35,6 +35,47 @@ const seccompPolicy = `POLICY dalivim {
 }
 USE dalivim DEFAULT ALLOW`
 
+// staticAllowSyscalls is the minimal syscall set a statically-linked C/C++ program
+// needs (F-D run jail) — glibc static startup (brk/arch_prctl/set_tid_address/
+// set_robust_list/rseq/prlimit64), memory (mmap/munmap/mprotect/mremap/madvise/
+// brk), stdio on already-open fds (read/write/…/fstat/ioctl/lseek/poll), signals,
+// time, cheap identity getters, and exit — and deliberately EXCLUDES the escape
+// surface a compute program never needs: execve/execveat (no re-exec), the socket
+// family (no egress), open/openat (no file access), clone/fork, ptrace, and every
+// namespace/mount/module syscall. Everything not listed is killed with SIGSYS
+// (DEFAULT KILL) — far tighter than the interpreter denylist. The set is a
+// starting point tuned on the target via the complain profile; see the plan §3.4.
+const staticAllowSyscalls = `read, write, readv, writev, pread64, pwrite64,
+		close, fstat, newfstatat, statx, lseek, ioctl, fcntl,
+		dup, dup2, dup3, poll, ppoll, pselect6, select,
+		brk, mmap, munmap, mprotect, mremap, madvise,
+		rt_sigaction, rt_sigprocmask, rt_sigreturn, sigaltstack,
+		arch_prctl, set_tid_address, set_robust_list, rseq, prlimit64,
+		futex, sched_yield, sched_getaffinity, getcpu,
+		clock_gettime, clock_getres, clock_nanosleep, nanosleep, gettimeofday, time,
+		getpid, gettid, getuid, geteuid, getgid, getegid, getrandom, uname, sysinfo,
+		exit, exit_group, restart_syscall`
+
+// staticAllowlistPolicy renders the static-binary allowlist kafel policy with the
+// given default action: "KILL" to enforce (SIGSYS on anything unlisted) or "LOG"
+// to only log violations while still running them (target tuning).
+func staticAllowlistPolicy(defaultAction string) string {
+	return "POLICY dalivim_static {\n\tALLOW {\n\t\t" + staticAllowSyscalls +
+		"\n\t}\n}\nUSE dalivim_static DEFAULT " + defaultAction
+}
+
+// seccompPolicyFor returns the kafel policy string for a run's chosen profile.
+func seccompPolicyFor(p SeccompProfile) string {
+	switch p {
+	case SeccompStaticEnforce:
+		return staticAllowlistPolicy("KILL")
+	case SeccompStaticComplain:
+		return staticAllowlistPolicy("LOG")
+	default:
+		return seccompPolicy
+	}
+}
+
 // jailMount is the path the per-run WorkDir is bind-mounted to inside the jail;
 // Argv referencing files (main.py) is resolved against it via --cwd. It aliases
 // the exported JailMount so runtimes (which build argv with sandbox.JailPath) and
@@ -91,7 +132,7 @@ func nsjailArgs(uid, gid int, spec Spec) []string {
 		workMount, spec.WorkDir+":"+jailMount,
 		"--cwd", jailMount,
 		"--keep_env", // pass exactly the minimal env the caller set on cmd.Env
-		"--seccomp_string", seccompPolicy,
+		"--seccomp_string", seccompPolicyFor(spec.Seccomp),
 	)
 	// RLIMIT_AS, MB. 0 => leave it unset: V8/Node cannot start under a tight
 	// address-space cap (multi-GB virtual reservation), so those runs bound memory

@@ -154,6 +154,38 @@ jobs:
       - name: C run jail has no toolchain (execv gcc fails)
         run: ./scripts/smoke-run.sh c $'#include <unistd.h>\n#include <stdio.h>\nint main(void){ execl("/usr/bin/gcc","gcc",(char*)0); printf("no-gcc\\n"); return 0; }' $'no-gcc\n'
 
+      # F-D follow-up: the static run jail can take a tight seccomp ALLOWLIST
+      # (DEFAULT KILL) instead of the shared denylist. Prove on a dedicated
+      # RUNNER_STATIC_SECCOMP=enforce container that (a) the kafel allowlist
+      # compiles and (b) it is sufficient for ordinary C and C++ programs — a run
+      # killed by SIGSYS would come back != success. A separate container because
+      # enforce changes the run jail for every compiled run (the execl test above
+      # would be SIGSYS-killed, not ENOENT).
+      - name: Static seccomp allowlist — enforce mode runs C/C++
+        run: |
+          docker run -d --name runner-seccomp \
+            --pids-limit=512 --cpus=1 --memory=512m \
+            --security-opt seccomp=unconfined \
+            --security-opt apparmor=unconfined \
+            -e RUNNER_ENV=development \
+            -e RUNNER_SANDBOX=require \
+            -e RUNNER_STATIC_SECCOMP=enforce \
+            -e GOMAXPROCS=1 \
+            -p 8092:8090 \
+            runner:smoke
+          for i in $(seq 1 40); do
+            if curl -fs localhost:8092/healthz >/dev/null; then break; fi
+            if ! docker ps --filter name=runner-seccomp --filter status=running -q | grep -q .; then
+              echo "::error::runner-seccomp exited during boot"; docker logs runner-seccomp 2>&1 || true; exit 1
+            fi
+            sleep 0.5
+          done
+          docker logs runner-seccomp 2>&1 | grep -q "static seccomp ALLOWLIST enforced" \
+            || { echo "::error::enforce mode did not engage"; docker logs runner-seccomp 2>&1 || true; exit 1; }
+          RUNNER_URL=http://localhost:8092 ./scripts/smoke-run.sh c $'#include <stdio.h>\nint main(void){ printf("4\\n"); return 0; }' $'4\n'
+          RUNNER_URL=http://localhost:8092 ./scripts/smoke-run.sh cpp $'#include <iostream>\nint main(){ std::cout << 2+2 << "\\n"; }' $'4\n'
+          docker rm -f runner-seccomp
+
       - name: Escape corpus — every submission must be contained, host survives
         run: ./scripts/smoke-escape.sh
 
@@ -188,10 +220,11 @@ jobs:
         run: |
           echo "=== runner ==="; docker logs runner 2>&1 || true
           echo "=== runner-bp ==="; docker logs runner-bp 2>&1 || true
+          echo "=== runner-seccomp ==="; docker logs runner-seccomp 2>&1 || true
 
       - name: Teardown
         if: always()
-        run: docker rm -f runner runner-bp || true
+        run: docker rm -f runner runner-bp runner-seccomp || true
 
   # §4.5(c) — image CVE scan. A separate job (not a step in runner-smoke) so a
   # CVE finding gives a clean, independent signal instead of muddying the

@@ -281,6 +281,40 @@ reboot trap, because the cgroup is guaranteed present.
 
 The container runs as non-root uid 1000 with no added caps throughout.
 
+## 8c. (Optional) Strict seccomp allowlist for the C/C++ run jail — F-D
+
+The compiled **run** jail (a static binary) can take a tight seccomp *allowlist*
+(DEFAULT KILL) instead of the shared denylist — far stronger, since a
+self-contained program makes very few syscalls. It ships **off** by default;
+enable it in two steps so a too-tight set never SIGSYS-kills legitimate programs
+in prod:
+
+```sh
+# 1) TUNE in complain mode — the allowlist is applied but violations are LOGGED,
+#    not killed. Run the programs your students actually submit, then read which
+#    syscalls fell outside the set:
+docker run -d --name runner --restart unless-stopped \
+  ... (all your existing flags) ... \
+  -e RUNNER_STATIC_SECCOMP=complain \
+  dalivim-runner
+# after some real traffic, list logged violations (auditless: they hit the kernel log):
+sudo dmesg | grep -i 'seccomp' | tail -50   # syscall=NNN => add its name to staticAllowSyscalls
+```
+
+If `dmesg` shows syscalls that ordinary programs need but the allowlist omits,
+tell me the numbers and I'll widen `staticAllowSyscalls` (a code change + a new
+image). When complain mode logs nothing for real workloads:
+
+```sh
+# 2) ENFORCE — anything outside the set is now killed with SIGSYS.
+  -e RUNNER_STATIC_SECCOMP=enforce
+```
+
+CI already proves the shipped set runs ordinary C and C++ under `enforce`; complain
+mode is for catching whatever your specific workload needs beyond that before you
+flip it on. Interpreted languages and the compile jail are unaffected (they keep
+the denylist).
+
 ## 9. Expose over HTTPS (Caddy) + firewall
 
 The backend (Railway) reaches the runner over the public internet, so it must be

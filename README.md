@@ -140,8 +140,12 @@ deploy with `RUNNER_SANDBOX=require` is how you prove it engaged.
   **nothing runs**. The validated static artifact then executes in a **separate,
   stricter run jail with a *minimal rootfs*** — only the binary + tmpfs `/tmp`, no
   libc, and crucially **no toolchain**, so a submission cannot re-invoke the
-  compiler or exec anything else at runtime (D-4). *(A tight seccomp allowlist for
-  the static run jail — stronger than the shared denylist — is the F-D follow-up.)*
+  compiler or exec anything else at runtime (D-4). The static run jail can also
+  take a **tight seccomp allowlist** (`RUNNER_STATIC_SECCOMP=enforce`) — only the
+  minimal syscall set a self-contained program needs, DEFAULT KILL on everything
+  else (no `execve`/`socket`/`open`/`ptrace`/`clone`) — far stronger than the
+  shared interpreter denylist. It ships behind a dial (default `off`); a `complain`
+  mode logs violations without killing, for pinning the set on the target first.
 - **Memory:** CPython runs under a hard `RLIMIT_AS` (a memory bomb → deterministic
   `memory_exceeded`). Node cannot — V8 reserves a multi-GB virtual cage at startup
   that a tight `RLIMIT_AS` refuses — so Node skips the address-space cap and bounds
@@ -176,6 +180,7 @@ deploy with `RUNNER_SANDBOX=require` is how you prove it engaged.
 | `RUNNER_COMPILE_TIMEOUT_MS` / `RUNNER_MAX_COMPILE_TIMEOUT_MS` | `10000` / `20000` | Compiled languages: compile-phase wall/CPU budget + hard cap (separate from execution). |
 | `RUNNER_COMPILE_MEMORY_MB` | `512` | Compiled languages: `RLIMIT_AS`/cgroup for the compiler (tames template/macro bombs). |
 | `RUNNER_MAX_ARTIFACT_MB` | `32` | Compiled languages: reject a compiled artifact larger than this. |
+| `RUNNER_STATIC_SECCOMP` | `off` | Compiled **run** jail seccomp: `off` = shared denylist; `enforce` = tight static-binary allowlist (SIGSYS on anything unlisted); `complain` = allowlist logged, not killed (for tuning the set on the target). |
 
 ## Run locally
 
