@@ -1,0 +1,16 @@
+[Unit]
+Description=Delegate a cgroup v2 subtree to the dalivim runner (uid 1000)
+# /sys/fs/cgroup is tmpfs — the delegated subtree is wiped on every reboot. Recreate
+# it BEFORE docker starts the runner, so RUNNER_CGROUP=require does not fail closed.
+Before=docker.service
+After=sysinit.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/mkdir -p /sys/fs/cgroup/dalivim
+ExecStart=/bin/sh -c 'echo "+cpu +memory +pids" > /sys/fs/cgroup/dalivim/cgroup.subtree_control'
+ExecStart=/usr/bin/chown -R 1000:1000 /sys/fs/cgroup/dalivim
+
+[Install]
+WantedBy=multi-user.target

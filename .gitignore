@@ -8,3 +8,7 @@
 # Local env
 .env
 .env.*
+
+# Deploy: local config + secret token
+/deploy/runner.env
+/deploy/.runner-token
