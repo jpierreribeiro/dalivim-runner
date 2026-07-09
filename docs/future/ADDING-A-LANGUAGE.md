@@ -1,0 +1,136 @@
+# Adding a language to dalivim-runner
+
+A reusable procedure. Adding a language is a **code change** (the registry is
+closed by design — `languages.go:14-17`, `compiled.go:21-22`), but a *mechanical*
+one once you know which of the three shapes the language is.
+
+## Step 0 — classify the language into one of three shapes
+
+| Shape | Definition | Examples | Run process | Seccomp | Memory bound |
+|---|---|---|---|---|---|
+| **A. Interpreted** | interpreter reads source directly | Python, JS, Ruby | the interpreter | denylist | RLIMIT_AS *or* a heap flag |
+| **B. Static-compiled** | build a **static** binary, run it | C, C++, Go, Rust | the artifact | denylist **or** tight allowlist | RLIMIT_AS + cgroup |
+| **C. VM-compiled** | compile to bytecode, run on a VM | Java, C#, Kotlin | the VM (`java`, `dotnet`) | **denylist only** | VM heap flag + cgroup |
+
+The shape decides everything else. If unsure: does a single native executable come
+out of compilation? → B. Does a VM run bytecode? → C. No compile step? → A.
+
+---
+
+## Shape A — interpreted (reference: `python`, `javascript`)
+
+1. **Image**: install the interpreter in the runtime stage (`Dockerfile`). Pin the
+   version.
+2. **Spec** (`languageSpec`, `languages.go`):
+   - `name`, `binNames` (e.g. `["ruby"]`), `runArgs` (argv template running the
+     interpreter on the written source file, isolated flags where available —
+     Python uses `-I`, Node `--disable-proto=throw`).
+   - `capAddressSpace`: `true` if the runtime tolerates a hard `RLIMIT_AS`
+     (CPython does); `false` if it reserves a large virtual space (V8/Node) — then
+     bound the heap with a runtime flag instead (`nodeHeapArgs` pattern,
+     `languages.go:113-115`) and rely on the cgroup for the authoritative OOM.
+   - `memErrSubstr`: an OOM stderr marker for the no-cgroup fallback (Python:
+     `"MemoryError"`); leave `""` if none and depend on the cgroup.
+   - `sourceName`: the file the source is written to (`main.rb`).
+   - `versionArgs` + parse function for `runtime_version`.
+3. **Register** in `main.go` `NewService(...)`.
+4. **Seccomp**: interpreters stay on the **denylist** (their syscall surface is
+   too wide for the allowlist). Containment = ro-rootfs + empty netns +
+   no_new_privs + rlimits.
+5. **Test**: `success` hello-world + stdin echo; `memory_exceeded` (alloc bomb);
+   `timeout` (infinite loop); egress contained.
+
+**Effort**: S. Rust-the-script? no — Ruby/PHP/Perl fit here.
+
+---
+
+## Shape B — static-compiled (reference: `c`, `cpp`; next: `go`, `rust`)
+
+1. **Image**: install the toolchain (compile stage or runtime stage). Ensure it
+   can emit a **static** binary — this is the invariant that lets the run jail use
+   the minimal rootfs and the tight seccomp allowlist. C/C++: `-static`. Go:
+   `CGO_ENABLED=0`. Rust: `--target x86_64-unknown-linux-musl` (musl static) or
+   `-C target-feature=+crt-static`.
+2. **Spec** (`compiledLangSpec`, `compiled.go:23-29`):
+   - `compile`: argv ending `-o {out} {src}` (or `{srcs}` after G3).
+   - `link` (after G1.1): libraries appended **after** the source (C: `["-lm"]`).
+   - `run`: `["{out}"]`.
+   - compile-jail env if the toolchain needs a writable cache (`GOCACHE`,
+     `CARGO_HOME` → point at `/tmp/...`; the compile jail is writable with
+     `TMPDIR=/tmp`).
+3. **Register** in `main.go`.
+4. **Seccomp — tune the allowlist**: a hello-world may pass the C/C++ allowlist
+   (`staticAllowSyscalls`, `nsjail.go:71-81`) as-is, but richer runtimes need
+   more. **Always roll out `RUNNER_STATIC_SECCOMP=complain` first** (DEPLOY §8c),
+   run representative programs, read `sudo dmesg | grep -i seccomp` for
+   `syscall=NNN`, and widen the allowlist for what the runtime genuinely needs.
+   Go's scheduler needs `clone`/`futex`/`epoll_*` — it may need a widened
+   allowlist or fall back to the denylist. Decide and document per language.
+   Then flip to `enforce`.
+5. **Memory**: `capAddressSpace: true` works for native static binaries
+   (RLIMIT_AS) + cgroup is authoritative.
+6. **Test**: `success`; a **denied-syscall program** (e.g. `socket`) → `SIGSYS`
+   under enforce; `memory_exceeded`; `timeout`; egress contained.
+
+**Effort**: M (mostly image + allowlist tuning). See [G2.1 (Go)](G2-language-coverage.md).
+
+---
+
+## Shape C — VM-compiled (reference: `java`; also C#, Kotlin)
+
+This shape needs the **generalised compiled runtime** (G2.2): the run step is a
+spec-provided argv, not "exec the artifact", because you run the VM against the
+bytecode.
+
+1. **Image**: install the SDK (compile) and ideally a slim runtime (run). Heavy
+   (JDK ≈ 200 MB) — consider a dedicated image tag.
+2. **Spec** needs:
+   - `compile`: e.g. `javac -d {dir} {src}`.
+   - `run`: e.g. `java -XX:+UseSerialGC -Xmx{memMB}m -cp {dir} {Entrypoint}`.
+   - `capAddressSpace: false` (the VM reserves a big virtual space, like Node) →
+     bound with the VM's heap flag (`-Xmx`) + cgroup for the authoritative OOM.
+   - an **entrypoint convention** (Java: public class `Main`, source written to
+     `Main.java` — `javac` ties filename to public class name). Document it; the
+     backend enforces/injects it.
+   - a per-language **timeout/memory floor** — VM cold start (100–300 ms) eats the
+     default budget; give VM languages a higher floor (needs per-language limits,
+     see G5).
+3. **Register** in `main.go`.
+4. **Seccomp — denylist only.** VMs need `clone`, `openat`, JIT mappings — the
+   static allowlist cannot apply. Verify the denylist's KILLs
+   (`perf_event_open`, `ptrace`, `bpf`, module ops, `mount`) don't break ordinary
+   VM programs (they shouldn't; profiling/JFR would, students don't need it).
+5. **Test**: `success` (println, stdin, collections); `memory_exceeded` (big
+   alloc, via `-Xmx`+cgroup); `timeout`; **egress contained** (mandatory — VMs
+   have rich net stacks); confirm cold start fits the (raised) timeout.
+
+**Effort**: L. See [G2.2 (Java)](G2-language-coverage.md).
+
+---
+
+## Universal checklist (every shape)
+
+- [ ] Toolchain/interpreter in the image, version pinned.
+- [ ] Spec added; registered in `main.go` `NewService`.
+- [ ] `runtime_version` detection works.
+- [ ] Memory strategy chosen (RLIMIT_AS vs heap-flag) and OOM classifies as
+      `memory_exceeded` (prefer cgroup; add a stderr marker for the no-cgroup path
+      if the runtime has a stable one).
+- [ ] Seccomp posture decided (denylist, or allowlist tuned via complain-mode).
+- [ ] On-target acceptance: `success`, `memory_exceeded`, `timeout`,
+      **egress contained**, and (Shape B under enforce) a denied syscall → `SIGSYS`.
+- [ ] `deploy/deploy.sh verify` extended (or a language-specific smoke) proves it.
+- [ ] Multi-file behaviour defined (G3) — at minimum the single-file default name.
+- [ ] Docs: add the language to DEPLOY/TESTING and update this guide's reference
+      list.
+
+## Anti-patterns
+- **Dynamic linking a "static" language** — breaks the minimal-rootfs run jail and
+  the allowlist. Keep Shape B truly static.
+- **Opening the allowlist blindly** — if complain-mode shows a syscall you don't
+  understand, investigate before allowing it; a newer nsjail/kafel may name it
+  properly (the `rseq`/`statx` situation, `nsjail.go` comments) rather than
+  needing a wider set.
+- **Logging or labelling with source/stdin** — never (see G4).
+- **Skipping the egress test** — every new runtime must be re-proven contained;
+  don't assume the sandbox covers a runtime it's never seen.
