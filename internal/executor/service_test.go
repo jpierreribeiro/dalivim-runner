@@ -22,6 +22,15 @@ func (s *stubRuntime) Run(_ context.Context, req runnerapi.RunRequest) runnerapi
 	return runnerapi.RunResult{Status: runnerapi.StatusSuccess}
 }
 
+// flooredStub is a stubRuntime that declares per-language limit floors (G6),
+// standing in for a runtime with a fixed baseline cost (the JVM).
+type flooredStub struct {
+	stubRuntime
+	floors Floors
+}
+
+func (s *flooredStub) LimitFloors() Floors { return s.floors }
+
 func newService(rt Runtime) *Service {
 	return NewService(Limits{DefaultTimeout: 3000, MaxTimeoutMs: 10000, DefaultMemory: 128, MaxMemoryMB: 512}, rt)
 }
@@ -76,6 +85,57 @@ func TestService_ClampsCompileTimeout(t *testing.T) {
 		if stub.got.CompileTimeoutMs != c.want {
 			t.Fatalf("compile_timeout_ms %d clamped to %d, want %d", c.in, stub.got.CompileTimeoutMs, c.want)
 		}
+	}
+}
+
+// TestService_PerLanguageFloors pins G6: a runtime's limit floors raise an
+// undersized (or defaulted) budget, are ignored when the request already meets
+// them, and NEVER override the operator's global ceiling. A runtime without
+// floors is untouched.
+func TestService_PerLanguageFloors(t *testing.T) {
+	stub := &flooredStub{
+		stubRuntime: stubRuntime{lang: "java"},
+		floors:      Floors{TimeoutMs: 5000, MemoryMB: 256},
+	}
+	svc := newService(stub) // defaults 3000ms/128MB, ceilings 10000ms/512MB
+
+	cases := []struct {
+		name                    string
+		timeoutMs, memoryMB     int
+		wantTimeout, wantMemory int
+	}{
+		{"omitted → default raised to floor", 0, 0, 5000, 256},
+		{"below floor → raised", 1000, 64, 5000, 256},
+		{"above floor → honoured", 8000, 400, 8000, 400},
+		{"above ceiling → ceiling still wins", 999999, 999999, 10000, 512},
+	}
+	for _, c := range cases {
+		if _, err := svc.Run(context.Background(), runnerapi.RunRequest{
+			Language: "java", SourceCode: "x", TimeoutMs: c.timeoutMs, MemoryMB: c.memoryMB,
+		}); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if stub.got.TimeoutMs != c.wantTimeout || stub.got.MemoryMB != c.wantMemory {
+			t.Fatalf("%s: got %d ms/%d MB, want %d ms/%d MB",
+				c.name, stub.got.TimeoutMs, stub.got.MemoryMB, c.wantTimeout, c.wantMemory)
+		}
+	}
+}
+
+// TestService_FloorAboveCeilingIsCapped pins the misconfiguration edge: a
+// language floor larger than the global ceiling yields the ceiling, not the
+// floor — operator policy is absolute.
+func TestService_FloorAboveCeilingIsCapped(t *testing.T) {
+	stub := &flooredStub{
+		stubRuntime: stubRuntime{lang: "java"},
+		floors:      Floors{MemoryMB: 9999},
+	}
+	svc := newService(stub)
+	if _, err := svc.Run(context.Background(), runnerapi.RunRequest{Language: "java", SourceCode: "x"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stub.got.MemoryMB != 512 {
+		t.Fatalf("floor above ceiling must cap at the ceiling: got %d, want 512", stub.got.MemoryMB)
 	}
 }
 

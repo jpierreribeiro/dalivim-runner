@@ -121,10 +121,12 @@ reference; these are the worked findings.
      (`javac` ties filename to the public class). Document it; the backend
      enforces/injects it.
    - **memory**: `-Xmx{mem}m` uses the request's `memory_mb`, but JVM non-heap
-     overhead (metaspace, code cache, stacks) is ON TOP, so the backend should send
-     a generous `memory_mb` for Java. A per-language floor is a follow-up (G5).
-   - **timeout**: measured JVM cold start is well under a second here, so no floor
-     was needed — but re-check on the target.
+     overhead (metaspace, code cache, stacks) is ON TOP — set a `minMemoryMB`
+     floor on the spec (Java: 128) so an undersized request is lifted instead of
+     dying at VM startup ([G6](G6-per-language-limits.md)).
+   - **timeout**: measured JVM cold start is well under a second here, so no
+     `minTimeoutMs` floor was needed — but re-check on the target; the seam
+     exists (G6).
 3. **Register** in `main.go`.
 4. **Seccomp — denylist only.** VMs need `clone`, `openat`, JIT mappings — the
    static allowlist cannot apply. Verified (via `strace`) that the JVM trips NONE

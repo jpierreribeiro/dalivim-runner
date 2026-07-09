@@ -94,6 +94,13 @@ type compiledLangSpec struct {
 	// multi-file build (Go's offline module policy: GOPROXY=off, …). It never
 	// touches the single-file path, so legacy behaviour is unchanged.
 	multiFileCompileEnv []string
+
+	// minTimeoutMs/minMemoryMB are optional per-language floors on the clamped
+	// request limits (G6), raised in the service layer and never above the global
+	// ceilings. 0 = no floor. Java sets a memory floor: its fixed non-heap overhead
+	// means a small budget fails for EVERY program, not just greedy ones.
+	minTimeoutMs int
+	minMemoryMB  int
 }
 
 var cSpec = compiledLangSpec{
@@ -203,6 +210,13 @@ var javaSpec = compiledLangSpec{
 	memErrSubstr:      "OutOfMemoryError",
 	versionArgs:       []string{"-version"},
 	parseVersion:      parseJavaVersion,
+	// The request's memory_mb becomes BOTH the -Xmx heap and the cgroup
+	// memory.max, but JVM non-heap overhead (metaspace, code cache, GC structs,
+	// thread stacks) sits on top of the heap — a python-sized budget (say 64 MB)
+	// dies at startup or spuriously OOMs regardless of the program. Floor at the
+	// global default (128 MB); no timeout floor — measured JVM cold start is well
+	// under a second, comfortably inside the 3 s default.
+	minMemoryMB: 128,
 }
 
 // parseGoVersion pulls the bare version out of `go version` output
@@ -322,6 +336,12 @@ func NewJava(sb sandbox.Sandbox, cfg CompiledConfig) *compiledRuntime {
 
 func (r *compiledRuntime) Language() string { return r.spec.name }
 func (r *compiledRuntime) Version() string  { return r.version }
+
+// LimitFloors exposes the spec's per-language limit floors (G6); zero values
+// mean the service's clamped limits are used as-is.
+func (r *compiledRuntime) LimitFloors() Floors {
+	return Floors{TimeoutMs: r.spec.minTimeoutMs, MemoryMB: r.spec.minMemoryMB}
+}
 
 // Run performs compile→run. A compile failure (non-zero exit or compile timeout)
 // short-circuits to compile_error WITHOUT executing anything; only a validated

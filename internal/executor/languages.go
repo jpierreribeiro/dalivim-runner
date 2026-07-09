@@ -70,6 +70,13 @@ type languageSpec struct {
 	// The single-file path (runArgs) is left untouched so its behaviour is
 	// byte-for-byte unchanged; multi-file is a separate, additive shape.
 	multiFileRunArgs func(entryJailPath string) []string
+
+	// minTimeoutMs/minMemoryMB are optional per-language floors on the clamped
+	// request limits (G6), raised in the service layer and never above the global
+	// ceilings. 0 = no floor. No interpreted language needs one today; the seam
+	// mirrors compiledLangSpec, where the JVM's baseline overhead does.
+	minTimeoutMs int
+	minMemoryMB  int
 }
 
 // pythonSpec runs CPython in isolated mode. Behaviour-identical to the original

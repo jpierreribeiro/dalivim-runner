@@ -18,7 +18,8 @@ The whole surface is tiny:
 ```
 
 Only `language` + `source_code` are required; zero limits fall back to the service
-default and are clamped to the hard ceiling. Response:
+default and are clamped to the hard ceiling (a language may also floor a limit —
+Java lifts `memory_mb` below 128 to 128; see G6). Response:
 
 ```json
 { "status": "success", "stdout": "4\n", "stderr": "", "exit_code": 0,

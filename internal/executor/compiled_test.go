@@ -139,6 +139,9 @@ func TestJavaSpec(t *testing.T) {
 	if javaSpec.memErrSubstr != "OutOfMemoryError" {
 		t.Fatalf("java needs the OutOfMemoryError marker for the no-cgroup path: %q", javaSpec.memErrSubstr)
 	}
+	if javaSpec.minMemoryMB != 128 {
+		t.Fatalf("java needs a memory floor (G6): JVM non-heap overhead sits on top of -Xmx, got %d", javaSpec.minMemoryMB)
+	}
 	joinedRun := strings.Join(javaSpec.run, " ")
 	for _, want := range []string{"-Xmx{mem}m", "-cp {dir}", "Main"} {
 		if !strings.Contains(joinedRun, want) {
