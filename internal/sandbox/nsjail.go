@@ -16,10 +16,14 @@ import "strconv"
 // creation and posix_spawn, so killing it breaks the interpreter itself. Fork
 // bombs are contained by --rlimit_nproc + the concurrency cap, not by blocking
 // the clone family.
+//
+// Every identifier here must exist in kafel's per-arch syscall table or the
+// policy fails to compile and the whole jail refuses to start. Note kafel names
+// the amd64 unmount syscall (nr 166) `umount`, NOT `umount2` — do not "fix" it.
 const seccompPolicy = `POLICY dalivim {
 	KILL {
 		ptrace, process_vm_readv, process_vm_writev,
-		mount, umount2, pivot_root, chroot,
+		mount, umount, pivot_root, chroot,
 		kexec_load, init_module, finit_module, delete_module,
 		bpf, setns, unshare,
 		add_key, keyctl, request_key,
