@@ -65,26 +65,43 @@ Fixes **R2** (no seccomp), **R3** (`/tmp` OOM), **R4** (no `no_new_privs`).
 - [x] Dockerfile: nsjail built from source (bookworm stage) into the runtime image.
 - [x] `RUNNER_SANDBOX=auto|require|off` dial with a boot probe (runs `/bin/true`
       in a real jail); `require` fails closed, `auto` falls back to netns. Tested.
-- [x] End-to-end jail execution validated by the `runner-smoke` CI job
-      (`.github/workflows/ci.yml`): it builds the shipped image (nsjail compiled
-      from source), boots it under target-like limits with `RUNNER_SANDBOX=require`
-      (fail-closed — a failed probe crashes the container, never a silent netns
-      downgrade), asserts the boot log shows `nsjail ENABLED`, and runs a real
-      `POST /run` plus the §4.4 escape corpus (`scripts/smoke-escape.sh`: fork
-      bomb → contained + host survives; `/etc/shadow`/host-env read → denied;
-      dangerous syscall → killed by seccomp; output flood → truncated, no OOM).
-      Arg construction + the dial state machine remain unit-tested for the paths
-      CI's single kernel cannot exercise.
-    - **CI finding (containment relaxation):** nsjail cannot create its user
-      namespace or mount its rootfs under Docker's *default* seccomp/AppArmor
-      profiles, so the smoke container runs with
-      `--security-opt seccomp=unconfined --security-opt apparmor=unconfined`.
-      This relaxes only the **outer** container around the runner daemon — it
-      adds no capabilities and keeps the non-root `runner` user. The **inner**
-      per-run jail (userns + read-only rootfs + tmpfs `/tmp` + seccomp denylist +
-      `no_new_privs` + per-jail rlimits) is unchanged; the passing escape corpus
-      is the proof. See README → *Why the smoke container relaxes Docker's own
-      sandbox*.
+- [x] End-to-end jail execution **validated GREEN in CI** by the `runner-smoke`
+      job (`.github/workflows/ci.yml`): it builds the shipped image (nsjail
+      compiled from source), boots it under target-like limits with
+      `RUNNER_SANDBOX=require` (fail-closed — a failed probe crashes the
+      container, never a silent netns downgrade), asserts the boot log shows
+      `nsjail ENABLED`, runs a real `POST /run` (`print(2+2)` → `success`/`"4\n"`),
+      and the §4.4 escape corpus (`scripts/smoke-escape.sh`: fork bomb → contained
+      + host survives; `/etc/shadow`/host-env read → denied; dangerous syscall →
+      killed by seccomp; output flood → truncated, no OOM). Arg construction + the
+      dial state machine remain unit-tested for the paths CI's single kernel
+      cannot exercise.
+    - **Bugs the first real jail launch surfaced** (each caught by the fail-closed
+      probe; the errno=11 thesis in action — none were reachable by the mocked
+      unit tests). *Code/target* bugs that would have broken the sandbox on
+      Railway too, now fixed:
+        1. seccomp policy used `umount2`, not a kafel amd64 identifier → policy
+           never compiled; kafel names syscall 166 `umount`.
+        2. `--uid_mapping`/`--gid_mapping` require the setuid `newuidmap`/
+           `newgidmap` helpers (absent, unneeded) → switched to `--user`/`--group`
+           (direct `/proc` self-map, `is_newidmap=false`).
+        3. jail bind-mounts host `/` read-only then binds the workdir onto
+           `/sandbox`, which didn't exist on the RO root → pre-create `/sandbox`
+           in the image.
+        4. runtime passed a bare `python3`; nsjail `execve()`s with no PATH search
+           → resolve the interpreter to an absolute path at startup.
+      Plus one *test* false-positive (LC_CTYPE, injected by CPython's PEP 538, was
+      flagged as a host-env leak) and one *CI-host* relaxation (below).
+    - **CI-host relaxation (containment):** nsjail's userns + mount setup is
+      blocked on a stock `ubuntu-latest` (24.04) by three layers, so the smoke job
+      clears exactly these — all on the **outer** container/host, none touching the
+      inner jail, none adding capabilities, container still runs as non-root
+      `runner`: `--security-opt seccomp=unconfined` (CLONE_NEWUSER unshare),
+      `--security-opt apparmor=unconfined` (mount ops), and host
+      `sysctl kernel.apparmor_restrict_unprivileged_userns=0` (Ubuntu 24.04 userns
+      mount restriction — a kernel global a container flag can't lift). The
+      passing escape corpus is the proof the jail is intact. See README → *Why the
+      smoke container relaxes Docker's own sandbox*.
 
 ## CI gates — runner-smoke + escape corpus (plan §4.3 / §4.4 / §4.5)
 
