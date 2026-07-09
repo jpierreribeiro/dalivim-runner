@@ -15,18 +15,39 @@ means the perfect *executor*, never absorbing the judge.
 
 ## Roadmap at a glance
 
+**Wave 1 — the original roadmap.** G1, G2, and G4 are **merged to `main`**; G3 is
+in progress.
+
+| Phase | Theme | Value | Size | Breaks contract? | Status |
+|---|---|---|---|---|---|
+| **[G1](G1-executor-robustness.md)** | Executor correctness & robustness | 🔴 high | small | no (adds one status) | ✅ merged |
+| **[G2](G2-language-coverage.md)** | Language coverage — Go, Java | 🟡 high | medium | no (additive) | ✅ merged |
+| **[G3](G3-multi-file-submissions.md)** | Multi-file submissions | 🟠 high | large | **yes** (adds `files[]`) | 🔨 in progress |
+| **[G4](G4-observability.md)** | Observability & operability | 🟢 medium | medium | no | ✅ merged |
+| **[G5](G5-deferred.md)** | Deferred / demand-gated | ⚪ low | — | — | — |
+
+**Wave 2 — correctness & operability at scale.** What makes the runner a *great*
+executor for a grading platform, not just a correct one. Each item was
+code-grounded before planning — two of the four candidate directions turned out to
+be **already done** (graceful drain, escape corpus), so G8 captures only the real
+residuals.
+
 | Phase | Theme | Value | Size | Breaks contract? |
 |---|---|---|---|---|
-| **[G1](G1-executor-robustness.md)** | Executor correctness & robustness | 🔴 high | small | no (adds one status) |
-| **[G2](G2-language-coverage.md)** | Language coverage — Go, Java | 🟡 high | medium | no (additive) |
-| **[G3](G3-multi-file-submissions.md)** | Multi-file submissions | 🟠 high | large | **yes** (adds `files[]`) |
-| **[G4](G4-observability.md)** | Observability & operability | 🟢 medium | medium | no |
-| **[G5](G5-deferred.md)** | Deferred / demand-gated | ⚪ low | — | — |
+| **[G6](G6-batch-execution.md)** | Batch execution (compile-once, run N stdins) | 🔴 high | medium | no (additive `stdins[]`) |
+| **[G7](G7-execution-determinism.md)** | Execution determinism (locale / TZ / env) | 🟠 high | **XS/S** | no |
+| **[G8](G8-ops-containment-maintenance.md)** | Ops & containment maintenance | 🟢 medium | small | no |
+
+| Guide | | | | |
+|---|---|---|---|---|
 | **[Adding a language](ADDING-A-LANGUAGE.md)** | Extension guide (the 3 runtime shapes) | — | — | — |
 
-Recommended order is the value order above: **G1 → G2 → G3 → G4**. G1 is small and
-removes real student-facing bugs; do it first. G3 is the biggest and touches the
-backend; schedule it deliberately.
+Recommended order for Wave 2: **G7 → G6 → G8**. G7 is the cheapest and fixes a
+silent *correctness* bug (unpinned locale/TZ corrupting the backend's output
+comparison); G6 is the biggest value (collapses a submission from `N·(compile+run)`
+to `compile + N·run`); G8's three residuals are small and done opportunistically —
+G8.1 (language-parametrized escape corpus) should ride alongside every new
+language.
 
 ## How each spec is written
 
