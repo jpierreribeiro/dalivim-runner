@@ -1,0 +1,10 @@
+# Compiled binary
+/runner
+
+# Test / coverage output
+*.out
+*.test
+
+# Local env
+.env
+.env.*
