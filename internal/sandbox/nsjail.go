@@ -57,10 +57,16 @@ func nsjailArgs(uid, gid int, spec Spec) []string {
 		"--time_limit", strconv.Itoa(wallCapSeconds(spec.TimeoutMs)), // hard wall-clock belt
 		"--rlimit_as", strconv.Itoa(spec.MemoryMB), // RLIMIT_AS, MB
 		"--rlimit_cpu", strconv.Itoa(cpuCapSeconds(spec.TimeoutMs)), // RLIMIT_CPU, s
-		// Map real uid/gid -> root inside the user namespace (single id, size 1);
-		// no newuidmap/setuid needed, so it works in an unprivileged container.
-		"--uid_mapping", "0:" + strconv.Itoa(uid) + ":1",
-		"--gid_mapping", "0:" + strconv.Itoa(gid) + ":1",
+		// Map real uid/gid -> root inside the user namespace (single id, size 1).
+		// --user/--group (NOT --uid_mapping/--gid_mapping) is deliberate: both take
+		// the same inside:outside:count form, but --user/--group set is_newidmap=0
+		// so nsjail writes /proc/PID/{uid,gid}_map DIRECTLY, whereas
+		// --uid_mapping/--gid_mapping set is_newidmap=1 and shell out to the setuid
+		// newuidmap/newgidmap helpers — which the runtime image does not ship (and,
+		// mapping only the caller's own id, does not need). Using the helper flags
+		// made the boot probe fail closed on `newgidmap: No such file or directory`.
+		"--user", "0:" + strconv.Itoa(uid) + ":1",
+		"--group", "0:" + strconv.Itoa(gid) + ":1",
 		// Whole host rootfs read-only (arch-agnostic: brings the interpreter and
 		// its libs) + a fresh, size-capped writable /tmp (bounds the F-11 host-OOM
 		// vector) + the source dir mounted read-only at a fixed path.
