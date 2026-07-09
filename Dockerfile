@@ -1,7 +1,26 @@
 # syntax=docker/dockerfile:1
 
+# ---------------------------------------------------------------------------
+# Reproducible build — base images are PINNED by digest and every apt toolchain by
+# EXACT version. A rebuild months from now installs byte-identical toolchains, so a
+# student's output cannot drift with a silent upstream bump and the CVE surface is
+# controlled (the trivy CI gate flags a pinned version that becomes vulnerable —
+# that is the signal to refresh, not a reason to float).
+#
+# REFRESH (deliberate — on a security advisory, or a build that fails because a
+# Debian point release rotated a pinned version out of the mirror):
+#   1. Base digests:  docker pull <img>:<tag> \
+#        && docker inspect --format '{{index .RepoDigests 0}}' <img>:<tag>
+#   2. apt versions:  docker run --rm <base> sh -c \
+#        'apt-get update -qq >/dev/null; apt-cache policy <pkg>'   # Candidate: line
+#   3. Update the pins, rebuild, and let CI (build + nsjail smoke + trivy) verify.
+# A pinned apt version that no longer exists FAILS the build LOUDLY — never silently
+# floats — so the break itself is the reminder to refresh. Digests captured on the
+# bookworm point release current at 2026-07-09.
+# ---------------------------------------------------------------------------
+
 # ---- build stage: compile a static Go binary ----
-FROM golang:1.26-alpine AS build
+FROM golang:1.26-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS build
 WORKDIR /app
 # No external dependencies yet. When go.sum appears, add it here and run
 # `go mod download` before copying source to keep the module cache layer cached.
@@ -16,11 +35,11 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /runner ./cm
 # nsjail is not a reliable apt package on Debian, so we compile it from a pinned
 # tag and copy only the binary + its runtime libs into the final image. Pinning
 # the build to bookworm keeps the libprotobuf / libnl ABI matching the runtime.
-FROM debian:bookworm-slim AS nsjail-build
+FROM debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df AS nsjail-build
 ARG NSJAIL_VERSION=3.4
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates git autoconf bison flex gcc g++ libtool make pkg-config \
-      libprotobuf-dev libnl-route-3-dev protobuf-compiler \
+      ca-certificates=20230311+deb12u1 git=1:2.39.5-0+deb12u3 autoconf=2.71-3 bison=2:3.8.2+dfsg-1+b1 flex=2.6.4-8.2 gcc=4:12.2.0-3 g++=4:12.2.0-3 libtool=2.4.7-7~deb12u1 make=4.3-4.1 pkg-config=1.8.1-1 \
+      libprotobuf-dev=3.21.12-3 libnl-route-3-dev=3.7.0-0.2+b1 protobuf-compiler=3.21.12-3 \
  && rm -rf /var/lib/apt/lists/*
 RUN git clone --depth 1 --branch "${NSJAIL_VERSION}" https://github.com/google/nsjail /nsjail \
  && make -C /nsjail \
@@ -31,7 +50,7 @@ RUN git clone --depth 1 --branch "${NSJAIL_VERSION}" https://github.com/google/n
 # match ABI. Interpreted runtimes: python3 (in this base) + nodejs (F-C) + lua5.4.
 # Compiled runtimes: gcc/g++ + libc6-dev for STATIC linking (F-D); Go (G2.1) via
 # the toolchain copied from the build stage.
-FROM python:3.12-slim-bookworm
+FROM python:3.12-slim-bookworm@sha256:8a7e7cc04fd3e2bd787f7f24e22d5d119aa590d429b50c95dfe12b3abe52f48b
 # nsjail's runtime shared libraries (protobuf + libnl-route); the Node interpreter
 # for the JavaScript runtime (bookworm's v18 supports --disable-proto=throw); the
 # C/C++ toolchain; and a headless JDK for Java (G2.2 — javac + the JVM). libc6-dev
@@ -42,11 +61,11 @@ FROM python:3.12-slim-bookworm
 # interpreters). openjdk-17 comes from bookworm main so its native libs are ABI-
 # matched to this base. The jail execve's resolved abs paths.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      libprotobuf32 libnl-route-3-200 \
-      nodejs \
-      lua5.4 \
-      gcc g++ libc6-dev \
-      openjdk-17-jdk-headless \
+      libprotobuf32=3.21.12-3 libnl-route-3-200=3.7.0-0.2+b1 \
+      nodejs=18.20.4+dfsg-1~deb12u2 \
+      lua5.4=5.4.4-3+deb12u1 \
+      gcc=4:12.2.0-3 g++=4:12.2.0-3 libc6-dev=2.36-9+deb12u14 \
+      openjdk-17-jdk-headless=17.0.19+10-1~deb12u2 \
  && rm -rf /var/lib/apt/lists/*
 # Non-root, no interactive login shell: the runner never needs a session, and
 # dropping privileges shrinks the blast radius of any escape from a run. nsjail
