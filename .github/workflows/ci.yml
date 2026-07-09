@@ -121,10 +121,38 @@ jobs:
       - name: Escape corpus — every submission must be contained, host survives
         run: ./scripts/smoke-escape.sh
 
+      # Backpressure (R5 / F-A) on the shipped image. A dedicated container with
+      # RUNNER_MAX_CONCURRENT_RUNS=1 (on port 8091) makes saturation
+      # deterministic: firing several concurrent runs proves the excess is shed
+      # immediately with 503 + Retry-After instead of queueing or knocking the
+      # daemon over. Independent of the jail, but run through it (SANDBOX=require).
+      - name: Backpressure — 503 + Retry-After under a low concurrency cap
+        run: |
+          docker run -d --name runner-bp \
+            --pids-limit=512 --cpus=1 --memory=512m \
+            --security-opt seccomp=unconfined \
+            --security-opt apparmor=unconfined \
+            -e RUNNER_ENV=development \
+            -e RUNNER_SANDBOX=require \
+            -e RUNNER_MAX_CONCURRENT_RUNS=1 \
+            -e GOMAXPROCS=1 \
+            -p 8091:8090 \
+            runner:smoke
+          for i in $(seq 1 40); do
+            if curl -fs localhost:8091/healthz >/dev/null; then break; fi
+            if ! docker ps --filter name=runner-bp --filter status=running -q | grep -q .; then
+              echo "::error::runner-bp exited during boot"; docker logs runner-bp 2>&1 || true; exit 1
+            fi
+            sleep 0.5
+          done
+          RUNNER_URL=http://localhost:8091 ./scripts/smoke-stress.sh 1
+
       - name: Runner logs (always)
         if: always()
-        run: docker logs runner 2>&1 || true
+        run: |
+          echo "=== runner ==="; docker logs runner 2>&1 || true
+          echo "=== runner-bp ==="; docker logs runner-bp 2>&1 || true
 
       - name: Teardown
         if: always()
-        run: docker rm -f runner || true
+        run: docker rm -f runner runner-bp || true

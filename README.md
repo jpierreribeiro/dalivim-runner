@@ -171,7 +171,10 @@ CI (`.github/workflows/ci.yml`) has two jobs:
   boot log shows `nsjail ENABLED`, hits `/healthz`, then does a real
   `POST /run` for `print(2+2)` and the adversarial **escape corpus**
   (`scripts/smoke-escape.sh`): fork bomb, secret/host-env read, seccomp-killed
-  syscall, output flood — each must be contained and the runner must survive.
+  syscall, output flood, egress + cloud-metadata, CPU spin, memory bomb, host
+  write — each must be contained and the runner must survive. A **backpressure**
+  check (`scripts/smoke-stress.sh`, a `RUNNER_MAX_CONCURRENT_RUNS=1` container)
+  then proves saturation is shed with `503` + `Retry-After`.
 
 ### Why the smoke container relaxes Docker's own sandbox
 

@@ -118,16 +118,25 @@ First CI in the repo. `.github/workflows/ci.yml`:
       (container-exit detection makes a failed fail-closed probe a loud job
       failure) → assert `nsjail ENABLED` in the boot log → real `POST /run`
       `print(2+2)` ⇒ `success` / `"4\n"`.
-- [x] **Escape corpus** (§4.4) — `scripts/smoke-escape.sh`: fork bomb, secret /
-      host-env read, seccomp-killed syscall, output flood. Each asserted
-      contained; a final host-survival run must still succeed.
+- [x] **Escape corpus** (§4.4) — `scripts/smoke-escape.sh`, now the **full §4.4
+      table** (compiler bomb excepted — needs F-D): fork bomb → contained + host
+      survives; secret/host-env read → denied; seccomp-killed syscall (`unshare`);
+      output flood → truncated, no OOM; **egress + cloud-metadata → empty-netns
+      blocked; CPU spin → `timeout`; memory bomb → `memory_exceeded` (RLIMIT_AS);
+      host write (`/usr`,`/bin`,`/app`,`/sandbox`) → read-only denied**. Each
+      asserted contained; a final host-survival run must still succeed.
+- [x] **Stress / backpressure** (§4.4 tail, R5) — `scripts/smoke-stress.sh` +
+      a dedicated `RUNNER_MAX_CONCURRENT_RUNS=1` container in CI: firing
+      `cap+3` concurrent runs proves the excess is shed with `503` + `Retry-After`
+      (not queued, no crash) and the runner still serves after the burst.
 - [x] Helper `scripts/smoke-run.sh` — `POST /run`, exact stdout+status assertion,
-      non-zero exit on mismatch (reused by the corpus).
-- [ ] `runner-security` as a *separate* periodic job, image CVE scan
-      (trivy/grype), and the compiler-bomb / stress-concurrency corpus rows —
-      deferred with F-C/F-D (no compiled runtime yet) and F-A stress tooling.
+      non-zero exit on mismatch (reused by the corpus + stress).
+- [ ] Still open: `runner-security` as a *separate* periodic job, image CVE scan
+      (trivy/grype), and the **compiler-bomb** corpus row — the last deferred with
+      F-D (no compiled runtime yet).
 
-Signed-off: `claude/dalivim-runner-ci-smoke-3sscm8` — 2026-07-09.
+Signed-off: `claude/dalivim-runner-ci-smoke-3sscm8` — 2026-07-09
+(escape-corpus completion + backpressure gate: 2026-07-09).
 
 ## F-C / F-D — compiled languages (forward-compat, not blocking)
 
