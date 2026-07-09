@@ -58,6 +58,7 @@ USE dalivim DEFAULT ALLOW`
 //   - statx: not listed — glibc-static resolves fstat() through newfstat/
 //     newfstatat here, both of which ARE named. (If a future glibc insists on
 //     statx, the fix is a newer nsjail/kafel, not opening the allowlist.)
+//
 // execve is allowed for one structural reason: nsjail installs the seccomp
 // filter and THEN execve()s the payload, so the launch execve is itself filtered
 // — deny it and the binary never starts (SIGSYS, syscall=59). It is not a hole
