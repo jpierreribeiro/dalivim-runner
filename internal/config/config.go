@@ -25,6 +25,9 @@ type Config struct {
 
 	MaxConcurrentRuns int // simultaneous executions before the runner sheds load with 503
 
+	MetricsToken        string // RUNNER_METRICS_TOKEN: gates GET /metrics; empty => the service token
+	ReadyRequiresNsjail bool   // RUNNER_READY_REQUIRES: /readyz needs nsjail active (default true)
+
 	DefaultTimeoutMs int
 	MaxTimeoutMs     int
 	DefaultMemoryMB  int
@@ -50,23 +53,25 @@ type Config struct {
 // exiting) so the caller owns process lifecycle.
 func Load() (Config, error) {
 	cfg := Config{
-		Addr:              ":" + port(),
-		ServiceToken:      os.Getenv("RUNNER_SERVICE_TOKEN"),
-		Development:       strings.EqualFold(strings.TrimSpace(os.Getenv("RUNNER_ENV")), "development"),
-		SandboxPolicy:     os.Getenv("RUNNER_SANDBOX"),
-		NetworkPolicy:     os.Getenv("RUNNER_NETWORK_ISOLATION"),
-		CgroupPolicy:      os.Getenv("RUNNER_CGROUP"),
-		CgroupMount:       cgroupMount(),
-		MaxProcesses:      envInt("RUNNER_MAX_PROCESSES", 256),
-		MaxFileSizeMB:     envInt("RUNNER_MAX_FILE_SIZE_MB", 64),
-		MaxConcurrentRuns: envInt("RUNNER_MAX_CONCURRENT_RUNS", 8),
-		DefaultTimeoutMs:  envInt("RUNNER_DEFAULT_TIMEOUT_MS", 3000),
-		MaxTimeoutMs:      envInt("RUNNER_MAX_TIMEOUT_MS", 10000),
-		DefaultMemoryMB:   envInt("RUNNER_DEFAULT_MEMORY_MB", 128),
-		MaxMemoryMB:       envInt("RUNNER_MAX_MEMORY_MB", 512),
-		MaxSourceBytes:    envInt("RUNNER_MAX_SOURCE_BYTES", 200_000),
-		MaxStdinBytes:     envInt("RUNNER_MAX_STDIN_BYTES", 1_000_000),
-		MaxOutputBytes:    envInt("RUNNER_MAX_OUTPUT_BYTES", 64*1024),
+		Addr:                ":" + port(),
+		ServiceToken:        os.Getenv("RUNNER_SERVICE_TOKEN"),
+		Development:         strings.EqualFold(strings.TrimSpace(os.Getenv("RUNNER_ENV")), "development"),
+		SandboxPolicy:       os.Getenv("RUNNER_SANDBOX"),
+		NetworkPolicy:       os.Getenv("RUNNER_NETWORK_ISOLATION"),
+		CgroupPolicy:        os.Getenv("RUNNER_CGROUP"),
+		CgroupMount:         cgroupMount(),
+		MaxProcesses:        envInt("RUNNER_MAX_PROCESSES", 256),
+		MaxFileSizeMB:       envInt("RUNNER_MAX_FILE_SIZE_MB", 64),
+		MaxConcurrentRuns:   envInt("RUNNER_MAX_CONCURRENT_RUNS", 8),
+		MetricsToken:        os.Getenv("RUNNER_METRICS_TOKEN"),
+		ReadyRequiresNsjail: readyRequiresNsjail(),
+		DefaultTimeoutMs:    envInt("RUNNER_DEFAULT_TIMEOUT_MS", 3000),
+		MaxTimeoutMs:        envInt("RUNNER_MAX_TIMEOUT_MS", 10000),
+		DefaultMemoryMB:     envInt("RUNNER_DEFAULT_MEMORY_MB", 128),
+		MaxMemoryMB:         envInt("RUNNER_MAX_MEMORY_MB", 512),
+		MaxSourceBytes:      envInt("RUNNER_MAX_SOURCE_BYTES", 200_000),
+		MaxStdinBytes:       envInt("RUNNER_MAX_STDIN_BYTES", 1_000_000),
+		MaxOutputBytes:      envInt("RUNNER_MAX_OUTPUT_BYTES", 64*1024),
 
 		CompileTimeoutMs:    envInt("RUNNER_COMPILE_TIMEOUT_MS", 10_000),
 		MaxCompileTimeoutMs: envInt("RUNNER_MAX_COMPILE_TIMEOUT_MS", 20_000),
@@ -89,6 +94,19 @@ func cgroupMount() string {
 		return m
 	}
 	return "/sys/fs/cgroup/dalivim"
+}
+
+// readyRequiresNsjail resolves RUNNER_READY_REQUIRES for the /readyz threshold.
+// Default (unset) and "nsjail" require the nsjail backend to be active for readiness;
+// "none"/"off"/"any" relax it (always ready when the process is up), for operators
+// intentionally running the netns-only backend.
+func readyRequiresNsjail() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("RUNNER_READY_REQUIRES"))) {
+	case "none", "off", "any":
+		return false
+	default: // "" (default) or "nsjail"
+		return true
+	}
 }
 
 // port resolves the listen port: RUNNER_PORT, else the platform-injected PORT

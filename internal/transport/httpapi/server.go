@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jpierreribeiro/dalivim-runner/internal/executor"
+	"github.com/jpierreribeiro/dalivim-runner/internal/metrics"
 )
 
 // Server wraps the standard library HTTP server with the runner's routes and
@@ -25,26 +26,54 @@ type Config struct {
 	MaxSourceBytes    int
 	MaxStdinBytes     int
 	MaxConcurrentRuns int
+
+	// MetricsToken gates GET /metrics; empty falls back to Token so /metrics is
+	// never public in production (metrics leak submission volume/patterns).
+	MetricsToken string
+
+	// Readiness posture (G4.3), resolved from the sandbox at boot.
+	Backend             string // "nsjail" / "netns" / "none"
+	NetworkIsolated     bool
+	ReadyRequiresNsjail bool // /readyz returns 503 unless nsjail is the active backend
 }
 
 // New builds the server: POST /run (and the deprecated POST /run/python alias)
-// behind the token gate, plus an unauthenticated GET /healthz for liveness
-// probes. Method+path routing (Go 1.22+) makes a wrong method a 405 without any
+// behind the token gate; unauthenticated GET /healthz (liveness) and GET /readyz
+// (containment-aware readiness, G4.3); and token-gated GET /metrics (Prometheus,
+// G4.1). Method+path routing (Go 1.22+) makes a wrong method a 405 without any
 // per-handler checks.
 func New(svc *executor.Service, cfg Config) *Server {
-	h := &handler{svc: svc, maxSourceBytes: cfg.MaxSourceBytes, maxStdinBytes: cfg.MaxStdinBytes}
+	m := metrics.New()
+	h := &handler{
+		svc:                 svc,
+		metrics:             m,
+		maxSourceBytes:      cfg.MaxSourceBytes,
+		maxStdinBytes:       cfg.MaxStdinBytes,
+		backend:             cfg.Backend,
+		networkIsolated:     cfg.NetworkIsolated,
+		readyRequiresNsjail: cfg.ReadyRequiresNsjail,
+	}
 
 	// gate wraps an execution handler: authenticate first (RequireToken), then
 	// bound concurrency. Ordering matters — only authenticated callers may consume
 	// a run slot, so an unauthenticated flood cannot exhaust capacity.
 	gate := func(next http.Handler) http.Handler {
-		return RequireToken(cfg.Token, LimitConcurrency(cfg.MaxConcurrentRuns, next))
+		return RequireToken(cfg.Token, LimitConcurrency(cfg.MaxConcurrentRuns, m, next))
+	}
+
+	// /metrics is gated by its own token, or the service token when unset — never
+	// public. Falls through to the pass-through gate only in dev (both empty).
+	metricsToken := cfg.MetricsToken
+	if metricsToken == "" {
+		metricsToken = cfg.Token
 	}
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /run", gate(http.HandlerFunc(h.run)))
 	mux.Handle("POST /run/python", gate(http.HandlerFunc(h.runPythonCompat)))
 	mux.HandleFunc("GET /healthz", h.health)
+	mux.HandleFunc("GET /readyz", h.ready)
+	mux.Handle("GET /metrics", RequireToken(metricsToken, http.HandlerFunc(h.serveMetrics)))
 
 	return &Server{
 		http: &http.Server{

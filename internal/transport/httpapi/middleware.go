@@ -3,6 +3,8 @@ package httpapi
 import (
 	"crypto/subtle"
 	"net/http"
+
+	"github.com/jpierreribeiro/dalivim-runner/internal/metrics"
 )
 
 // RequireToken is the zero-trust gate for this internal service. Because /run is
@@ -35,8 +37,9 @@ func RequireToken(token string, next http.Handler) http.Handler {
 // so only authenticated callers can consume a slot — an unauthenticated flood
 // cannot starve the gateway of capacity.
 //
-// max <= 0 disables the limit (pass-through).
-func LimitConcurrency(max int, next http.Handler) http.Handler {
+// max <= 0 disables the limit (pass-through). m records the inflight gauge and
+// the overload counter (nil-safe).
+func LimitConcurrency(max int, m *metrics.Metrics, next http.Handler) http.Handler {
 	if max <= 0 {
 		return next
 	}
@@ -44,9 +47,11 @@ func LimitConcurrency(max int, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case slots <- struct{}{}:
-			defer func() { <-slots }()
+			m.IncInflight()
+			defer func() { <-slots; m.DecInflight() }()
 			next.ServeHTTP(w, r)
 		default:
+			m.Overload()
 			w.Header().Set("Retry-After", "1")
 			http.Error(w, "runner at capacity", http.StatusServiceUnavailable)
 		}

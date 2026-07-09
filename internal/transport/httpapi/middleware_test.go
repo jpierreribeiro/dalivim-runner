@@ -17,7 +17,7 @@ func TestLimitConcurrency_ShedsLoadWith503(t *testing.T) {
 		<-release
 		w.WriteHeader(http.StatusOK)
 	})
-	h := LimitConcurrency(1, handler)
+	h := LimitConcurrency(1, nil, handler)
 
 	// Occupy the only slot with an in-flight request.
 	firstDone := make(chan int, 1)
@@ -57,7 +57,7 @@ func TestLimitConcurrency_ShedsLoadWith503(t *testing.T) {
 // (the limiter must not silently drop traffic when unconfigured).
 func TestLimitConcurrency_DisabledWhenNonPositive(t *testing.T) {
 	called := false
-	h := LimitConcurrency(0, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	h := LimitConcurrency(0, nil, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	}))

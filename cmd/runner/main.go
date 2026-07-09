@@ -72,11 +72,15 @@ func main() {
 	)
 
 	srv := httpapi.New(svc, httpapi.Config{
-		Addr:              cfg.Addr,
-		Token:             cfg.ServiceToken,
-		MaxSourceBytes:    cfg.MaxSourceBytes,
-		MaxStdinBytes:     cfg.MaxStdinBytes,
-		MaxConcurrentRuns: cfg.MaxConcurrentRuns,
+		Addr:                cfg.Addr,
+		Token:               cfg.ServiceToken,
+		MaxSourceBytes:      cfg.MaxSourceBytes,
+		MaxStdinBytes:       cfg.MaxStdinBytes,
+		MaxConcurrentRuns:   cfg.MaxConcurrentRuns,
+		MetricsToken:        cfg.MetricsToken,
+		Backend:             sb.Backend(),
+		NetworkIsolated:     sb.NetworkIsolated(),
+		ReadyRequiresNsjail: cfg.ReadyRequiresNsjail,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
