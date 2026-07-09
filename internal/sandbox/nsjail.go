@@ -50,17 +50,20 @@ USE dalivim DEFAULT ALLOW`
 // `fstat`) and 63 is `newuname` (not `uname`). Using the glibc-common spelling
 // fails the policy compile (fail-closed), same class as the umount/umount2 catch.
 //
-// And nsjail 3.4 bundles a kafel old enough to lack the NAMES of the newest
-// syscalls, so those are given by amd64 NUMBER (kafel accepts numbers regardless
-// of its name-table age): 332 = statx, 334 = rseq. glibc-static needs both —
-// stat() goes through statx on modern glibc, and __libc_start_main registers
-// rseq at startup — and they are amd64-only, matching the amd64-only image.
+// nsjail 3.4's bundled kafel is old enough to lack the NAMES of the newest
+// syscalls (statx=332, rseq=334) and its grammar rejects bare numbers, so those
+// two cannot be allow-listed at all. We remove the NEED for them instead:
+//   - rseq: disabled at the glibc level via GLIBC_TUNABLES=glibc.pthread.rseq=0
+//     on the run's env (see compiled.go), so __libc_start_main never registers it;
+//   - statx: not listed — glibc-static resolves fstat() through newfstat/
+//     newfstatat here, both of which ARE named. (If a future glibc insists on
+//     statx, the fix is a newer nsjail/kafel, not opening the allowlist.)
 const staticAllowSyscalls = `read, write, readv, writev, pread64, pwrite64,
-		close, newfstat, newfstatat, 332, lseek, ioctl, fcntl,
+		close, newfstat, newfstatat, lseek, ioctl, fcntl,
 		dup, dup2, dup3, poll, ppoll, pselect6, select,
 		brk, mmap, munmap, mprotect, mremap, madvise,
 		rt_sigaction, rt_sigprocmask, rt_sigreturn, sigaltstack,
-		arch_prctl, set_tid_address, set_robust_list, 334, prlimit64,
+		arch_prctl, set_tid_address, set_robust_list, prlimit64,
 		futex, sched_yield, sched_getaffinity, getcpu,
 		clock_gettime, clock_getres, clock_nanosleep, nanosleep, gettimeofday, time,
 		getpid, gettid, getuid, geteuid, getgid, getegid, getrandom, newuname, sysinfo,

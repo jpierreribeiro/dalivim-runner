@@ -215,7 +215,12 @@ func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest,
 		defer acct.Close()
 	}
 	cmd.Stdin = strings.NewReader(req.Stdin)
-	cmd.Env = []string{} // a static artifact needs no environment
+	// A static artifact needs no environment, except: disable glibc's rseq
+	// registration so __libc_start_main doesn't issue the rseq syscall — nsjail
+	// 3.4's kafel cannot name rseq for the static seccomp allowlist, and rseq is a
+	// pure perf optimisation, so turning it off costs nothing and keeps the
+	// allowlist tight. Harmless under the denylist too.
+	cmd.Env = []string{"GLIBC_TUNABLES=glibc.pthread.rseq=0"}
 
 	stdout := &limitedBuffer{limit: r.outputLimit}
 	stderr := &limitedBuffer{limit: r.outputLimit}
