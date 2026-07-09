@@ -13,8 +13,15 @@ import (
 
 // Config is the fully-resolved service configuration.
 type Config struct {
-	Addr          string // listen address, e.g. ":8090"
-	ServiceToken  string // shared secret; callers send it as X-Runner-Token
+	Addr         string // listen address, e.g. ":8090"
+	ServiceToken string // primary shared secret (RUNNER_SERVICE_TOKEN); callers send it as X-Runner-Token
+	// ServiceTokens is the full set of currently-valid service tokens: the
+	// primary RUNNER_SERVICE_TOKEN plus any in RUNNER_SERVICE_TOKENS (comma/space
+	// separated). A request authorizes if it matches ANY (each compared in
+	// constant time), which makes rotation zero-downtime: add the new token, deploy,
+	// point the backend at it, then drop the old one — no window where either is
+	// rejected. Empty only in development (fail-closed in prod).
+	ServiceTokens []string
 	Development   bool   // RUNNER_ENV=development relaxes the token requirement
 	SandboxPolicy string // RUNNER_SANDBOX: auto|require|off (empty => auto) — nsjail selection
 	NetworkPolicy string // RUNNER_NETWORK_ISOLATION: auto|require|off (empty => auto) — netns backend
@@ -25,8 +32,9 @@ type Config struct {
 
 	MaxConcurrentRuns int // simultaneous executions before the runner sheds load with 503
 
-	MetricsToken        string // RUNNER_METRICS_TOKEN: gates GET /metrics; empty => the service token
-	ReadyRequiresNsjail bool   // RUNNER_READY_REQUIRES: /readyz needs nsjail active (default true)
+	MetricsToken        string   // RUNNER_METRICS_TOKEN: gates GET /metrics; empty => the service token(s)
+	MetricsTokens       []string // full valid set for /metrics: RUNNER_METRICS_TOKEN(S), or the service set when unset
+	ReadyRequiresNsjail bool     // RUNNER_READY_REQUIRES: /readyz needs nsjail active (default true)
 
 	DefaultTimeoutMs int
 	MaxTimeoutMs     int
@@ -52,6 +60,15 @@ type Config struct {
 	CompileMemoryMB     int // RLIMIT_AS / cgroup for the compiler (bombs)
 	MaxArtifactBytes    int // reject a compiled artifact larger than this
 
+	// ShutdownGraceMs is how long the server drains in-flight runs on SIGTERM
+	// before forcing them down (G8.3). It MUST be ≥ the longest a single request
+	// can legitimately occupy the server (a compile phase up to MaxCompileTimeoutMs
+	// followed by a run up to MaxTimeoutMs) plus slack, or a deploy would kill a
+	// long run mid-flight and surface a spurious failure to the student. Derived
+	// from those ceilings; RUNNER_SHUTDOWN_GRACE_MS may RAISE it but never lower it
+	// below the invariant.
+	ShutdownGraceMs int
+
 	// StaticSeccomp: off|enforce|complain (empty => off) — the seccomp profile for
 	// the compiled RUN jail. off keeps the shared denylist; enforce installs the
 	// tight static-binary allowlist (SIGSYS on anything unlisted); complain logs
@@ -59,12 +76,23 @@ type Config struct {
 	StaticSeccomp string
 }
 
+// maxTokens caps how many valid tokens a set may carry. A rotation needs only
+// two live at once (old + new); the cap keeps a fat-fingered env from turning
+// the constant-time per-candidate compare into an unbounded loop.
+const maxTokens = 8
+
 // Load reads and validates configuration. It returns an error (rather than
 // exiting) so the caller owns process lifecycle.
 func Load() (Config, error) {
+	serviceTokens := tokenSet(os.Getenv("RUNNER_SERVICE_TOKEN"), os.Getenv("RUNNER_SERVICE_TOKENS"))
+	primary := ""
+	if len(serviceTokens) > 0 {
+		primary = serviceTokens[0]
+	}
 	cfg := Config{
 		Addr:                ":" + port(),
-		ServiceToken:        os.Getenv("RUNNER_SERVICE_TOKEN"),
+		ServiceToken:        primary,
+		ServiceTokens:       serviceTokens,
 		Development:         strings.EqualFold(strings.TrimSpace(os.Getenv("RUNNER_ENV")), "development"),
 		SandboxPolicy:       os.Getenv("RUNNER_SANDBOX"),
 		NetworkPolicy:       os.Getenv("RUNNER_NETWORK_ISOLATION"),
@@ -74,6 +102,7 @@ func Load() (Config, error) {
 		MaxFileSizeMB:       envInt("RUNNER_MAX_FILE_SIZE_MB", 64),
 		MaxConcurrentRuns:   envInt("RUNNER_MAX_CONCURRENT_RUNS", 8),
 		MetricsToken:        os.Getenv("RUNNER_METRICS_TOKEN"),
+		MetricsTokens:       tokenSet(os.Getenv("RUNNER_METRICS_TOKEN"), os.Getenv("RUNNER_METRICS_TOKENS")),
 		ReadyRequiresNsjail: readyRequiresNsjail(),
 		DefaultTimeoutMs:    envInt("RUNNER_DEFAULT_TIMEOUT_MS", 3000),
 		MaxTimeoutMs:        envInt("RUNNER_MAX_TIMEOUT_MS", 10000),
@@ -95,10 +124,41 @@ func Load() (Config, error) {
 		MaxArtifactBytes:    envInt("RUNNER_MAX_ARTIFACT_MB", 32) * 1024 * 1024,
 		StaticSeccomp:       os.Getenv("RUNNER_STATIC_SECCOMP"),
 	}
-	if cfg.ServiceToken == "" && !cfg.Development {
-		return Config{}, fmt.Errorf("RUNNER_SERVICE_TOKEN is required outside development; set it (and send X-Runner-Token from the gateway) or set RUNNER_ENV=development for local use")
+	// G8.3 invariant: the drain grace must outlast the worst-case single request
+	// (full compile budget + full run budget) plus slack, so a deploy never kills a
+	// run that is still inside its own deadline. RUNNER_SHUTDOWN_GRACE_MS can only
+	// raise it above this floor.
+	cfg.ShutdownGraceMs = shutdownGraceMs(cfg.MaxCompileTimeoutMs, cfg.MaxTimeoutMs)
+	if len(cfg.ServiceTokens) == 0 && !cfg.Development {
+		return Config{}, fmt.Errorf("RUNNER_SERVICE_TOKEN(S) is required outside development; set RUNNER_SERVICE_TOKEN (or a comma/space-separated RUNNER_SERVICE_TOKENS for zero-downtime rotation), and send X-Runner-Token from the gateway, or set RUNNER_ENV=development for local use")
 	}
 	return cfg, nil
+}
+
+// tokenSet parses one or more env sources into a deduplicated, order-preserving
+// set of valid tokens. Each source may itself be comma/space-separated
+// (RUNNER_SERVICE_TOKENS), so a single primary var and a plural rotation var
+// merge into one set. Blank entries are dropped; the result is capped at
+// maxTokens (extra entries are ignored, never silently authorizing more).
+func tokenSet(sources ...string) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	for _, s := range sources {
+		for _, tok := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\n' }) {
+			if tok == "" {
+				continue
+			}
+			if _, dup := seen[tok]; dup {
+				continue
+			}
+			seen[tok] = struct{}{}
+			out = append(out, tok)
+			if len(out) == maxTokens {
+				return out
+			}
+		}
+	}
+	return out
 }
 
 // cgroupMount resolves the delegated cgroup v2 subtree for per-run accounting,
@@ -123,6 +183,23 @@ func readyRequiresNsjail() bool {
 	default: // "" (default) or "nsjail"
 		return true
 	}
+}
+
+// shutdownGraceSlackMs is the fixed headroom added over the worst-case request
+// wall-time: time for the run to observe its own deadline, be reaped, and the
+// response to flush before the drain deadline fires.
+const shutdownGraceSlackMs = 5000
+
+// shutdownGraceMs computes the drain grace as the invariant floor (worst-case
+// compile + run + slack), then lets RUNNER_SHUTDOWN_GRACE_MS raise it — never
+// lower it below the floor, so the G8.3 guarantee holds regardless of the
+// override.
+func shutdownGraceMs(maxCompileMs, maxRunMs int) int {
+	floor := maxCompileMs + maxRunMs + shutdownGraceSlackMs
+	if v := envInt("RUNNER_SHUTDOWN_GRACE_MS", floor); v > floor {
+		return v
+	}
+	return floor
 }
 
 // port resolves the listen port: RUNNER_PORT, else the platform-injected PORT

@@ -1,5 +1,13 @@
 # G8 — Ops & containment maintenance
 
+> **Status — ✅ implemented (2026-07-09).** All three residuals are done: the
+> escape corpus is language-parametrized (`scripts/smoke-escape.sh` loops the six
+> languages over the universal containment cases); the service/metrics token gate
+> accepts a rotation set (`RUNNER_SERVICE_TOKENS` / `RUNNER_METRICS_TOKENS`,
+> constant-time match against each); and the shutdown grace is derived from the
+> compile+run wall-time ceilings so a deploy never kills an in-flight run inside
+> its own deadline. The planning notes are kept below.
+
 Grounding the "fleet resilience" and "security maintenance" directions against the
 code showed most of that work is **already done** — graceful drain exists, the
 escape corpus already runs in CI on every build and weekly. This spec deliberately
@@ -134,6 +142,12 @@ S/M total across the three. None is blocking — do them opportunistically, but
 **G8.1 should ride alongside every new language** (G2/G3).
 
 ## Phase G8 acceptance
-- The escape corpus asserts containment for **all** languages, gated in CI.
-- Token rotation is possible with a zero-downtime overlap window.
-- Shutdown never kills an in-flight run that is still within its own deadline.
+- ✅ The escape corpus asserts containment for **all** languages, gated in CI
+  (`scripts/smoke-escape.sh` loops `python/javascript/c/cpp/go/java` over egress,
+  host-write, secret-read, and CPU-spin; mem-bomb for the RLIMIT_AS languages;
+  the pids/env/seccomp controls once).
+- ✅ Token rotation is possible with a zero-downtime overlap window
+  (`RUNNER_SERVICE_TOKENS`, constant-time match against each; metrics mirror it).
+- ✅ Shutdown never kills an in-flight run still within its own deadline — the
+  drain grace is derived as `max_compile + max_run + slack` and can only be raised
+  by `RUNNER_SHUTDOWN_GRACE_MS`.

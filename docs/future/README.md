@@ -32,11 +32,11 @@ code-grounded before planning — two of the four candidate directions turned ou
 be **already done** (graceful drain, escape corpus), so G8 captures only the real
 residuals.
 
-| Phase | Theme | Value | Size | Breaks contract? |
-|---|---|---|---|---|
-| **[G6](G6-batch-execution.md)** | Batch execution (compile-once, run N stdins) | ⚪ gated¹ | medium | no (additive `stdins[]`) |
-| **[G7](G7-execution-determinism.md)** | Execution determinism (locale / TZ / env) | 🟢 hygiene¹ | **XS/S** | no |
-| **[G8](G8-ops-containment-maintenance.md)** | Ops & containment maintenance | 🟢 medium | small | no |
+| Phase | Theme | Value | Size | Breaks contract? | Status |
+|---|---|---|---|---|---|
+| **[G6](G6-batch-execution.md)** | Batch execution (compile-once, run N stdins) | ⚪ gated¹ | medium | no (additive `stdins[]`) | — |
+| **[G7](G7-execution-determinism.md)** | Execution determinism (locale / TZ / env) | 🟢 hygiene¹ | **XS/S** | no | ✅ done |
+| **[G8](G8-ops-containment-maintenance.md)** | Ops & containment maintenance | 🟢 medium | small | no | ✅ done |
 
 | Guide | | | | |
 |---|---|---|---|---|
@@ -48,11 +48,12 @@ run per submission. That **demand-gates G6** (batch `stdins[]` has no caller unt
 test-case model exists) and **reframes G7** from "fixes silent WA" to cheap hygiene
 that becomes a prerequisite once judging lands.
 
-Recommended order for Wave 2: **G8 → G7 → G6**. G8's residuals (esp. token rotation
-and the language-parametrized escape corpus) are real now; G7 is cheap hygiene to
-bank ahead of any judge; G6 waits on the backend judge decision. The higher-leverage
-near-term work is now at the **system** level (seam consolidation, runner migration,
-abuse/quota hardening) — tracked outside this runner-only roadmap.
+Recommended order for Wave 2: **G8 → G7 → G6**. G8 (token rotation, the
+language-parametrized escape corpus, shutdown-grace alignment) and G7 (locale/TZ
+determinism) are now **implemented**; G6 remains gated on the backend judge
+decision. The higher-leverage near-term work is now at the **system** level (seam
+consolidation, runner migration, abuse/quota hardening) — tracked outside this
+runner-only roadmap.
 
 ## How each spec is written
 
