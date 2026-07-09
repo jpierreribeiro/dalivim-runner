@@ -37,14 +37,16 @@ USE dalivim DEFAULT ALLOW`
 
 // staticAllowSyscalls is the minimal syscall set a statically-linked C/C++ program
 // needs (F-D run jail) — glibc static startup (brk/arch_prctl/set_tid_address/
-// set_robust_list/rseq/prlimit64), memory (mmap/munmap/mprotect/mremap/madvise/
-// brk), stdio on already-open fds (read/write/…/fstat/ioctl/lseek/poll), signals,
+// set_robust_list/prlimit64), memory (mmap/munmap/mprotect/mremap/madvise/brk),
+// stdio on already-open fds (read/write/…/newfstat/ioctl/lseek/poll), signals,
 // time, cheap identity getters, and exit — and deliberately EXCLUDES the escape
-// surface a compute program never needs: execve/execveat (no re-exec), the socket
-// family (no egress), open/openat (no file access), clone/fork, ptrace, and every
-// namespace/mount/module syscall. Everything not listed is killed with SIGSYS
-// (DEFAULT KILL) — far tighter than the interpreter denylist. The set is a
-// starting point tuned on the target via the complain profile; see the plan §3.4.
+// surface a compute program never needs: the socket family (no egress),
+// open/openat (no file access), clone/fork, ptrace, and every namespace/mount/
+// module syscall. execve is the one deliberate exception (nsjail's launch — see
+// below). Everything not listed is killed with SIGSYS (DEFAULT KILL) — far
+// tighter than the interpreter denylist. Tuned on the target via the complain
+// profile; see the plan §3.4.
+//
 // Note on kafel identifiers: kafel's amd64 table uses the KERNEL entry names, so
 // the stat/uname family carry the `new` prefix — syscall 5 is `newfstat` (not
 // `fstat`) and 63 is `newuname` (not `uname`). Using the glibc-common spelling
