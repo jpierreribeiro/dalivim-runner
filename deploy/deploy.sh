@@ -27,6 +27,7 @@ RUNNER_NETWORK_ISOLATION=require
 RUNNER_CGROUP=require                       # 'auto' until `setup` has made it reboot-safe
 RUNNER_CGROUP_MOUNT=/sys/fs/cgroup/dalivim
 CGROUP_PARENT=/dalivim                      # empty to disable R6 cgroup placement
+RUNNER_STATIC_SECCOMP=""                    # F-D C/C++ run jail: off|complain|enforce (empty => off)
 CPUS=1
 MEMORY=1g
 PIDS_LIMIT=512
@@ -94,6 +95,7 @@ cmd_up() {
   local lim=()
   [ -n "$RUNNER_DEFAULT_MEMORY_MB" ] && lim+=(-e "RUNNER_DEFAULT_MEMORY_MB=$RUNNER_DEFAULT_MEMORY_MB")
   [ -n "$RUNNER_MAX_MEMORY_MB" ]     && lim+=(-e "RUNNER_MAX_MEMORY_MB=$RUNNER_MAX_MEMORY_MB")
+  [ -n "$RUNNER_STATIC_SECCOMP" ]    && lim+=(-e "RUNNER_STATIC_SECCOMP=$RUNNER_STATIC_SECCOMP")
 
   log "recreating '$CONTAINER' from image '$IMAGE'"
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
@@ -112,7 +114,7 @@ cmd_up() {
   sleep 2
 
   log "boot:"
-  docker logs "$CONTAINER" 2>&1 | grep -E "nsjail ENABLED|cgroup memory accounting ENABLED" \
+  docker logs "$CONTAINER" 2>&1 | grep -E "nsjail ENABLED|cgroup memory accounting ENABLED|static seccomp" \
     || die "runner did not report 'nsjail ENABLED' — inspect: docker logs $CONTAINER"
   ok "up. token in $TOKEN_FILE — set the SAME value as RUNNER_SERVICE_TOKEN on the backend."
 }
