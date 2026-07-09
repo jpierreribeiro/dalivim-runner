@@ -142,12 +142,15 @@ func nsjailArgs(uid, gid int, spec Spec) []string {
 	if !spec.MinimalRootfs {
 		args = append(args, "--bindmount_ro", "/") // arch-agnostic: brings interpreter + libs
 	}
-	// A fresh, size-capped writable /tmp bounds the F-11 host-OOM vector. Default
-	// size is nsjail's small default (fine for gcc); a language whose compiler needs
-	// more scratch (Go's GOCACHE) sizes it up via TmpfsSizeMB.
-	args = append(args, "--tmpfsmount", "/tmp")
+	// A fresh, size-capped writable /tmp bounds the F-11 host-OOM vector. The plain
+	// --tmpfsmount uses nsjail's small default size (fine for gcc's intermediates);
+	// a language whose compiler needs more scratch (Go's GOCACHE) sizes it up. nsjail
+	// 3.4 has no --tmpfs_size flag — the size is set via the arbitrary-mount form
+	// (`-m src:dst:fstype:options`), which is what --tmpfsmount expands to anyway.
 	if spec.TmpfsSizeMB > 0 {
-		args = append(args, "--tmpfs_size", strconv.Itoa(spec.TmpfsSizeMB*1024*1024))
+		args = append(args, "--mount", "none:/tmp:tmpfs:size="+strconv.Itoa(spec.TmpfsSizeMB*1024*1024))
+	} else {
+		args = append(args, "--tmpfsmount", "/tmp")
 	}
 
 	// The per-run dir at a fixed path. Read-only by default (student code never

@@ -137,19 +137,27 @@ func TestNsjailArgs_ZeroAddressSpaceOmitsRlimitAS(t *testing.T) {
 	}
 }
 
-// TestNsjailArgs_TmpfsSize pins the Go compile path: TmpfsSizeMB sizes /tmp (in
-// bytes) so a cold `go build` fits its GOCACHE; 0 leaves nsjail's small default.
+// TestNsjailArgs_TmpfsSize pins the Go compile path: TmpfsSizeMB sizes /tmp via
+// the arbitrary-mount form (nsjail 3.4 has no --tmpfs_size flag) so a cold
+// `go build` fits its GOCACHE; 0 leaves the plain --tmpfsmount at nsjail's default.
 func TestNsjailArgs_TmpfsSize(t *testing.T) {
 	spec := sampleSpec()
 	spec.TmpfsSizeMB = 256
 	args := nsjailArgs(1000, 1000, spec)
-	if got := argValue(args, "--tmpfs_size"); got != "268435456" {
-		t.Fatalf("TmpfsSizeMB=256 must set --tmpfs_size to bytes, got %q", got)
+	if got := argValue(args, "--mount"); got != "none:/tmp:tmpfs:size=268435456" {
+		t.Fatalf("TmpfsSizeMB=256 must size /tmp via --mount, got %q", got)
+	}
+	if hasArg(args, "--tmpfsmount") {
+		t.Fatal("a sized /tmp uses --mount, not the default --tmpfsmount")
 	}
 
 	spec.TmpfsSizeMB = 0
-	if hasArg(nsjailArgs(1000, 1000, spec), "--tmpfs_size") {
-		t.Fatal("TmpfsSizeMB=0 must omit --tmpfs_size (use nsjail's default)")
+	zero := nsjailArgs(1000, 1000, spec)
+	if !pairAt(zero, "--tmpfsmount", "/tmp") {
+		t.Fatal("TmpfsSizeMB=0 must use the default --tmpfsmount /tmp")
+	}
+	if hasArg(zero, "--mount") {
+		t.Fatal("TmpfsSizeMB=0 must not emit a sized --mount")
 	}
 }
 
