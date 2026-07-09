@@ -137,6 +137,41 @@ func TestNsjailArgs_ZeroAddressSpaceOmitsRlimitAS(t *testing.T) {
 	}
 }
 
+// flagBefore returns the token immediately preceding the first occurrence of
+// value, or "" if value is absent or first.
+func flagBefore(args []string, value string) string {
+	for i, a := range args {
+		if a == value && i > 0 {
+			return args[i-1]
+		}
+	}
+	return ""
+}
+
+// TestNsjailArgs_WorkDirMountMode pins the compile-vs-run distinction: the run
+// jail binds the workdir READ-ONLY, while the compile jail (WritableWorkDir)
+// binds it read-write so the compiler can emit its artifact. The rootfs bind
+// stays read-only in both cases.
+func TestNsjailArgs_WorkDirMountMode(t *testing.T) {
+	const mount = "/tmp/dalivim-run-abc:/sandbox"
+
+	ro := nsjailArgs(1000, 1000, sampleSpec())
+	if got := flagBefore(ro, mount); got != "--bindmount_ro" {
+		t.Fatalf("read-only run jail: workdir mount flag = %q, want --bindmount_ro", got)
+	}
+
+	spec := sampleSpec()
+	spec.WritableWorkDir = true
+	rw := nsjailArgs(1000, 1000, spec)
+	if got := flagBefore(rw, mount); got != "--bindmount" {
+		t.Fatalf("writable compile jail: workdir mount flag = %q, want --bindmount", got)
+	}
+	// The rootfs must remain read-only even when the workdir is writable.
+	if flagBefore(rw, "/") != "--bindmount_ro" {
+		t.Fatal("rootfs must stay --bindmount_ro even with a writable workdir")
+	}
+}
+
 func TestCapSeconds(t *testing.T) {
 	if got := cpuCapSeconds(3000); got != 4 {
 		t.Fatalf("cpuCapSeconds(3000) = %d, want 4", got)

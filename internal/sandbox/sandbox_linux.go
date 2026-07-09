@@ -286,6 +286,44 @@ func LimitProcesses(n int) error {
 	return syscall.Setrlimit(rlimitNPROC, &lim)
 }
 
+// TerminationSignal returns the name of the signal that killed the command (e.g.
+// "SIGSEGV"), or "" when it exited normally. Best-effort and backend-dependent:
+// on the netns backend the shell `exec`s the child so the wait status is the
+// child's own; under nsjail the status is nsjail's (it relays a signalled child
+// as exit 128+n), so a signal is usually NOT observable there — precise
+// attribution under nsjail is cgroup/F-E/F-F work (R6).
+func TerminationSignal(cmd *exec.Cmd) string {
+	if cmd.ProcessState == nil {
+		return ""
+	}
+	ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
+	if !ok || !ws.Signaled() {
+		return ""
+	}
+	switch ws.Signal() {
+	case syscall.SIGKILL:
+		return "SIGKILL"
+	case syscall.SIGSEGV:
+		return "SIGSEGV"
+	case syscall.SIGABRT:
+		return "SIGABRT"
+	case syscall.SIGFPE:
+		return "SIGFPE"
+	case syscall.SIGBUS:
+		return "SIGBUS"
+	case syscall.SIGILL:
+		return "SIGILL"
+	case syscall.SIGTERM:
+		return "SIGTERM"
+	case syscall.SIGXCPU:
+		return "SIGXCPU"
+	case syscall.SIGXFSZ:
+		return "SIGXFSZ"
+	default:
+		return ws.Signal().String()
+	}
+}
+
 // MaxRSSkb returns the peak resident set size (KiB) reported for a finished
 // command, or 0 when unavailable. Under the nsjail backend this reflects nsjail's
 // own peak rather than the child's (authoritative per-run accounting arrives with

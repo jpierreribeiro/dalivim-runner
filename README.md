@@ -20,8 +20,9 @@ internal/
                        nsjail and netns backends + the RUNNER_SANDBOX dial/probe.
                        sandbox_linux.go = real; sandbox_other.go = dev stub
   executor/            language-agnostic core: dispatch, limit clamping, runtimes
-                       languages.go = closed languageSpec registry (python, js);
-                       interpreted.go = one spec-driven runtime both share
+                       languages.go = closed registry (python, js);
+                       interpreted.go = one spec-driven runtime both share;
+                       compiled.go = C/C++ compile-jail + run-jail
   transport/httpapi/   HTTP server, routing, PSK middleware, handlers
 pkg/runnerapi/         public wire contract (importable by the gateway)
 ```
@@ -126,6 +127,12 @@ deploy with `RUNNER_SANDBOX=require` is how you prove it engaged.
   that a tight `RLIMIT_AS` refuses — so Node skips the address-space cap and bounds
   its heap with `--max-old-space-size`, with the container/cgroup memory limit as
   the RSS backstop (per-jail cgroup `memory.max` is future work, F-E/F-F).
+- **Compiled languages (C/C++):** the compiler is untrusted input too, so it runs
+  in its **own** jail (no network, read-only rootfs, its own CPU/memory/time caps)
+  with the workdir bound read-write **only** so it can emit the `-static` artifact.
+  A build failure (non-zero exit or a compile-timeout bomb) is `compile_error` with
+  the compiler's stderr in `compile_output` — **nothing is executed**. The artifact
+  then runs in a separate read-only jail with **no toolchain present**.
 
 > Linux-only by design: the isolation guarantees depend on Linux namespaces and
 > rlimits. `sandbox_other.go` lets the service build/run on other OSes for local
@@ -147,6 +154,9 @@ deploy with `RUNNER_SANDBOX=require` is how you prove it engaged.
 | `RUNNER_DEFAULT_MEMORY_MB` / `RUNNER_MAX_MEMORY_MB` | `128` / `512` | Per-run memory default + hard cap. |
 | `RUNNER_MAX_SOURCE_BYTES` | `200000` | Max accepted `source_code` size. |
 | `RUNNER_MAX_OUTPUT_BYTES` | `65536` | Per-stream stdout/stderr capture cap. |
+| `RUNNER_COMPILE_MEMORY_MB` | `512` | `RLIMIT_AS` for the compile phase (C/C++). |
+| `RUNNER_DEFAULT_COMPILE_TIMEOUT_MS` / `RUNNER_MAX_COMPILE_TIMEOUT_MS` | `10000` / `20000` | Compile-phase wall-clock default + hard cap. |
+| `RUNNER_MAX_ARTIFACT_BYTES` | `50000000` | Reject a compiled artifact larger than this. |
 
 ## Run locally
 

@@ -29,6 +29,12 @@ type Config struct {
 	MaxMemoryMB      int
 	MaxSourceBytes   int
 	MaxOutputBytes   int
+
+	// Compile phase (compiled languages only; interpreted ignore these).
+	CompileMemoryMB         int // RLIMIT_AS for the compiler
+	DefaultCompileTimeoutMs int // used when the request omits compile_timeout_ms
+	MaxCompileTimeoutMs     int // hard ceiling for the compile phase
+	MaxArtifactBytes        int // reject a compiled artifact larger than this
 }
 
 // Load reads and validates configuration. It returns an error (rather than
@@ -49,6 +55,11 @@ func Load() (Config, error) {
 		MaxMemoryMB:       envInt("RUNNER_MAX_MEMORY_MB", 512),
 		MaxSourceBytes:    envInt("RUNNER_MAX_SOURCE_BYTES", 200_000),
 		MaxOutputBytes:    envInt("RUNNER_MAX_OUTPUT_BYTES", 64*1024),
+
+		CompileMemoryMB:         envInt("RUNNER_COMPILE_MEMORY_MB", 512),
+		DefaultCompileTimeoutMs: envInt("RUNNER_DEFAULT_COMPILE_TIMEOUT_MS", 10_000),
+		MaxCompileTimeoutMs:     envInt("RUNNER_MAX_COMPILE_TIMEOUT_MS", 20_000),
+		MaxArtifactBytes:        envInt("RUNNER_MAX_ARTIFACT_BYTES", 50_000_000),
 	}
 	if cfg.ServiceToken == "" && !cfg.Development {
 		return Config{}, fmt.Errorf("RUNNER_SERVICE_TOKEN is required outside development; set it (and send X-Runner-Token from the gateway) or set RUNNER_ENV=development for local use")

@@ -18,6 +18,11 @@ type RunRequest struct {
 	Stdin      string `json:"stdin,omitempty"`
 	TimeoutMs  int    `json:"timeout_ms,omitempty"`
 	MemoryMB   int    `json:"memory_mb,omitempty"`
+
+	// CompileTimeoutMs is the wall-clock budget for the COMPILE phase of a compiled
+	// language (c, cpp); interpreted languages ignore it. 0 => the service default.
+	// The run phase is still governed by TimeoutMs. Clamped to the service ceiling.
+	CompileTimeoutMs int `json:"compile_timeout_ms,omitempty"`
 }
 
 // RunResult is the response of POST /run.
@@ -30,6 +35,18 @@ type RunResult struct {
 	MemoryKB       int    `json:"memory_kb"`
 	RuntimeName    string `json:"runtime_name"`
 	RuntimeVersion string `json:"runtime_version"`
+
+	// CompileOutput is the compiler's stderr for a compiled language (the diagnostic
+	// text on StatusCompileError, or warnings on success); empty for interpreted
+	// languages. Kept separate from Stderr so a compile diagnostic is never confused
+	// with the program's own runtime output.
+	CompileOutput string `json:"compile_output,omitempty"`
+
+	// Signal is the name of the signal that killed the process (e.g. "SIGSEGV"),
+	// or empty when it exited normally. Best-effort: it is reliable on the netns
+	// backend (the child's own wait status) but the nsjail backend reports nsjail's
+	// status, so precise signal attribution under nsjail is F-E/F-F work (R6).
+	Signal string `json:"signal,omitempty"`
 
 	// PythonVersion is a DEPRECATED alias of RuntimeVersion, populated with the
 	// same value so the current gateway adapter (which reads python_version) keeps
@@ -46,5 +63,6 @@ const (
 	StatusRuntimeError   = "runtime_error"
 	StatusTimeout        = "timeout"
 	StatusMemoryExceeded = "memory_exceeded"
+	StatusCompileError   = "compile_error" // compiled language failed to build; see CompileOutput
 	StatusInternalError  = "internal_error"
 )

@@ -128,8 +128,28 @@ jobs:
       - name: JS inherits the jail — host write denied (read-only rootfs)
         run: ./scripts/smoke-run.sh javascript 'try{require("fs").writeFileSync("/usr/pwned","x");console.log("WRITTEN")}catch(e){console.log("denied")}' $'denied\n'
 
+      # F-D: compiled languages compile in a writable compile jail, then run the
+      # static artifact in a separate read-only run jail. These prove the full
+      # compile->run path on the shipped image (gcc/g++ present, nsjail engaged).
+      - name: Real POST /run (C) — puts("4") => success / "4\n"
+        run: ./scripts/smoke-run.sh c $'#include <stdio.h>\nint main(void){ puts("4"); return 0; }' $'4\n'
+
+      - name: Real POST /run (C++) — cout << 4 => success / "4\n"
+        run: ./scripts/smoke-run.sh cpp $'#include <iostream>\nint main(){ std::cout << 4 << std::endl; return 0; }' $'4\n'
+
+      # F-D acceptance: a build failure is compile_error with NO program output —
+      # nothing is executed.
+      - name: C compile_error — undeclared identifier, nothing runs
+        run: ./scripts/smoke-run.sh c 'int main(void){ return nope; }' '' compile_error
+
       - name: Escape corpus — every submission must be contained, host survives
         run: ./scripts/smoke-escape.sh
+
+      # §4.4 compiler-bomb row (deferred until F-D existed): a preprocessor
+      # token-multiplication bomb must blow the compile timeout as compile_error,
+      # never hang or OOM the runner. Short compile_timeout_ms keeps it fast.
+      - name: Compiler bomb contained — compile_error at the compile timeout
+        run: ./scripts/smoke-compile-bomb.sh
 
       # Backpressure (R5 / F-A) on the shipped image. A dedicated container with
       # RUNNER_MAX_CONCURRENT_RUNS=1 (on port 8091) makes saturation

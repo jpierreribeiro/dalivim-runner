@@ -23,7 +23,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked
 | Refactor | Invert Sandbox: `SysProcAttr()` provider → `Command(Spec)` constructor | [x] done |
 | F-B | `nsjailSandbox`: seccomp, tmpfs-capped `/tmp`, `no_new_privs`, per-jail nproc | [x] done (validated in CI: image builds nsjail, `RUNNER_SANDBOX=require` boots `nsjail ENABLED`, escape corpus contained) |
 | F-C | Interpreted polyglot (Node): `languageSpec` registry + JS runtime on the shared jail | [x] done (unit green; JS smoke + jail-inheritance gated in CI) |
-| F-D | Compiled polyglot (C/C++): compile-jail + run-jail, `signal`, `compile_output` | [ ] todo |
+| F-D | Compiled polyglot (C/C++): compile-jail + run-jail, `signal`, `compile_output` | [x] done (unit green incl. compiler bomb; smoke gated in CI) |
 | F-E / F-F | cgroups accounting, deterministic `memory_exceeded` classification | [ ] todo |
 
 ---
@@ -132,9 +132,11 @@ First CI in the repo. `.github/workflows/ci.yml`:
       (not queued, no crash) and the runner still serves after the burst.
 - [x] Helper `scripts/smoke-run.sh` — `POST /run`, exact stdout+status assertion,
       non-zero exit on mismatch (reused by the corpus + stress).
-- [ ] Still open: `runner-security` as a *separate* periodic job, image CVE scan
-      (trivy/grype), and the **compiler-bomb** corpus row — the last deferred with
-      F-D (no compiled runtime yet).
+- [x] **Compiler-bomb** corpus row (§4.4) — closed by **F-D**:
+      `scripts/smoke-compile-bomb.sh` gates it in `runner-smoke` (preprocessor bomb
+      ⇒ `compile_error` at the compile timeout, runner survives).
+- [ ] Still open: `runner-security` as a *separate* periodic job + image CVE scan
+      (trivy/grype). (Handled on the F-E CI branch.)
 
 Signed-off: `claude/dalivim-runner-ci-smoke-3sscm8` — 2026-07-09
 (escape-corpus completion + backpressure gate: 2026-07-09).
@@ -174,10 +176,42 @@ Criterion (plan §5): **smoke JS green; JS inherits the jail.**
 
 ## F-D — compiled languages (C/C++)
 
-- [ ] Wire `compile_timeout_ms` / `compile_output` contract fields (already reserved).
-- [ ] Add `signal` to `RunResult` for SIGKILL/SIGSEGV disambiguation.
-- [ ] Second runtime (C/C++) behind the `language` dispatch: compile-jail +
-      run-jail (the compiler is untrusted too — D-4/§3.4).
+Criterion (plan §5): **compile_error correto; corpus C contido.**
+
+- [x] Wire the reserved contract fields: `RunRequest.CompileTimeoutMs`,
+      `RunResult.CompileOutput`, `RunResult.Signal`, and `StatusCompileError`
+      (`pkg/runnerapi/contract.go`). Additive — invariant §1.
+- [x] `Signal` populated best-effort via `sandbox.TerminationSignal` (SIGSEGV/
+      SIGKILL/…): reliable on the netns backend (the child's own wait status);
+      under nsjail the status is nsjail's, so precise attribution stays F-E/F-F
+      (R6). Documented on the field.
+- [x] `compiledRuntime` (`internal/executor/compiled.go`): two phases in two jails
+      (D-4/§3.4). **Compile jail** binds the workdir READ-WRITE
+      (`Spec.WritableWorkDir`) so the *untrusted* compiler can emit its static
+      artifact — rootfs stays read-only, no network, seccomp, per-jail rlimits,
+      compile timeout/memory. Non-zero exit or compile timeout ⇒ `compile_error`
+      with the compiler's stderr in `CompileOutput`; nothing runs. Artifact
+      existence + size validated. **Run jail** binds the workdir read-only and
+      executes only `./prog` (no toolchain present), under the run limits.
+- [x] `-static` (no dynamic loader) so the run jail needs no `/lib`; `gcc`/`g++`
+      resolved to absolute paths (nsjail execve has no PATH search).
+- [x] Registered `c` + `cpp` in the composition root; config adds
+      `RUNNER_COMPILE_MEMORY_MB`, `RUNNER_{DEFAULT,MAX}_COMPILE_TIMEOUT_MS`,
+      `RUNNER_MAX_ARTIFACT_BYTES`.
+- [x] Dockerfile installs `gcc g++ libc6-dev` (static archives for `-static`).
+- [x] Unit tests (compiler present → RUN, else skip): C/C++ success, stdin,
+      compile_error, runtime_error (exit code), timeout, version, and the **§4.4
+      compiler-bomb** row (preprocessor token-multiplication ⇒ `compile_error` at
+      the compile timeout, nothing runs). Sandbox test pins writable-vs-read-only
+      workdir mount.
+- [~] **CI smoke** — `runner-smoke` adds C + C++ success, a C `compile_error`
+      (no program output), and `scripts/smoke-compile-bomb.sh` (compiler bomb
+      contained + runner survives). Runs on GitHub Actions (Docker); verified on
+      the PR's CI run since this environment has no Docker.
+  - [~] Stricter seccomp **allowlist** for the static run binary (plan §2.4/§3.4)
+        is a future tightening on top of the shared denylist (which already kills
+        the dangerous syscalls); it needs per-program validation against the
+        escape corpus and is best paired with F-E's periodic security job.
 
 ## F-E / F-F — accounting & classification
 

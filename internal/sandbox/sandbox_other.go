@@ -50,3 +50,7 @@ func LimitProcesses(_ int) error { return nil }
 
 // MaxRSSkb is unavailable off Linux.
 func MaxRSSkb(_ *exec.Cmd) int { return 0 }
+
+// TerminationSignal is unavailable off Linux (best-effort field; production is
+// Linux-only).
+func TerminationSignal(_ *exec.Cmd) string { return "" }

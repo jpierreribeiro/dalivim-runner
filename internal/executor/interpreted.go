@@ -122,6 +122,7 @@ func (r *interpretedRuntime) Run(ctx context.Context, req runnerapi.RunRequest) 
 		Stderr:     stderr.String(),
 		DurationMs: duration,
 		MemoryKB:   sandbox.MaxRSSkb(cmd),
+		Signal:     sandbox.TerminationSignal(cmd),
 	}
 	if cmd.ProcessState != nil {
 		res.ExitCode = cmd.ProcessState.ExitCode()

@@ -50,9 +50,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Interpreted runtimes share one sandbox: each plugs in as a languageSpec entry
-	// plus a constructor, and inherits the identical jail. Compiled languages
-	// (F-D) register the same way once their compile-phase runtime exists.
+	// Every runtime shares one sandbox and plugs in as a registry entry plus a
+	// constructor, inheriting the identical jail. Interpreted languages run in one
+	// phase; compiled languages (C/C++) build in a writable compile jail, then
+	// execute the artifact in a separate read-only run jail.
+	compileLimits := executor.CompileLimits{
+		MemoryMB:         cfg.CompileMemoryMB,
+		DefaultTimeoutMs: cfg.DefaultCompileTimeoutMs,
+		MaxTimeoutMs:     cfg.MaxCompileTimeoutMs,
+		MaxArtifactBytes: cfg.MaxArtifactBytes,
+	}
 	svc := executor.NewService(
 		executor.Limits{
 			DefaultTimeout: cfg.DefaultTimeoutMs,
@@ -62,6 +69,8 @@ func main() {
 		},
 		executor.NewPython(sb, cfg.MaxOutputBytes, cfg.MaxProcesses, cfg.MaxFileSizeMB),
 		executor.NewNode(sb, cfg.MaxOutputBytes, cfg.MaxProcesses, cfg.MaxFileSizeMB),
+		executor.NewC(sb, cfg.MaxOutputBytes, cfg.MaxProcesses, cfg.MaxFileSizeMB, compileLimits),
+		executor.NewCpp(sb, cfg.MaxOutputBytes, cfg.MaxProcesses, cfg.MaxFileSizeMB, compileLimits),
 	)
 
 	srv := httpapi.New(svc, httpapi.Config{

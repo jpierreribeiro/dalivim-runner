@@ -62,6 +62,14 @@ type Spec struct {
 	// (RLIMIT_FSIZE). Honoured only by the nsjail backend (where writes land in a
 	// size-capped tmpfs /tmp); 0 leaves it unset.
 	MaxFileSizeMB int
+
+	// WritableWorkDir binds WorkDir READ-WRITE inside the jail instead of read-only.
+	// It exists for the COMPILE phase of a compiled language, where the compiler
+	// (itself untrusted input) must write the artifact into WorkDir for the
+	// separate, stricter run jail to execute. The rootfs stays read-only either
+	// way; only /sandbox becomes writable. The netns/stub backends ignore it (their
+	// WorkDir is the host cwd, already writable). Default false = read-only.
+	WritableWorkDir bool
 }
 
 // Sandbox is the containment backend. Command turns a Spec into a ready-to-run

@@ -68,14 +68,24 @@ func nsjailArgs(uid, gid int, spec Spec) []string {
 		"--group", "0:" + strconv.Itoa(gid) + ":1",
 		// Whole host rootfs read-only (arch-agnostic: brings the interpreter and
 		// its libs) + a fresh, size-capped writable /tmp (bounds the F-11 host-OOM
-		// vector) + the source dir mounted read-only at a fixed path.
+		// vector). The source dir is mounted at a fixed path; read-only for a normal
+		// run, read-write only for the compile phase (see WritableWorkDir).
 		"--bindmount_ro", "/",
 		"--tmpfsmount", "/tmp",
-		"--bindmount_ro", spec.WorkDir + ":" + jailMount,
+	}
+	// WorkDir mount: read-write only when the caller needs to write into it (the
+	// compile phase). The rootfs above stays read-only regardless — only /sandbox
+	// gains write access, so the compiler can emit its artifact and nothing else.
+	if spec.WritableWorkDir {
+		args = append(args, "--bindmount", spec.WorkDir+":"+jailMount)
+	} else {
+		args = append(args, "--bindmount_ro", spec.WorkDir+":"+jailMount)
+	}
+	args = append(args,
 		"--cwd", jailMount,
 		"--keep_env", // pass exactly the minimal env the caller set on cmd.Env
 		"--seccomp_string", seccompPolicy,
-	}
+	)
 	// RLIMIT_AS, MB. 0 => leave it unset: V8/Node cannot start under a tight
 	// address-space cap (multi-GB virtual reservation), so those runs bound memory
 	// via an interpreter heap flag + the container/cgroup limit instead.
