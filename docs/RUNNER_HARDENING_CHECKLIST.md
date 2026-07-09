@@ -16,7 +16,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked
 | Audit | 8-layer conformance + residual-risk ranking + API contract | [x] done |
 | **F-A** | Kill global `RLIMIT_NPROC`; add concurrency cap + 503 backpressure | [x] done (verified live) |
 | Refactor | Invert Sandbox: `SysProcAttr()` provider → `Command(Spec)` constructor | [x] done |
-| F-B | `nsjailSandbox`: seccomp, tmpfs-capped `/tmp`, `no_new_privs`, per-jail nproc | [x] code done (target validation pending) |
+| F-B | `nsjailSandbox`: seccomp, tmpfs-capped `/tmp`, `no_new_privs`, per-jail nproc | [x] done — target-validated on a root VPS (2026-07-09) |
 | F-C / F-D | Compiled-language support (compile phase, `signal`, polyglot runtimes) | [ ] todo |
 | F-E / F-F | cgroups accounting, deterministic `memory_exceeded` classification | [ ] todo |
 
@@ -65,10 +65,14 @@ Fixes **R2** (no seccomp), **R3** (`/tmp` OOM), **R4** (no `no_new_privs`).
 - [x] Dockerfile: nsjail built from source (bookworm stage) into the runtime image.
 - [x] `RUNNER_SANDBOX=auto|require|off` dial with a boot probe (runs `/bin/true`
       in a real jail); `require` fails closed, `auto` falls back to netns. Tested.
-- [~] Netns + execution suites pass against the **nsjail** backend — deferred:
-      nsjail can't run in CI (no binary + no userns). Arg construction + the dial
-      state machine are unit-tested; end-to-end jail execution is validated on the
-      target via the boot log and a `RUNNER_SANDBOX=require` verification deploy.
+- [x] Target-validated on a root VPS (Ubuntu 24.04), 2026-07-09: boot logged
+      `nsjail ENABLED`; `POST /run print(2+2)` → `success`, `stdout "4\n"`; the
+      egress-corpus probe → `OSError [Errno 101] Network is unreachable` (contained).
+      Deploy recipe + the six fixes it surfaced (kafel `umount`, drop uid/gid
+      mapping, bind workdir on `/mnt`, absolute interpreter path, host userns
+      sysctls, `--security-opt ...=unconfined` + `--network host`) are in the README.
+      nsjail still can't run in CI (no binary + no userns); arg construction + the
+      dial state machine remain the unit-tested surface.
 
 ## F-C / F-D — compiled languages (forward-compat, not blocking)
 

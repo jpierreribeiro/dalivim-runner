@@ -169,6 +169,10 @@ Multi-stage: a static Go binary + `nsjail` compiled from source, on
 `python:3.12-slim-bookworm`, running as a non-root user (nsjail runs rootless, so
 no elevated capabilities are required).
 
+> **Full step-by-step deploy runbook:** [docs/DEPLOY.md](docs/DEPLOY.md) — provision
+> → build → run → verify → HTTPS + firewall → wire the backend. The section below
+> is the quick version.
+
 ### Production run (VPS / target)
 
 The service **fails closed**: without `RUNNER_SERVICE_TOKEN` (and outside
@@ -242,6 +246,8 @@ the exact nsjail error. Common ones seen on real targets:
 | `clone(...CLONE_NEWUSER...) Operation not permitted` | the container/host blocks unprivileged userns | add the two `--security-opt ... unconfined` flags; set the host sysctls in step 1; on a managed PaaS this usually can't be fixed — move to a root VPS |
 | `execve('/usr/bin/newgidmap'): No such file or directory` | (pre-fix) an explicit uid/gid mapping forced the setuid helpers | fixed: the runner no longer passes `--uid_mapping/--gid_mapping`, so nsjail self-maps without the helper |
 | `Could not compile policy: Undefined identifier '<x>'` | a seccomp syscall name absent from kafel's table | the denylist uses only names present in kafel's amd64 table |
+| `mkdir('.../<mnt>'): Permission denied` then `mount(...) failed` | (pre-fix) mounting the workdir on a path missing from the read-only rootfs | fixed: the workdir binds onto `/mnt`, which already exists in the base image |
+| `execve('python3') ... No such file or directory` | (pre-fix) a bare argv name — nsjail `execve`s without a PATH search | fixed: the runtime passes the interpreter's absolute path |
 
 Prove userns works on the host outside Docker (should print `ok`):
 
@@ -251,6 +257,29 @@ unshare --user --net --map-root-user /bin/true && echo ok
 
 If that fails, the host itself forbids unprivileged userns — enable it (step 1)
 or use a host/VM that allows it; nsjail cannot run rootless without it.
+
+### Troubleshooting: the runner boots but you can't reach it
+
+If `/healthz` from the host resets/refuses (`curl` exit 56/7) while it works from
+*inside* the container (`docker exec runner python3 -c "import urllib.request;
+print(urllib.request.urlopen('http://127.0.0.1:8090/healthz').read())"`), the
+server is healthy but the host↔container bridge is firewalled on this box (common
+on VPSes). The server binds all interfaces (`:8090`), so the fix is to skip the
+bridge with **host networking** — drop `-p` and add `--network host`:
+
+```sh
+docker run -d --name dalivim-runner \
+  -e RUNNER_SERVICE_TOKEN=<secret> -e RUNNER_SANDBOX=require \
+  --network host \
+  --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+  --pids-limit=512 --ulimit nproc=512 --cpus=1 --memory=1g \
+  dalivim-runner
+```
+
+Per-run network isolation is unaffected — nsjail gives each run its own empty
+netns regardless of the container's network mode. With host networking the runner
+listens on `0.0.0.0:8090`, so put it behind a reverse proxy (TLS) and firewall
+`8090` off the public interface (allow only `443`).
 
 ## Gateway integration (the main API)
 
