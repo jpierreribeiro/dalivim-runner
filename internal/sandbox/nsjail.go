@@ -58,7 +58,15 @@ USE dalivim DEFAULT ALLOW`
 //   - statx: not listed — glibc-static resolves fstat() through newfstat/
 //     newfstatat here, both of which ARE named. (If a future glibc insists on
 //     statx, the fix is a newer nsjail/kafel, not opening the allowlist.)
-const staticAllowSyscalls = `read, write, readv, writev, pread64, pwrite64,
+// execve is allowed for one structural reason: nsjail installs the seccomp
+// filter and THEN execve()s the payload, so the launch execve is itself filtered
+// — deny it and the binary never starts (SIGSYS, syscall=59). It is not a hole
+// here: the run jail is a MINIMAL rootfs with only the artifact and an empty
+// tmpfs /tmp, so there is nothing else to execve, and with open/openat NOT in the
+// list a program cannot create a new executable to run. Exec containment is the
+// empty rootfs, not a blocked execve. execveat stays out (nsjail uses execve).
+const staticAllowSyscalls = `execve,
+		read, write, readv, writev, pread64, pwrite64,
 		close, newfstat, newfstatat, lseek, ioctl, fcntl,
 		dup, dup2, dup3, poll, ppoll, pselect6, select,
 		brk, mmap, munmap, mprotect, mremap, madvise,

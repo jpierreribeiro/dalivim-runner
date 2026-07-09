@@ -214,7 +214,10 @@ func TestSeccompProfiles(t *testing.T) {
 	if !strings.Contains(enforce, "ALLOW {") || !strings.Contains(enforce, "DEFAULT KILL") {
 		t.Fatalf("enforce must be an allowlist with DEFAULT KILL, got %q", enforce)
 	}
-	for _, banned := range []string{"execve", "execveat", "socket", "openat", "ptrace", "clone"} {
+	// execve is intentionally allowed (nsjail execve's the payload after installing
+	// the filter; neutered by the minimal-rootfs run jail — see nsjailArgs). The
+	// real escape surface must still be excluded.
+	for _, banned := range []string{"execveat", "socket", "openat", "open", "ptrace", "clone", "clone3", "mount", "setns", "unshare"} {
 		// word-boundary check so e.g. "open_by_handle_at" wouldn't match "openat"
 		if containsToken(enforce, banned) {
 			t.Fatalf("static allowlist must NOT permit %q", banned)

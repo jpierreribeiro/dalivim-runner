@@ -208,8 +208,11 @@ Criterion (plan §5): **smoke JS green; JS inherits the jail.**
 - [x] **F-D follow-up — strict seccomp allowlist for the static run jail.** A kafel
       ALLOWLIST (DEFAULT KILL) of the minimal set a self-contained binary needs
       (read/write/mmap/brk/rt_sigreturn/exit_group/glibc-static startup/…),
-      excluding `execve`/`execveat`/socket/`open`/`openat`/`ptrace`/`clone` — much
-      tighter than the interpreter denylist. Behind `RUNNER_STATIC_SECCOMP=off|
+      excluding `execveat`/socket/`open`/`openat`/`ptrace`/`clone`/mount — much
+      tighter than the interpreter denylist. (`execve` is permitted because nsjail
+      execve's the payload after installing the filter; neutered by the
+      minimal-rootfs run jail — nothing else to exec, no `open`/`openat` to make
+      one.) Behind `RUNNER_STATIC_SECCOMP=off|
       enforce|complain` (default off; `complain` = DEFAULT LOG for tuning the set on
       the target). Policy selection + banned/essential syscalls unit-tested; CI
       boots a dedicated `enforce` container and proves ordinary C **and** C++ still

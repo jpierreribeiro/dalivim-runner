@@ -143,9 +143,13 @@ deploy with `RUNNER_SANDBOX=require` is how you prove it engaged.
   compiler or exec anything else at runtime (D-4). The static run jail can also
   take a **tight seccomp allowlist** (`RUNNER_STATIC_SECCOMP=enforce`) — only the
   minimal syscall set a self-contained program needs, DEFAULT KILL on everything
-  else (no `execve`/`socket`/`open`/`ptrace`/`clone`) — far stronger than the
-  shared interpreter denylist. It ships behind a dial (default `off`); a `complain`
-  mode logs violations without killing, for pinning the set on the target first.
+  else (no `socket`/`open`/`openat`/`ptrace`/`clone`/`mount`) — far stronger than
+  the shared interpreter denylist. (`execve` is permitted for one structural
+  reason: nsjail installs the filter then execve's the payload, so denying it
+  would stop the binary launching; it's neutered by the minimal rootfs — nothing
+  else to exec, and no `open`/`openat` to create one.) It ships behind a dial
+  (default `off`); a `complain` mode logs violations without killing, for pinning
+  the set on the target first.
 - **Memory:** CPython runs under a hard `RLIMIT_AS` (a memory bomb → deterministic
   `memory_exceeded`). Node cannot — V8 reserves a multi-GB virtual cage at startup
   that a tight `RLIMIT_AS` refuses — so Node skips the address-space cap and bounds
