@@ -55,7 +55,6 @@ func nsjailArgs(uid, gid int, spec Spec) []string {
 		"--disable_proc",                                             // no /proc in the jail: hides host pids, cuts attack surface
 		"--iface_no_lo",                                              // even loopback stays down: an empty, egress-less network
 		"--time_limit", strconv.Itoa(wallCapSeconds(spec.TimeoutMs)), // hard wall-clock belt
-		"--rlimit_as", strconv.Itoa(spec.MemoryMB), // RLIMIT_AS, MB
 		"--rlimit_cpu", strconv.Itoa(cpuCapSeconds(spec.TimeoutMs)), // RLIMIT_CPU, s
 		// Map real uid/gid -> root inside the user namespace (single id, size 1).
 		// --user/--group (NOT --uid_mapping/--gid_mapping) is deliberate: both take
@@ -76,6 +75,12 @@ func nsjailArgs(uid, gid int, spec Spec) []string {
 		"--cwd", jailMount,
 		"--keep_env", // pass exactly the minimal env the caller set on cmd.Env
 		"--seccomp_string", seccompPolicy,
+	}
+	// RLIMIT_AS, MB. 0 => leave it unset: V8/Node cannot start under a tight
+	// address-space cap (multi-GB virtual reservation), so those runs bound memory
+	// via an interpreter heap flag + the container/cgroup limit instead.
+	if spec.AddressSpaceMB > 0 {
+		args = append(args, "--rlimit_as", strconv.Itoa(spec.AddressSpaceMB))
 	}
 	// Per-run fork-bomb cap against the jail-private uid (safe here, unlike a
 	// process-wide RLIMIT_NPROC). 0 => leave nsjail's default.

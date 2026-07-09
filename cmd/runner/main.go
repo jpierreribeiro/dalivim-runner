@@ -50,6 +50,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Interpreted runtimes share one sandbox: each plugs in as a languageSpec entry
+	// plus a constructor, and inherits the identical jail. Compiled languages
+	// (F-D) register the same way once their compile-phase runtime exists.
 	svc := executor.NewService(
 		executor.Limits{
 			DefaultTimeout: cfg.DefaultTimeoutMs,
@@ -58,6 +61,7 @@ func main() {
 			MaxMemoryMB:    cfg.MaxMemoryMB,
 		},
 		executor.NewPython(sb, cfg.MaxOutputBytes, cfg.MaxProcesses, cfg.MaxFileSizeMB),
+		executor.NewNode(sb, cfg.MaxOutputBytes, cfg.MaxProcesses, cfg.MaxFileSizeMB),
 	)
 
 	srv := httpapi.New(svc, httpapi.Config{

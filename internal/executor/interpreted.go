@@ -1,0 +1,175 @@
+package executor
+
+import (
+	"context"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/jpierreribeiro/dalivim-runner/internal/sandbox"
+	"github.com/jpierreribeiro/dalivim-runner/pkg/runnerapi"
+)
+
+// interpretedRuntime executes a single-file interpreted language in the sandbox.
+// One instance serves exactly one language, configured by a languageSpec. It only
+// describes WHAT to run (argv, workdir, limits) via a sandbox.Spec — the sandbox
+// owns HOW it is contained (namespaces, rlimits, seccomp, process group, timeout
+// kill), so this type holds no OS-level code and every language reuses the same
+// containment. Adding an interpreted language is a languageSpec entry plus a
+// constructor; this file does not change.
+type interpretedRuntime struct {
+	spec          languageSpec
+	sandbox       sandbox.Sandbox
+	bin           string // absolute interpreter path, resolved once (see resolveBin)
+	version       string
+	outputLimit   int
+	maxProcesses  int // per-run RLIMIT_NPROC in the jail (fork-bomb cap)
+	maxFileSizeMB int // per-run RLIMIT_FSIZE in the jail
+}
+
+// NewPython builds the Python runtime.
+func NewPython(sb sandbox.Sandbox, outputLimit, maxProcesses, maxFileSizeMB int) *interpretedRuntime {
+	return newInterpreted(pythonSpec, sb, outputLimit, maxProcesses, maxFileSizeMB)
+}
+
+// NewNode builds the JavaScript (Node) runtime. It inherits the exact same jail
+// as Python — the only differences (interpreter argv, source filename, version
+// parsing) live in javascriptSpec, which is the whole point of the seam.
+func NewNode(sb sandbox.Sandbox, outputLimit, maxProcesses, maxFileSizeMB int) *interpretedRuntime {
+	return newInterpreted(javascriptSpec, sb, outputLimit, maxProcesses, maxFileSizeMB)
+}
+
+// newInterpreted resolves the interpreter and detects its version once at
+// construction so every result carries real provenance rather than a
+// hand-configured value.
+func newInterpreted(spec languageSpec, sb sandbox.Sandbox, outputLimit, maxProcesses, maxFileSizeMB int) *interpretedRuntime {
+	bin := resolveBin(spec.binNames)
+	return &interpretedRuntime{
+		spec:          spec,
+		sandbox:       sb,
+		bin:           bin,
+		version:       detectVersion(bin, spec),
+		outputLimit:   outputLimit,
+		maxProcesses:  maxProcesses,
+		maxFileSizeMB: maxFileSizeMB,
+	}
+}
+
+func (r *interpretedRuntime) Language() string { return r.spec.name }
+func (r *interpretedRuntime) Version() string  { return r.version }
+
+// Run writes the source to a throwaway directory and executes it under the
+// sandbox: its own process group, an empty network namespace (when available), a
+// wall-clock deadline, a CPU-seconds cap, and an address-space cap. Timeout and
+// memory are already clamped by the Service.
+func (r *interpretedRuntime) Run(ctx context.Context, req runnerapi.RunRequest) runnerapi.RunResult {
+	workDir, err := os.MkdirTemp("", "dalivim-run-*")
+	if err != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "could not create sandbox dir"}
+	}
+	defer os.RemoveAll(workDir)
+
+	// 0600: only the uid that runs the interpreter needs to read the script.
+	scriptPath := filepath.Join(workDir, r.spec.sourceFile)
+	if err := os.WriteFile(scriptPath, []byte(req.SourceCode), 0o600); err != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "could not write source"}
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(req.TimeoutMs)*time.Millisecond)
+	defer cancel()
+
+	// Build the jail argv: interpreter + any per-run memory flags + the language's
+	// run args (flags and the source FILENAME — never the code, so no shell
+	// injection). Memory is enforced one of two ways depending on the runtime:
+	// CPython gets a hard RLIMIT_AS (AddressSpaceMB); V8/Node can't take that cap
+	// (its virtual cage), so it passes 0 and bounds its heap via memoryArgs.
+	argv := []string{r.bin}
+	if r.spec.memoryArgs != nil {
+		argv = append(argv, r.spec.memoryArgs(req.MemoryMB)...)
+	}
+	argv = append(argv, r.spec.runArgs...)
+
+	addressSpaceMB := 0
+	if r.spec.capAddressSpace {
+		addressSpaceMB = req.MemoryMB
+	}
+
+	cmd := r.sandbox.Command(ctx, sandbox.Spec{
+		Argv:           argv,
+		WorkDir:        workDir,
+		TimeoutMs:      req.TimeoutMs,
+		AddressSpaceMB: addressSpaceMB,
+		MaxProcesses:   r.maxProcesses,
+		MaxFileSizeMB:  r.maxFileSizeMB,
+	})
+	cmd.Stdin = strings.NewReader(req.Stdin)
+	cmd.Env = r.spec.env
+
+	stdout := &limitedBuffer{limit: r.outputLimit}
+	stderr := &limitedBuffer{limit: r.outputLimit}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+
+	start := time.Now()
+	runErr := cmd.Run()
+	duration := int(time.Since(start).Milliseconds())
+
+	res := runnerapi.RunResult{
+		Stdout:     stdout.String(),
+		Stderr:     stderr.String(),
+		DurationMs: duration,
+		MemoryKB:   sandbox.MaxRSSkb(cmd),
+	}
+	if cmd.ProcessState != nil {
+		res.ExitCode = cmd.ProcessState.ExitCode()
+	}
+
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		res.Status = runnerapi.StatusTimeout
+	case runErr == nil:
+		res.Status = runnerapi.StatusSuccess
+	case r.spec.memErrSubstr != "" && strings.Contains(res.Stderr, r.spec.memErrSubstr):
+		res.Status = runnerapi.StatusMemoryExceeded
+	default:
+		res.Status = runnerapi.StatusRuntimeError
+	}
+	return res
+}
+
+// resolveBin resolves the first available interpreter to an ABSOLUTE path. The
+// nsjail backend execve's argv[0] directly with no PATH search (the netns backend
+// only got away with a bare name because it wraps argv in a shell), so a bare
+// "python3"/"node" fails inside the jail with ENOENT. Resolving here keeps the
+// runtime image-agnostic; the path is valid inside the jail because nsjail
+// bind-mounts the same rootfs read-only. Falls back to the first candidate name
+// if none is on PATH (e.g. off-Linux dev without the interpreter) rather than
+// blocking boot.
+func resolveBin(candidates []string) string {
+	for _, name := range candidates {
+		if p, err := exec.LookPath(name); err == nil {
+			return p
+		}
+	}
+	if len(candidates) > 0 {
+		return candidates[0]
+	}
+	return ""
+}
+
+// detectVersion runs the spec's version command against the resolved interpreter
+// once at construction. Empty string when the interpreter is absent (off-Linux
+// dev) so provenance degrades gracefully instead of blocking boot.
+func detectVersion(bin string, spec languageSpec) string {
+	if bin == "" || len(spec.versionArgs) == 0 || spec.parseVersion == nil {
+		return ""
+	}
+	out, err := exec.Command(bin, spec.versionArgs...).CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	return spec.parseVersion(string(out))
+}

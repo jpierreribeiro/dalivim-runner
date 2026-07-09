@@ -12,7 +12,7 @@ import (
 // isolatedPython builds a Python runtime with network isolation resolved from the
 // platform, skipping the test when unprivileged namespaces are unavailable (e.g.
 // hardened kernels, non-Linux). This drives the F-03 egress guarantee end to end.
-func isolatedPython(t *testing.T) *PythonRuntime {
+func isolatedPython(t *testing.T) *interpretedRuntime {
 	t.Helper()
 	requirePython(t)
 	// Force the netns backend (RUNNER_SANDBOX=off) with network isolation resolved

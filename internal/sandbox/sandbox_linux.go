@@ -88,11 +88,17 @@ func (s *netnsSandbox) Backend() string       { return "netns" }
 // dash, which lacks `ulimit -u`, so the process cap is a per-jail (nsjail)
 // concern. The source is written to a file in WorkDir, never the command line.
 func (s *netnsSandbox) Command(ctx context.Context, spec Spec) *exec.Cmd {
+	// Address-space cap is optional: AddressSpaceMB==0 leaves RLIMIT_AS unset (the
+	// V8/Node path, which a tight cap would break). CPU seconds are always applied.
+	var prefix string
+	if spec.AddressSpaceMB > 0 {
+		prefix = fmt.Sprintf("ulimit -v %d; ", spec.AddressSpaceMB*1024)
+	}
 	//nolint:gosec // G204: executing submitted code is the runner's purpose; the
 	// shell string interpolates only integer limits and a single-quoted argv, the
 	// source lives in a file, and the child runs sandboxed (netns, rlimits, env).
-	shellCmd := fmt.Sprintf("ulimit -v %d; ulimit -t %d; exec %s",
-		spec.MemoryMB*1024, cpuCapSeconds(spec.TimeoutMs), shJoin(spec.Argv))
+	shellCmd := fmt.Sprintf("%sulimit -t %d; exec %s",
+		prefix, cpuCapSeconds(spec.TimeoutMs), shJoin(spec.Argv))
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", shellCmd)
 	cmd.Dir = spec.WorkDir
 	cmd.SysProcAttr = s.sysProcAttr()
@@ -220,12 +226,12 @@ func probeNsjail(s *nsjailSandbox) (string, bool) {
 	defer cancel()
 
 	cmd := s.Command(ctx, Spec{
-		Argv:          []string{"/bin/true"},
-		WorkDir:       dir,
-		TimeoutMs:     2000,
-		MemoryMB:      128,
-		MaxProcesses:  64,
-		MaxFileSizeMB: 4,
+		Argv:           []string{"/bin/true"},
+		WorkDir:        dir,
+		TimeoutMs:      2000,
+		AddressSpaceMB: 128,
+		MaxProcesses:   64,
+		MaxFileSizeMB:  4,
 	})
 	cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin"}
 	if out, err := cmd.CombinedOutput(); err != nil {
