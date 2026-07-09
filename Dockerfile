@@ -39,6 +39,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # dropping privileges shrinks the blast radius of any escape from a run. nsjail
 # runs rootless (unprivileged user namespaces), so no elevated caps are needed.
 RUN useradd --create-home --shell /usr/sbin/nologin runner
+# Pre-create the jail's bind-mount target. nsjail bind-mounts the host rootfs
+# READ-ONLY as the jail root (see nsjail.go: `--bindmount_ro /`), then bind-mounts
+# each run's WorkDir onto /sandbox. The mountpoint must already exist on that
+# read-only rootfs: nsjail cannot mkdir it (the root is RO), so a missing
+# /sandbox fails every jail launch with "Couldn't mount '/sandbox'" — on the
+# target as well as in CI. An empty dir is all a bind-mount target needs.
+RUN mkdir /sandbox
 COPY --from=build       /runner         /usr/local/bin/runner
 COPY --from=nsjail-build /nsjail/nsjail /usr/local/bin/nsjail
 USER runner
