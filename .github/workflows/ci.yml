@@ -43,23 +43,38 @@ jobs:
       - name: Build runner image (compiles nsjail from source)
         run: docker build -t runner:smoke .
 
+      # Ubuntu 24.04 (what ubuntu-latest now is) ships
+      # kernel.apparmor_restrict_unprivileged_userns=1, an AppArmor mediation
+      # that strips CAP_SYS_ADMIN inside unprivileged user namespaces created by
+      # unconfined processes — which makes nsjail's own mount setup
+      # (`mount('/','/',MS_REC|MS_PRIVATE)`) fail with EPERM. This sysctl is a
+      # host-kernel global, NOT container-scoped, so --security-opt
+      # apparmor=unconfined on the container cannot lift it; it must be cleared on
+      # the runner host (GitHub-hosted runners allow passwordless sudo). This
+      # relaxes the CI RUNNER HOST, not the inner jail, and is a property of the
+      # runner's OS rather than the production target.
+      - name: Allow unprivileged-userns mounts on the runner host (Ubuntu 24.04)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       # Boot the shipped image under target-like resource limits with
       # RUNNER_SANDBOX=require, so a failed nsjail boot probe crashes the
       # container instead of silently downgrading to the netns backend.
       #
-      # Two Docker-level relaxations are required, and ONLY these two:
+      # Containment relaxations, and why each is the minimum needed for nsjail to
+      # build its per-run jails — all applied to the OUTER container/host only:
       #   --security-opt seccomp=unconfined   default profile blocks the
       #                                        CLONE_NEWUSER unshare nsjail needs
       #                                        to create its user namespace
       #   --security-opt apparmor=unconfined  docker-default apparmor denies the
       #                                        mount ops nsjail performs to build
       #                                        the read-only rootfs + tmpfs /tmp
-      # They relax the OUTER container around the runner daemon. They do NOT add
-      # capabilities and the container still runs as the non-root `runner` user.
-      # The INNER per-run jail is unaffected: every submission still gets its own
-      # userns/pid/net/mount namespaces, a read-only rootfs, a size-capped tmpfs
-      # /tmp, the seccomp denylist, no_new_privs, and per-jail rlimits. The
-      # escape corpus below is the proof the inner jail is intact.
+      #   (host sysctl above)                 lifts Ubuntu 24.04's userns mount
+      #                                        restriction
+      # None of these add capabilities, and the container still runs as the
+      # non-root `runner` user. The INNER per-run jail is unaffected: every
+      # submission still gets its own userns/pid/net/mount namespaces, a read-only
+      # rootfs, a size-capped tmpfs /tmp, the seccomp denylist, no_new_privs, and
+      # per-jail rlimits. The escape corpus below is the proof the jail is intact.
       - name: Boot under target-like limits (RUNNER_SANDBOX=require)
         run: |
           docker run -d --name runner \

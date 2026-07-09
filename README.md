@@ -176,19 +176,24 @@ CI (`.github/workflows/ci.yml`) has two jobs:
 ### Why the smoke container relaxes Docker's own sandbox
 
 nsjail builds each per-run jail by creating an unprivileged **user namespace**
-and `mount`-ing a read-only rootfs + tmpfs `/tmp`. Docker's *default* seccomp
-profile blocks the `CLONE_NEWUSER` unshare, and the default AppArmor profile
-denies those mounts — so nsjail cannot start unless the **outer** container is
-run with `--security-opt seccomp=unconfined --security-opt apparmor=unconfined`.
+and `mount`-ing a read-only rootfs + tmpfs `/tmp`. Three things block that on a
+stock GitHub `ubuntu-latest` (24.04) runner, so the smoke job clears exactly
+these — no more:
 
-That relaxation applies **only to the runner daemon's container**. It adds **no
-capabilities**, the container still runs as the non-root `runner` user, and it
-does **not** touch the inner per-run jail: every submission still executes inside
-its own user/pid/net/mount namespaces, a read-only rootfs, a size-capped tmpfs
-`/tmp`, the seccomp **denylist**, `no_new_privs`, and per-jail `RLIMIT_NPROC`/
-`FSIZE`. The escape corpus is the proof the inner jail is intact. In production
-(Railway) the runner is the container's only workload, so the same relaxation is
-the correct posture — the meaningful boundary is the per-run jail, not Docker's
+| Relaxation | Scope | Why nsjail needs it |
+|---|---|---|
+| `--security-opt seccomp=unconfined` | container | Docker's default seccomp profile blocks the `CLONE_NEWUSER` unshare nsjail uses to create its user namespace |
+| `--security-opt apparmor=unconfined` | container | the docker-default AppArmor profile denies the `mount` ops nsjail performs for the read-only rootfs + tmpfs `/tmp` |
+| `sysctl kernel.apparmor_restrict_unprivileged_userns=0` | runner **host** | Ubuntu 24.04 strips `CAP_SYS_ADMIN` inside unprivileged userns (→ `mount('/','/'): EPERM`); a host-kernel global that a container `--security-opt` cannot lift |
+
+Those apply **only to the runner daemon's container and the CI host**. They add
+**no capabilities**, the container still runs as the non-root `runner` user, and
+they do **not** touch the inner per-run jail: every submission still executes
+inside its own user/pid/net/mount namespaces, a read-only rootfs, a size-capped
+tmpfs `/tmp`, the seccomp **denylist**, `no_new_privs`, and per-jail
+`RLIMIT_NPROC`/`FSIZE`. The escape corpus is the proof the inner jail is intact.
+In production (Railway) the runner is the container's only workload, so the same
+posture is correct — the meaningful boundary is the per-run jail, not Docker's
 generic profile around a single-purpose daemon.
 
 `scripts/smoke-run.sh` (`POST /run`, exact stdout+status assertion, non-zero on
