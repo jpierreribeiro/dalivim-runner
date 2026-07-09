@@ -11,6 +11,14 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  schedule:
+    # Weekly re-run of the security gates so base-image drift and CVEs disclosed
+    # AFTER a merge are caught even when no code changes — the "periodically"
+    # half of §4.4 ("rodado no CI e periodicamente"). On this cadence the escape
+    # corpus (runner-smoke) and the image CVE scan (security-scan) both fire; a
+    # regression in containment or a newly-fixable HIGH/CRITICAL CVE turns the
+    # scheduled run red without waiting for the next push.
+    - cron: '17 6 * * 1' # Mondays 06:17 UTC
 
 permissions:
   contents: read
@@ -156,3 +164,38 @@ jobs:
       - name: Teardown
         if: always()
         run: docker rm -f runner runner-bp || true
+
+  # §4.5(c) — image CVE scan. A separate job (not a step in runner-smoke) so a
+  # CVE finding gives a clean, independent signal instead of muddying the
+  # functional/containment smoke result, and so it can run on its own cadence via
+  # the weekly schedule above. Scans the SHIPPED image, so it also covers the
+  # runtimes and nsjail runtime libs the Dockerfile installs (and the Node/gcc
+  # toolchains F-C/F-D will add).
+  security-scan:
+    name: image CVE scan (trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build runner image
+        run: docker build -t runner:scan .
+
+      - name: Install trivy
+        # Official installer, pinned to /usr/local/bin. Avoids depending on a
+        # marketplace-action tag existing; the vuln DB is pulled at scan time.
+        run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Scan for fixable HIGH/CRITICAL CVEs
+        # --ignore-unfixed keeps the gate ACTIONABLE: it fails only when a fix is
+        # actually available (bump the base or a package), never on an upstream
+        # CVE with no patch yet — so a green scan means "nothing to fix", not
+        # "nothing found". Widen severity or drop --ignore-unfixed for an audit;
+        # move this job to schedule-only (add an `if`) if PR noise appears.
+        run: |
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --exit-code 1 \
+            --no-progress \
+            --format table \
+            runner:scan
