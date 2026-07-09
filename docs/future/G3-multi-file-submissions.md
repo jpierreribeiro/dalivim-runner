@@ -1,5 +1,13 @@
 # G3 — Multi-file submissions
 
+> **Status: implemented.** The runner side is done — `files[]`/`entrypoint`
+> contract, the traversal-resistant materialization layer, and multi-file
+> build/run for C/C++/Java/Go/Python/JS, with the adversarial path/symlink/limit
+> test suite green. See [`../G3_MULTIFILE.md`](../G3_MULTIFILE.md) for the design,
+> threat model, security checklist, and residual-risk report. **Backend
+> coordination (producing `files[]` from the student editor) is the remaining
+> half** and is tracked there.
+
 The largest phase and the only one that **changes the wire contract**. Enables a
 student to submit several files — own headers (`#include "util.h"`), multiple
 translation units, a package split — instead of one blob. Schedule deliberately;

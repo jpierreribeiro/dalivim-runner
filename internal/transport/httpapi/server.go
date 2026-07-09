@@ -25,6 +25,7 @@ type Config struct {
 	Token             string
 	MaxSourceBytes    int
 	MaxStdinBytes     int
+	MaxFilesBytes     int // multi-file total-content budget, for the body-size ceiling
 	MaxConcurrentRuns int
 
 	// MetricsToken gates GET /metrics; empty falls back to Token so /metrics is
@@ -49,6 +50,7 @@ func New(svc *executor.Service, cfg Config) *Server {
 		metrics:             m,
 		maxSourceBytes:      cfg.MaxSourceBytes,
 		maxStdinBytes:       cfg.MaxStdinBytes,
+		maxFilesBytes:       cfg.MaxFilesBytes,
 		backend:             cfg.Backend,
 		networkIsolated:     cfg.NetworkIsolated,
 		readyRequiresNsjail: cfg.ReadyRequiresNsjail,

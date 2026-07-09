@@ -19,7 +19,7 @@ means the perfect *executor*, never absorbing the judge.
 |---|---|---|---|---|
 | **[G1](G1-executor-robustness.md)** | Executor correctness & robustness | 🔴 high | small | no (adds one status) |
 | **[G2](G2-language-coverage.md)** | Language coverage — Go, Java | 🟡 high | medium | no (additive) |
-| **[G3](G3-multi-file-submissions.md)** | Multi-file submissions | 🟠 high | large | **yes** (adds `files[]`) |
+| **[G3](G3-multi-file-submissions.md)** ✅ | Multi-file submissions (runner side done — see [G3_MULTIFILE.md](../G3_MULTIFILE.md)) | 🟠 high | large | **yes** (adds `files[]`) |
 | **[G4](G4-observability.md)** | Observability & operability | 🟢 medium | medium | no |
 | **[G5](G5-deferred.md)** | Deferred / demand-gated | ⚪ low | — | — |
 | **[Adding a language](ADDING-A-LANGUAGE.md)** | Extension guide (the 3 runtime shapes) | — | — | — |

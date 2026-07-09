@@ -330,6 +330,74 @@ jobs:
           echo "$body" | grep -q '^runner_run_duration_seconds_bucket{' \
             || { echo "::error::/metrics missing run-duration histogram"; exit 1; }
 
+      # ---- G3 multi-file submissions (files[]) on the shipped image ----
+      # These exercise the ONLY contract change of the phase end to end through the
+      # real jail: files[] materialized into /sandbox/src with the traversal-resistant
+      # writer, then compiled/run per language. Single-file source_code (every step
+      # above) is the regression guard that the legacy path is unchanged.
+
+      - name: G3 C multi-file (.h + 2 .c TUs) => "5\n"
+        run: |
+          SMOKE_FILES='[
+            {"path":"util.h","content":"int add(int,int);\n"},
+            {"path":"util.c","content":"#include \"util.h\"\nint add(int a,int b){return a+b;}\n"},
+            {"path":"main.c","content":"#include <stdio.h>\n#include \"util.h\"\nint main(void){printf(\"%d\\n\", add(2,3));return 0;}\n"}
+          ]' ./scripts/smoke-files.sh c $'5\n'
+
+      - name: G3 C++ multi-file (.hpp + 2 .cpp) => "9\n"
+        run: |
+          SMOKE_FILES='[
+            {"path":"solver.hpp","content":"int mul(int,int);\n"},
+            {"path":"solver.cpp","content":"#include \"solver.hpp\"\nint mul(int a,int b){return a*b;}\n"},
+            {"path":"main.cpp","content":"#include <iostream>\n#include \"solver.hpp\"\nint main(){std::cout<<mul(3,3)<<\"\\n\";}\n"}
+          ]' ./scripts/smoke-files.sh cpp $'9\n'
+
+      - name: G3 Go multi-file (two files, one package) => "9\n"
+        run: |
+          SMOKE_FILES='[
+            {"path":"main.go","content":"package main\nimport \"fmt\"\nfunc main(){fmt.Printf(\"%d\\n\", add(4,5))}\n"},
+            {"path":"helper.go","content":"package main\nfunc add(a,b int) int {return a+b}\n"}
+          ]' ./scripts/smoke-files.sh go $'9\n'
+
+      - name: G3 Java multi-file (package + helper class, entrypoint com.acme.Main) => "42\n"
+        run: |
+          SMOKE_FILES='[
+            {"path":"com/acme/Helper.java","content":"package com.acme;\npublic class Helper { public static int n(){ return 42; } }\n"},
+            {"path":"com/acme/Main.java","content":"package com.acme;\npublic class Main { public static void main(String[] a){ System.out.println(Helper.n()); } }\n"}
+          ]' ./scripts/smoke-files.sh java $'42\n' success com.acme.Main
+
+      - name: G3 Python multi-file (sibling import via runpy wrapper) => "hello world\n"
+        run: |
+          SMOKE_FILES='[
+            {"path":"main.py","content":"from helper import greet\nprint(greet(\"world\"))\n"},
+            {"path":"helper.py","content":"def greet(n):\n    return \"hello \" + n\n"}
+          ]' ./scripts/smoke-files.sh python $'hello world\n'
+
+      - name: G3 JavaScript multi-file (sibling require) => "hello world\n"
+        run: |
+          SMOKE_FILES='[
+            {"path":"main.js","content":"const {greet}=require(\"./helper\");console.log(greet(\"world\"));\n"},
+            {"path":"helper.js","content":"module.exports.greet=(n)=>\"hello \"+n;\n"}
+          ]' ./scripts/smoke-files.sh javascript $'hello world\n'
+
+      # The security crux: an attacker-controlled path that tries to escape the job
+      # root must be REJECTED with 400 before anything is written or run. A
+      # forbidden manifest (setup.py / go.mod) is likewise a 400.
+      - name: G3 path traversal + forbidden file => HTTP 400 (nothing materialized)
+        run: |
+          for body in \
+            '{"language":"python","files":[{"path":"../../etc/passwd","content":"x"}]}' \
+            '{"language":"python","files":[{"path":"/etc/passwd","content":"x"}]}' \
+            '{"language":"go","files":[{"path":"go.mod","content":"module x"},{"path":"main.go","content":"package main\nfunc main(){}"}]}' \
+            '{"language":"python","files":[{"path":"setup.py","content":"x"}]}'; do
+            code="$(curl -s -o /dev/null -w '%{http_code}' localhost:8090/run \
+              -H 'content-type: application/json' -d "$body")"
+            if [ "$code" != "400" ]; then
+              echo "::error::expected 400 for hostile files[] payload, got $code: $body"; exit 1
+            fi
+          done
+          echo "SMOKE OK   [G3] hostile files[] payloads all rejected with 400"
+
       # F-D follow-up: the static run jail can take a tight seccomp ALLOWLIST
       # (DEFAULT KILL) instead of the shared denylist. Prove on a dedicated
       # RUNNER_STATIC_SECCOMP=enforce container that (a) the kafel allowlist
