@@ -25,6 +25,7 @@ func multiFileService(t *testing.T) *Service {
 		},
 		NewPython(sb, 64*1024, 256, 64),
 		NewNode(sb, 64*1024, 256, 64),
+		NewLua(sb, 64*1024, 256, 64),
 	)
 }
 
@@ -104,6 +105,27 @@ func TestNode_MultiFileSiblingRequire(t *testing.T) {
 		Files: []runnerapi.RunFile{
 			{Path: "main.js", Content: "const {greet} = require('./helper');\nconsole.log(greet('world'));\n"},
 			{Path: "helper.js", Content: "module.exports.greet = (n) => 'hello ' + n;\n"},
+		},
+		TimeoutMs: 8000, MemoryMB: 128,
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Status != runnerapi.StatusSuccess || res.Stdout != "hello world\n" {
+		t.Fatalf("sibling require failed: status=%q stdout=%q stderr=%q", res.Status, res.Stdout, res.Stderr)
+	}
+}
+
+// TestLua_MultiFileSiblingRequire is the G3 acceptance for Lua: a main script
+// require()-ing a sibling module resolves because package.path is pinned to the
+// materialized source root (never a caller path), mirroring Python's runpy wrapper.
+func TestLua_MultiFileSiblingRequire(t *testing.T) {
+	requireLua(t)
+	res, err := multiFileService(t).Run(context.Background(), runnerapi.RunRequest{
+		Language: "lua",
+		Files: []runnerapi.RunFile{
+			{Path: "main.lua", Content: "local h = require('helper')\nprint(h.greet('world'))\n"},
+			{Path: "helper.lua", Content: "local M = {}\nfunction M.greet(n) return 'hello ' .. n end\nreturn M\n"},
 		},
 		TimeoutMs: 8000, MemoryMB: 128,
 	})

@@ -149,6 +149,30 @@ var javascriptSpec = languageSpec{
 	multiFileRunArgs: nodeRunArgs,
 }
 
+// luaSpec runs a single Lua file (PUC-Lua 5.4). It inherits the same jail as the
+// other interpreted languages; only the interpreter argv, source filename, and
+// version parsing differ.
+var luaSpec = languageSpec{
+	name:       "lua",
+	sourceFile: "main.lua",
+	binNames:   []string{"lua5.4", "lua"},
+	// -E ignores the LUA_INIT/LUA_PATH/LUA_CPATH environment variables, so a
+	// submission cannot auto-run injected code or redirect require() — the
+	// isolated-mode analogue of Python's -I. The file is run directly (single file).
+	runArgs:      []string{"-E", "main.lua"},
+	env:          determinismEnv("PATH=/usr/local/bin:/usr/bin:/bin"),
+	versionArgs:  []string{"-v"}, // "Lua 5.4.6  Copyright (C) ..."
+	parseVersion: secondField,    // -> "5.4.6"
+	// PUC-Lua's default allocator uses realloc, so a hard RLIMIT_AS bounds it and a
+	// table/string bomb dies deterministically; "not enough memory" is Lua's OOM
+	// marker for the no-cgroup fallback classification (mirrors Python's MemoryError).
+	memErrSubstr:    "not enough memory",
+	capAddressSpace: true,
+	// Multi-file: prepend exactly the source root to package.path so require()
+	// resolves siblings under src/ and nowhere caller-controlled.
+	multiFileRunArgs: luaRunArgs,
+}
+
 // pythonRunpyArgs builds the CPython multi-file argv tail: isolated + no-bytecode
 // mode, then a runpy wrapper that runs the entrypoint as __main__ with exactly
 // the source root on sys.path. entryRel is the entrypoint relative to cwd
@@ -165,6 +189,17 @@ func pythonRunpyArgs(entryRel string) []string {
 // require()/import resolves relative to the entrypoint on disk.
 func nodeRunArgs(entryRel string) []string {
 	return []string{"--disable-proto=throw", "--", entryRel}
+}
+
+// luaRunArgs builds the Lua multi-file argv tail: isolated mode (-E), a -e chunk
+// that PREPENDS exactly the source root to package.path so require() resolves
+// siblings under src/ (the root name is hardcoded here, never the caller's path),
+// then the entrypoint script. The -e chunk runs before the script, so the script's
+// require()s see the widened path. entryRel is the entrypoint relative to cwd
+// ("src/main.lua").
+func luaRunArgs(entryRel string) []string {
+	setPath := "package.path=" + strconv.Quote(srcRootName+"/?.lua;"+srcRootName+"/?/init.lua;") + "..package.path"
+	return []string{"-E", "-e", setPath, entryRel}
 }
 
 // nodeHeapArgs bounds V8's old-space heap to the run's memory budget. This is

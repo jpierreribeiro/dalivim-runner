@@ -20,7 +20,7 @@ internal/
                        nsjail and netns backends + the RUNNER_SANDBOX dial/probe.
                        sandbox_linux.go = real; sandbox_other.go = dev stub
   executor/            language-agnostic core: dispatch, limit clamping, runtimes
-                       languages.go = closed languageSpec registry (python, js);
+                       languages.go = closed languageSpec registry (python, js, lua);
                        interpreted.go = one spec-driven runtime both share
   transport/httpapi/   HTTP server, routing, PSK middleware, handlers
 pkg/runnerapi/         public wire contract (importable by the gateway)
@@ -143,7 +143,7 @@ still carry the captured first `RUNNER_MAX_OUTPUT_BYTES` (with the truncation
 marker) and `duration_ms` is well under the timeout. It is additive — a caller
 that does not special-case it sees an unsuccessful run with partial output.
 
-**Languages:** `python`, `javascript` (interpreted), `c`, `cpp`, `go` (static
+**Languages:** `python`, `javascript`, `lua` (interpreted), `c`, `cpp`, `go` (static
 compiled), `java` (VM compiled). C is linked against libm, so ordinary `<math.h>`
 (`sqrt`, `pow`, …) works. `go` compiles a single `main.go` with `CGO_ENABLED=0`
 (static binary, no `go.mod` needed — modules are a later phase); it runs on the
