@@ -37,6 +37,12 @@ type Config struct {
 	MaxCompileTimeoutMs int // hard ceiling for compile time
 	CompileMemoryMB     int // RLIMIT_AS / cgroup for the compiler (bombs)
 	MaxArtifactBytes    int // reject a compiled artifact larger than this
+
+	// StaticSeccomp: off|enforce|complain (empty => off) — the seccomp profile for
+	// the compiled RUN jail. off keeps the shared denylist; enforce installs the
+	// tight static-binary allowlist (SIGSYS on anything unlisted); complain logs
+	// violations without killing, for tuning the set on the target.
+	StaticSeccomp string
 }
 
 // Load reads and validates configuration. It returns an error (rather than
@@ -64,6 +70,7 @@ func Load() (Config, error) {
 		MaxCompileTimeoutMs: envInt("RUNNER_MAX_COMPILE_TIMEOUT_MS", 20_000),
 		CompileMemoryMB:     envInt("RUNNER_COMPILE_MEMORY_MB", 512),
 		MaxArtifactBytes:    envInt("RUNNER_MAX_ARTIFACT_MB", 32) * 1024 * 1024,
+		StaticSeccomp:       os.Getenv("RUNNER_STATIC_SECCOMP"),
 	}
 	if cfg.ServiceToken == "" && !cfg.Development {
 		return Config{}, fmt.Errorf("RUNNER_SERVICE_TOKEN is required outside development; set it (and send X-Runner-Token from the gateway) or set RUNNER_ENV=development for local use")

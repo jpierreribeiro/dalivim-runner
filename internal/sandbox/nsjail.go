@@ -35,6 +35,71 @@ const seccompPolicy = `POLICY dalivim {
 }
 USE dalivim DEFAULT ALLOW`
 
+// staticAllowSyscalls is the minimal syscall set a statically-linked C/C++ program
+// needs (F-D run jail) — glibc static startup (brk/arch_prctl/set_tid_address/
+// set_robust_list/prlimit64), memory (mmap/munmap/mprotect/mremap/madvise/brk),
+// stdio on already-open fds (read/write/…/newfstat/ioctl/lseek/poll), signals,
+// time, cheap identity getters, and exit — and deliberately EXCLUDES the escape
+// surface a compute program never needs: the socket family (no egress),
+// open/openat (no file access), clone/fork, ptrace, and every namespace/mount/
+// module syscall. execve is the one deliberate exception (nsjail's launch — see
+// below). Everything not listed is killed with SIGSYS (DEFAULT KILL) — far
+// tighter than the interpreter denylist. Tuned on the target via the complain
+// profile; see the plan §3.4.
+//
+// Note on kafel identifiers: kafel's amd64 table uses the KERNEL entry names, so
+// the stat/uname family carry the `new` prefix — syscall 5 is `newfstat` (not
+// `fstat`) and 63 is `newuname` (not `uname`). Using the glibc-common spelling
+// fails the policy compile (fail-closed), same class as the umount/umount2 catch.
+//
+// nsjail 3.4's bundled kafel is old enough to lack the NAMES of the newest
+// syscalls (statx=332, rseq=334) and its grammar rejects bare numbers, so those
+// two cannot be allow-listed at all. We remove the NEED for them instead:
+//   - rseq: disabled at the glibc level via GLIBC_TUNABLES=glibc.pthread.rseq=0
+//     on the run's env (see compiled.go), so __libc_start_main never registers it;
+//   - statx: not listed — glibc-static resolves fstat() through newfstat/
+//     newfstatat here, both of which ARE named. (If a future glibc insists on
+//     statx, the fix is a newer nsjail/kafel, not opening the allowlist.)
+//
+// execve is allowed for one structural reason: nsjail installs the seccomp
+// filter and THEN execve()s the payload, so the launch execve is itself filtered
+// — deny it and the binary never starts (SIGSYS, syscall=59). It is not a hole
+// here: the run jail is a MINIMAL rootfs with only the artifact and an empty
+// tmpfs /tmp, so there is nothing else to execve, and with open/openat NOT in the
+// list a program cannot create a new executable to run. Exec containment is the
+// empty rootfs, not a blocked execve. execveat stays out (nsjail uses execve).
+const staticAllowSyscalls = `execve,
+		read, write, readv, writev, pread64, pwrite64,
+		close, newfstat, newfstatat, lseek, ioctl, fcntl, readlink, readlinkat,
+		dup, dup2, dup3, poll, ppoll, pselect6, select,
+		brk, mmap, munmap, mprotect, mremap, madvise,
+		rt_sigaction, rt_sigprocmask, rt_sigreturn, sigaltstack,
+		arch_prctl, set_tid_address, set_robust_list, prlimit64,
+		futex, sched_yield, sched_getaffinity, getcpu,
+		clock_gettime, clock_getres, clock_nanosleep, nanosleep, gettimeofday, time,
+		getpid, gettid, getuid, geteuid, getgid, getegid, getrandom, newuname, sysinfo,
+		exit, exit_group, restart_syscall`
+
+// staticAllowlistPolicy renders the static-binary allowlist kafel policy with the
+// given default action: "KILL" to enforce (SIGSYS on anything unlisted) or "LOG"
+// to only log violations while still running them (target tuning).
+func staticAllowlistPolicy(defaultAction string) string {
+	return "POLICY dalivim_static {\n\tALLOW {\n\t\t" + staticAllowSyscalls +
+		"\n\t}\n}\nUSE dalivim_static DEFAULT " + defaultAction
+}
+
+// seccompPolicyFor returns the kafel policy string for a run's chosen profile.
+func seccompPolicyFor(p SeccompProfile) string {
+	switch p {
+	case SeccompStaticEnforce:
+		return staticAllowlistPolicy("KILL")
+	case SeccompStaticComplain:
+		return staticAllowlistPolicy("LOG")
+	default:
+		return seccompPolicy
+	}
+}
+
 // jailMount is the path the per-run WorkDir is bind-mounted to inside the jail;
 // Argv referencing files (main.py) is resolved against it via --cwd. It aliases
 // the exported JailMount so runtimes (which build argv with sandbox.JailPath) and
@@ -91,7 +156,7 @@ func nsjailArgs(uid, gid int, spec Spec) []string {
 		workMount, spec.WorkDir+":"+jailMount,
 		"--cwd", jailMount,
 		"--keep_env", // pass exactly the minimal env the caller set on cmd.Env
-		"--seccomp_string", seccompPolicy,
+		"--seccomp_string", seccompPolicyFor(spec.Seccomp),
 	)
 	// RLIMIT_AS, MB. 0 => leave it unset: V8/Node cannot start under a tight
 	// address-space cap (multi-GB virtual reservation), so those runs bound memory

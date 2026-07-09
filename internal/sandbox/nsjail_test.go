@@ -201,6 +201,64 @@ func TestNsjailArgs_MinimalRootfs(t *testing.T) {
 	}
 }
 
+// TestSeccompProfiles pins policy selection: the default is the DENYLIST; the
+// static profiles are ALLOWLISTS (DEFAULT KILL / LOG) that must NOT permit the
+// escape-surface syscalls a compute program never needs.
+func TestSeccompProfiles(t *testing.T) {
+	deny := seccompPolicyFor(SeccompDenylist)
+	if !strings.Contains(deny, "DEFAULT ALLOW") {
+		t.Fatalf("denylist must be DEFAULT ALLOW, got %q", deny)
+	}
+
+	enforce := seccompPolicyFor(SeccompStaticEnforce)
+	if !strings.Contains(enforce, "ALLOW {") || !strings.Contains(enforce, "DEFAULT KILL") {
+		t.Fatalf("enforce must be an allowlist with DEFAULT KILL, got %q", enforce)
+	}
+	// execve is intentionally allowed (nsjail execve's the payload after installing
+	// the filter; neutered by the minimal-rootfs run jail — see nsjailArgs). The
+	// real escape surface must still be excluded.
+	for _, banned := range []string{"execveat", "socket", "openat", "open", "ptrace", "clone", "clone3", "mount", "setns", "unshare"} {
+		// word-boundary check so e.g. "open_by_handle_at" wouldn't match "openat"
+		if containsToken(enforce, banned) {
+			t.Fatalf("static allowlist must NOT permit %q", banned)
+		}
+	}
+	for _, needed := range []string{"read", "write", "exit_group", "brk", "mmap", "rt_sigreturn"} {
+		if !containsToken(enforce, needed) {
+			t.Fatalf("static allowlist missing essential syscall %q", needed)
+		}
+	}
+
+	if !strings.Contains(seccompPolicyFor(SeccompStaticComplain), "DEFAULT LOG") {
+		t.Fatal("complain profile must be DEFAULT LOG (log, don't kill)")
+	}
+}
+
+// containsToken reports whether s contains name as a whole comma/space/brace-
+// delimited token, not as a substring of another identifier.
+func containsToken(s, name string) bool {
+	for _, f := range strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\n' || r == '\t' || r == '{' || r == '}'
+	}) {
+		if f == name {
+			return true
+		}
+	}
+	return false
+}
+
+// TestNsjailArgs_SeccompSelection pins that the chosen profile reaches nsjail.
+func TestNsjailArgs_SeccompSelection(t *testing.T) {
+	spec := sampleSpec()
+	spec.Seccomp = SeccompStaticEnforce
+	if got := argValue(nsjailArgs(1000, 1000, spec), "--seccomp_string"); !strings.Contains(got, "DEFAULT KILL") {
+		t.Fatalf("SeccompStaticEnforce must install the allowlist, got %q", got)
+	}
+	if got := argValue(nsjailArgs(1000, 1000, sampleSpec()), "--seccomp_string"); !strings.Contains(got, "DEFAULT ALLOW") {
+		t.Fatalf("default spec must keep the denylist, got %q", got)
+	}
+}
+
 func TestCapSeconds(t *testing.T) {
 	if got := cpuCapSeconds(3000); got != 4 {
 		t.Fatalf("cpuCapSeconds(3000) = %d, want 4", got)

@@ -94,7 +94,31 @@ type Spec struct {
 	// there is nothing to execve and no compiler to re-invoke at runtime (D-4).
 	// Interpreted runs and the compile phase need the full rootfs, so leave false.
 	MinimalRootfs bool
+
+	// Seccomp selects the syscall policy. The default (zero value) is the shared
+	// DENYLIST that fits the huge syscall surface of interpreters and the compiler.
+	// A static compiled artifact makes very few syscalls, so the F-D run jail can
+	// use a tight ALLOWLIST (SeccompStaticEnforce) — anything outside the set is
+	// killed with SIGSYS — or SeccompStaticComplain to log violations without
+	// killing, for tuning the set on the target.
+	Seccomp SeccompProfile
 }
+
+// SeccompProfile selects which kafel policy the nsjail backend installs for a run.
+type SeccompProfile int
+
+const (
+	// SeccompDenylist (default) keeps the dangerous syscalls off and allows the
+	// rest — the right shape for CPython/Node/gcc, whose syscall surface is huge.
+	SeccompDenylist SeccompProfile = iota
+	// SeccompStaticEnforce is the tight allowlist for a static binary: DEFAULT KILL,
+	// only the minimal set a self-contained program needs is permitted.
+	SeccompStaticEnforce
+	// SeccompStaticComplain is the same allowlist with DEFAULT LOG — the syscall
+	// still runs but is logged, so the enforced set can be tuned on the target
+	// before it is switched to kill.
+	SeccompStaticComplain
+)
 
 // RunAccounting exposes authoritative per-run resource facts a backend gathered
 // out-of-band — today, cgroup v2 memory accounting under the nsjail backend. It

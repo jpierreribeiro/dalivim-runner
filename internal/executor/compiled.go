@@ -63,10 +63,11 @@ type compiledRuntime struct {
 	outputLimit       int
 	maxProcesses      int
 	maxFileSizeMB     int
-	compileTimeoutMs  int // default per-run compile budget
-	maxCompileTimeout int // ceiling
-	compileMemoryMB   int // RLIMIT_AS/cgroup for the compile phase
-	maxArtifactBytes  int // reject artifacts larger than this (compile bombs)
+	compileTimeoutMs  int                    // default per-run compile budget
+	maxCompileTimeout int                    // ceiling
+	compileMemoryMB   int                    // RLIMIT_AS/cgroup for the compile phase
+	maxArtifactBytes  int                    // reject artifacts larger than this (compile bombs)
+	runSeccomp        sandbox.SeccompProfile // seccomp profile for the run jail
 }
 
 // CompiledConfig carries the compile-phase knobs (execution knobs are shared with
@@ -79,6 +80,7 @@ type CompiledConfig struct {
 	MaxCompileTimeout int
 	CompileMemoryMB   int
 	MaxArtifactBytes  int
+	RunSeccomp        sandbox.SeccompProfile
 }
 
 // NewC / NewCpp build the C and C++ runtimes on the shared sandbox.
@@ -103,6 +105,7 @@ func newCompiled(spec compiledLangSpec, sb sandbox.Sandbox, cfg CompiledConfig) 
 		maxCompileTimeout: cfg.MaxCompileTimeout,
 		compileMemoryMB:   cfg.CompileMemoryMB,
 		maxArtifactBytes:  cfg.MaxArtifactBytes,
+		runSeccomp:        cfg.RunSeccomp,
 	}
 }
 
@@ -205,13 +208,19 @@ func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest,
 		MaxProcesses:   r.maxProcesses,
 		MaxFileSizeMB:  r.maxFileSizeMB,
 		Writable:       false,
-		MinimalRootfs:  true, // no toolchain in the run jail (D-4)
+		MinimalRootfs:  true,         // no toolchain in the run jail (D-4)
+		Seccomp:        r.runSeccomp, // tight static allowlist when enabled (default: denylist)
 	})
 	if acct != nil {
 		defer acct.Close()
 	}
 	cmd.Stdin = strings.NewReader(req.Stdin)
-	cmd.Env = []string{} // a static artifact needs no environment
+	// A static artifact needs no environment, except: disable glibc's rseq
+	// registration so __libc_start_main doesn't issue the rseq syscall — nsjail
+	// 3.4's kafel cannot name rseq for the static seccomp allowlist, and rseq is a
+	// pure perf optimisation, so turning it off costs nothing and keeps the
+	// allowlist tight. Harmless under the denylist too.
+	cmd.Env = []string{"GLIBC_TUNABLES=glibc.pthread.rseq=0"}
 
 	stdout := &limitedBuffer{limit: r.outputLimit}
 	stderr := &limitedBuffer{limit: r.outputLimit}

@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/jpierreribeiro/dalivim-runner/internal/config"
@@ -91,5 +92,23 @@ func compiledConfig(cfg config.Config) executor.CompiledConfig {
 		MaxCompileTimeout: cfg.MaxCompileTimeoutMs,
 		CompileMemoryMB:   cfg.CompileMemoryMB,
 		MaxArtifactBytes:  cfg.MaxArtifactBytes,
+		RunSeccomp:        staticSeccompProfile(cfg.StaticSeccomp),
+	}
+}
+
+// staticSeccompProfile maps RUNNER_STATIC_SECCOMP (off|enforce|complain, empty =>
+// off) to the run-jail seccomp profile for compiled languages, logging the choice.
+// An unrecognised value degrades to the safe default (the shared denylist) rather
+// than failing boot — the allowlist is an opt-in tightening.
+func staticSeccompProfile(mode string) sandbox.SeccompProfile {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "enforce":
+		slog.Info("compiled run jail: static seccomp ALLOWLIST enforced (DEFAULT KILL)")
+		return sandbox.SeccompStaticEnforce
+	case "complain":
+		slog.Warn("compiled run jail: static seccomp allowlist in COMPLAIN mode (DEFAULT LOG) — violations are logged, NOT killed; for tuning only")
+		return sandbox.SeccompStaticComplain
+	default:
+		return sandbox.SeccompDenylist
 	}
 }
