@@ -33,16 +33,20 @@ func main() {
 		slog.Warn("RUNNER_SERVICE_TOKEN is empty (development); the runner accepts unauthenticated calls")
 	}
 
-	// Resolve network isolation and the fork-bomb cap before accepting a single
-	// request. Configure fails closed when RUNNER_NETWORK_ISOLATION=require and
-	// the platform forbids unprivileged namespaces.
+	// Resolve network isolation before accepting a single request. Configure fails
+	// closed when RUNNER_NETWORK_ISOLATION=require and the platform forbids
+	// unprivileged namespaces.
+	//
+	// Fork-bomb containment is deliberately NOT applied process-wide here.
+	// RLIMIT_NPROC is enforced per real-uid, so lowering it globally throttles
+	// every process this uid already runs and can make the runner itself fail to
+	// fork ("errno=11") on a busy host. Per-run process caps belong to the
+	// per-jail sandbox (nsjail --rlimit_nproc); overload is bounded instead by the
+	// transport's concurrency limit (see RUNNER_MAX_CONCURRENT_RUNS).
 	sb, err := sandbox.Configure(cfg.NetworkPolicy)
 	if err != nil {
 		slog.Error("network isolation", "err", err)
 		os.Exit(1)
-	}
-	if err := sandbox.LimitProcesses(cfg.MaxProcesses); err != nil {
-		slog.Warn("could not set process limit", "err", err)
 	}
 
 	svc := executor.NewService(
@@ -56,9 +60,10 @@ func main() {
 	)
 
 	srv := httpapi.New(svc, httpapi.Config{
-		Addr:           cfg.Addr,
-		Token:          cfg.ServiceToken,
-		MaxSourceBytes: cfg.MaxSourceBytes,
+		Addr:              cfg.Addr,
+		Token:             cfg.ServiceToken,
+		MaxSourceBytes:    cfg.MaxSourceBytes,
+		MaxConcurrentRuns: cfg.MaxConcurrentRuns,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

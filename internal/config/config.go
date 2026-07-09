@@ -17,7 +17,9 @@ type Config struct {
 	ServiceToken  string // shared secret; callers send it as X-Runner-Token
 	Development   bool   // RUNNER_ENV=development relaxes the token requirement
 	NetworkPolicy string // auto|require|off (empty => auto)
-	MaxProcesses  int    // per-uid RLIMIT_NPROC (fork-bomb containment)
+	MaxProcesses  int    // reserved: per-run RLIMIT_NPROC for the per-jail sandbox (NOT applied process-wide)
+
+	MaxConcurrentRuns int // simultaneous executions before the runner sheds load with 503
 
 	DefaultTimeoutMs int
 	MaxTimeoutMs     int
@@ -31,17 +33,18 @@ type Config struct {
 // exiting) so the caller owns process lifecycle.
 func Load() (Config, error) {
 	cfg := Config{
-		Addr:             ":" + port(),
-		ServiceToken:     os.Getenv("RUNNER_SERVICE_TOKEN"),
-		Development:      strings.EqualFold(strings.TrimSpace(os.Getenv("RUNNER_ENV")), "development"),
-		NetworkPolicy:    os.Getenv("RUNNER_NETWORK_ISOLATION"),
-		MaxProcesses:     envInt("RUNNER_MAX_PROCESSES", 256),
-		DefaultTimeoutMs: envInt("RUNNER_DEFAULT_TIMEOUT_MS", 3000),
-		MaxTimeoutMs:     envInt("RUNNER_MAX_TIMEOUT_MS", 10000),
-		DefaultMemoryMB:  envInt("RUNNER_DEFAULT_MEMORY_MB", 128),
-		MaxMemoryMB:      envInt("RUNNER_MAX_MEMORY_MB", 512),
-		MaxSourceBytes:   envInt("RUNNER_MAX_SOURCE_BYTES", 200_000),
-		MaxOutputBytes:   envInt("RUNNER_MAX_OUTPUT_BYTES", 64*1024),
+		Addr:              ":" + port(),
+		ServiceToken:      os.Getenv("RUNNER_SERVICE_TOKEN"),
+		Development:       strings.EqualFold(strings.TrimSpace(os.Getenv("RUNNER_ENV")), "development"),
+		NetworkPolicy:     os.Getenv("RUNNER_NETWORK_ISOLATION"),
+		MaxProcesses:      envInt("RUNNER_MAX_PROCESSES", 256),
+		MaxConcurrentRuns: envInt("RUNNER_MAX_CONCURRENT_RUNS", 8),
+		DefaultTimeoutMs:  envInt("RUNNER_DEFAULT_TIMEOUT_MS", 3000),
+		MaxTimeoutMs:      envInt("RUNNER_MAX_TIMEOUT_MS", 10000),
+		DefaultMemoryMB:   envInt("RUNNER_DEFAULT_MEMORY_MB", 128),
+		MaxMemoryMB:       envInt("RUNNER_MAX_MEMORY_MB", 512),
+		MaxSourceBytes:    envInt("RUNNER_MAX_SOURCE_BYTES", 200_000),
+		MaxOutputBytes:    envInt("RUNNER_MAX_OUTPUT_BYTES", 64*1024),
 	}
 	if cfg.ServiceToken == "" && !cfg.Development {
 		return Config{}, fmt.Errorf("RUNNER_SERVICE_TOKEN is required outside development; set it (and send X-Runner-Token from the gateway) or set RUNNER_ENV=development for local use")

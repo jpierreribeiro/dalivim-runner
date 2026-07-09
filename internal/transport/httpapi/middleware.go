@@ -26,3 +26,29 @@ func RequireToken(token string, next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+// LimitConcurrency bounds how many executions run at once. Each run is CPU- and
+// memory-hungry, so unbounded concurrency lets a burst exhaust the container and
+// take the service down. When every slot is taken the limiter fails fast with
+// 503 (and Retry-After) instead of queueing, so the caller learns immediately
+// and can shed load or fall back to another backend. Placed INSIDE RequireToken
+// so only authenticated callers can consume a slot — an unauthenticated flood
+// cannot starve the gateway of capacity.
+//
+// max <= 0 disables the limit (pass-through).
+func LimitConcurrency(max int, next http.Handler) http.Handler {
+	if max <= 0 {
+		return next
+	}
+	slots := make(chan struct{}, max)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case slots <- struct{}{}:
+			defer func() { <-slots }()
+			next.ServeHTTP(w, r)
+		default:
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "runner at capacity", http.StatusServiceUnavailable)
+		}
+	})
+}

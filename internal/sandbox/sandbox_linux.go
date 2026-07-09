@@ -111,9 +111,14 @@ func CancelCmd(cmd *exec.Cmd) func() error {
 }
 
 // LimitProcesses lowers the soft RLIMIT_NPROC for THIS process (inherited by all
-// executed children) so a fork bomb cannot exhaust the host. It is process-wide
-// because RLIMIT_NPROC is enforced per real-uid. The soft limit never exceeds
-// the hard one.
+// executed children). The soft limit never exceeds the hard one.
+//
+// It is deliberately NOT called at startup: RLIMIT_NPROC is enforced per
+// real-uid, so lowering it process-wide throttles every process this uid runs
+// and can make the runner fail to fork ("errno=11") on a busy shared host.
+// Fork-bomb containment must be per-run instead — the per-jail sandbox applies
+// it (nsjail --rlimit_nproc) against a jail-private uid. This primitive is kept
+// only for that future per-jail path; do not reintroduce it as a global cap.
 func LimitProcesses(n int) error {
 	var lim syscall.Rlimit
 	if err := syscall.Getrlimit(rlimitNPROC, &lim); err != nil {

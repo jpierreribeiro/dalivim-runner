@@ -86,7 +86,14 @@ Unauthenticated liveness probe → `200 ok`.
 - **CPU/wall:** wall-clock deadline + `ulimit -t`; the whole process group is
   SIGKILLed on timeout.
 - **Memory:** best-effort address-space cap via `ulimit -v`.
-- **Fork bombs:** `RLIMIT_NPROC` capped process-wide.
+- **Overload:** a bounded number of executions run at once
+  (`RUNNER_MAX_CONCURRENT_RUNS`); excess requests are shed immediately with `503`
+  + `Retry-After` so the caller can fall back instead of the container being
+  driven into swap/OOM.
+- **Fork bombs:** contained per-run by the sandbox, not a process-wide
+  `RLIMIT_NPROC`. A global cap is enforced per real-uid, so it throttles the
+  runner itself on a busy host (`errno=11`); per-run process caps land with the
+  per-jail sandbox (nsjail `--rlimit_nproc`).
 - **Filesystem:** throwaway temp dir per run; `python3 -I`; restricted PATH/env;
   runs as a non-root uid.
 
@@ -101,7 +108,8 @@ Unauthenticated liveness probe → `200 ok`.
 | `RUNNER_SERVICE_TOKEN` | — | Shared secret; callers send `X-Runner-Token`. **Required** unless `RUNNER_ENV=development`. |
 | `RUNNER_ENV` | (unset → strict) | `development` allows booting without a token. Leave unset in production. |
 | `RUNNER_NETWORK_ISOLATION` | `auto` | `auto`: empty netns when permitted, else warn + fall back. `require`: fail closed at boot. `off`: disable. |
-| `RUNNER_MAX_PROCESSES` | `256` | Per-uid process cap (fork-bomb containment). |
+| `RUNNER_MAX_CONCURRENT_RUNS` | `8` | Max simultaneous executions; excess requests get `503` + `Retry-After`. `0` disables the limit. |
+| `RUNNER_MAX_PROCESSES` | `256` | **Reserved** for the per-jail sandbox's per-run process cap; not applied process-wide (see Security → Fork bombs). |
 | `RUNNER_PORT` / `PORT` | `8090` | Listen port (`PORT` is the platform-injected fallback). |
 | `RUNNER_DEFAULT_TIMEOUT_MS` / `RUNNER_MAX_TIMEOUT_MS` | `3000` / `10000` | Per-run wall-clock default + hard cap. |
 | `RUNNER_DEFAULT_MEMORY_MB` / `RUNNER_MAX_MEMORY_MB` | `128` / `512` | Per-run memory default + hard cap. |

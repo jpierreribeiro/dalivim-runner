@@ -20,9 +20,10 @@ type Server struct {
 
 // Config carries the transport-level knobs.
 type Config struct {
-	Addr           string
-	Token          string
-	MaxSourceBytes int
+	Addr              string
+	Token             string
+	MaxSourceBytes    int
+	MaxConcurrentRuns int
 }
 
 // New builds the server: POST /run (and the deprecated POST /run/python alias)
@@ -32,9 +33,16 @@ type Config struct {
 func New(svc *executor.Service, cfg Config) *Server {
 	h := &handler{svc: svc, maxSourceBytes: cfg.MaxSourceBytes}
 
+	// gate wraps an execution handler: authenticate first (RequireToken), then
+	// bound concurrency. Ordering matters — only authenticated callers may consume
+	// a run slot, so an unauthenticated flood cannot exhaust capacity.
+	gate := func(next http.Handler) http.Handler {
+		return RequireToken(cfg.Token, LimitConcurrency(cfg.MaxConcurrentRuns, next))
+	}
+
 	mux := http.NewServeMux()
-	mux.Handle("POST /run", RequireToken(cfg.Token, http.HandlerFunc(h.run)))
-	mux.Handle("POST /run/python", RequireToken(cfg.Token, http.HandlerFunc(h.runPythonCompat)))
+	mux.Handle("POST /run", gate(http.HandlerFunc(h.run)))
+	mux.Handle("POST /run/python", gate(http.HandlerFunc(h.runPythonCompat)))
 	mux.HandleFunc("GET /healthz", h.health)
 
 	return &Server{
