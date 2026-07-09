@@ -182,8 +182,17 @@ jobs:
           done
           docker logs runner-seccomp 2>&1 | grep -q "static seccomp ALLOWLIST enforced" \
             || { echo "::error::enforce mode did not engage"; docker logs runner-seccomp 2>&1 || true; exit 1; }
-          RUNNER_URL=http://localhost:8092 ./scripts/smoke-run.sh c $'#include <stdio.h>\nint main(void){ printf("4\\n"); return 0; }' $'4\n'
-          RUNNER_URL=http://localhost:8092 ./scripts/smoke-run.sh cpp $'#include <iostream>\nint main(){ std::cout << 2+2 << "\\n"; }' $'4\n'
+          # On a SIGSYS kill (DEFAULT KILL) the kernel audit logs syscall=NNN to the
+          # host dmesg — dump it so a missing allowlist entry is self-diagnosing.
+          seccomp_run() {
+            RUNNER_URL=http://localhost:8092 ./scripts/smoke-run.sh "$@" || {
+              echo "::error::allowlist rejected a needed syscall — recent seccomp audit lines:";
+              sudo dmesg | grep -iE 'seccomp|type=1326' | tail -20 || true;
+              return 1;
+            }
+          }
+          seccomp_run c $'#include <stdio.h>\nint main(void){ printf("4\\n"); return 0; }' $'4\n'
+          seccomp_run cpp $'#include <iostream>\nint main(){ std::cout << 2+2 << "\\n"; }' $'4\n'
           docker rm -f runner-seccomp
 
       - name: Escape corpus — every submission must be contained, host survives

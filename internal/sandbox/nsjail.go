@@ -45,15 +45,19 @@ USE dalivim DEFAULT ALLOW`
 // namespace/mount/module syscall. Everything not listed is killed with SIGSYS
 // (DEFAULT KILL) — far tighter than the interpreter denylist. The set is a
 // starting point tuned on the target via the complain profile; see the plan §3.4.
+// Note on kafel identifiers: kafel's amd64 table uses the KERNEL entry names, so
+// the stat/uname family carry the `new` prefix — syscall 5 is `newfstat` (not
+// `fstat`) and 63 is `newuname` (not `uname`). Using the glibc-common spelling
+// fails the policy compile (fail-closed), same class as the umount/umount2 catch.
 const staticAllowSyscalls = `read, write, readv, writev, pread64, pwrite64,
-		close, fstat, newfstatat, statx, lseek, ioctl, fcntl,
+		close, newfstat, newfstatat, statx, lseek, ioctl, fcntl,
 		dup, dup2, dup3, poll, ppoll, pselect6, select,
 		brk, mmap, munmap, mprotect, mremap, madvise,
 		rt_sigaction, rt_sigprocmask, rt_sigreturn, sigaltstack,
 		arch_prctl, set_tid_address, set_robust_list, rseq, prlimit64,
 		futex, sched_yield, sched_getaffinity, getcpu,
 		clock_gettime, clock_getres, clock_nanosleep, nanosleep, gettimeofday, time,
-		getpid, gettid, getuid, geteuid, getgid, getegid, getrandom, uname, sysinfo,
+		getpid, gettid, getuid, geteuid, getgid, getegid, getrandom, newuname, sysinfo,
 		exit, exit_group, restart_syscall`
 
 // staticAllowlistPolicy renders the static-binary allowlist kafel policy with the
