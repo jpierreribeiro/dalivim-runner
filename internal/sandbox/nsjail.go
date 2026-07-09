@@ -35,7 +35,13 @@ USE dalivim DEFAULT ALLOW`
 
 // jailMount is the path the per-run WorkDir is bind-mounted to inside the jail;
 // Argv referencing files (main.py) is resolved against it via --cwd.
-const jailMount = "/sandbox"
+//
+// It MUST be a directory that already exists in the (read-only) rootfs: with
+// `--bindmount_ro /` the jail root is the host root mounted read-only, so nsjail
+// cannot mkdir a fresh mountpoint like /sandbox on it ("Permission denied").
+// /mnt is a standard, empty FHS directory present in the base image, so binding
+// over it needs no mkdir.
+const jailMount = "/mnt"
 
 // nsjailArgs builds the full nsjail argument vector (excluding the binary path)
 // for one run. It is pure so the exact containment flags are unit-testable

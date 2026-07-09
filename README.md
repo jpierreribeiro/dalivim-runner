@@ -116,7 +116,7 @@ deploy with `RUNNER_SANDBOX=require` is how you prove it engaged.
   (`errno=11`). On the netns fallback, containment is the bounded concurrency cap
   + CPU/wall limits.
 - **Filesystem:** throwaway temp dir per run; under nsjail it is mounted
-  **read-only** at `/sandbox` with writes confined to a size-capped tmpfs `/tmp`;
+  **read-only** at `/mnt` with writes confined to a size-capped tmpfs `/tmp`;
   `python3 -I`; restricted PATH/env; runs as a non-root uid.
 
 > Linux-only by design: the isolation guarantees depend on Linux namespaces and

@@ -44,18 +44,18 @@ func sampleSpec() Spec {
 func TestNsjailArgs_AppliesEveryLayer(t *testing.T) {
 	args := nsjailArgs(sampleSpec())
 
-	// Read-only rootfs, per-run tmpfs /tmp, source mounted read-only at /sandbox.
+	// Read-only rootfs, per-run tmpfs /tmp, source mounted read-only at /mnt.
 	if argValue(args, "--bindmount_ro") != "/" { // first ro mount is the whole rootfs
 		t.Fatalf("expected a read-only rootfs bind mount, got %q", argValue(args, "--bindmount_ro"))
 	}
 	if argValue(args, "--tmpfsmount") != "/tmp" {
 		t.Fatalf("expected tmpfs /tmp, got %q", argValue(args, "--tmpfsmount"))
 	}
-	if !hasArg(args, "/tmp/dalivim-run-abc:/sandbox") {
-		t.Fatalf("expected the workdir bound read-only to /sandbox, args=%v", args)
+	if !hasArg(args, "/tmp/dalivim-run-abc:/mnt") {
+		t.Fatalf("expected the workdir bound read-only to /mnt, args=%v", args)
 	}
-	if argValue(args, "--cwd") != "/sandbox" {
-		t.Fatalf("expected cwd /sandbox, got %q", argValue(args, "--cwd"))
+	if argValue(args, "--cwd") != "/mnt" {
+		t.Fatalf("expected cwd /mnt, got %q", argValue(args, "--cwd"))
 	}
 
 	// Per-run rlimits derived from the spec.

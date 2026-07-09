@@ -34,7 +34,7 @@ type Spec struct {
 
 	// WorkDir is the throwaway per-run directory holding the source. It is the
 	// child's working directory (netns: cmd.Dir; nsjail: bind-mounted read-only
-	// to /sandbox and set as --cwd).
+	// onto an existing dir in the jail and set as --cwd).
 	WorkDir string
 
 	// TimeoutMs is the wall-clock budget already clamped by the Service. Backends
