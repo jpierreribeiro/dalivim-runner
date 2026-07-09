@@ -212,6 +212,10 @@ Multi-stage: a static Go binary + `nsjail` compiled from source, on
 `python:3.12-slim-bookworm`, running as a non-root user (nsjail runs rootless, so
 no elevated capabilities are required).
 
+> **Full step-by-step deploy runbook:** [docs/DEPLOY.md](docs/DEPLOY.md) —
+> provision → build → run → verify → HTTPS + firewall → wire the backend,
+> validated end-to-end on a root VPS. The section below is the quick version.
+
 ### Production run (VPS / target)
 
 The service **fails closed**: without `RUNNER_SERVICE_TOKEN` (and outside
