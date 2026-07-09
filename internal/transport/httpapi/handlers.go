@@ -69,6 +69,18 @@ func (h *handler) execute(ctx context.Context, w http.ResponseWriter, req runner
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	// A per-run infra failure OF OUR OWN (the sandbox/jail could not be stood up
+	// for this run) surfaces as internal_error from the runtime. Emit it as 503 +
+	// Retry-After rather than a terminal 200 so the Gateway treats it as a provider
+	// failure and can fall back to another backend / retry, per
+	// RUNNER_AUDIT_AND_CONTRACT.md §2.4.1. Student-code outcomes (success,
+	// runtime_error, timeout, memory_exceeded, compile_error) stay 200 — they are
+	// deterministic and a fallback would only repeat them. The body still carries
+	// the RunResult so a Gateway that logs it keeps the detail.
+	if res.Status == runnerapi.StatusInternalError {
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
 	_ = json.NewEncoder(w).Encode(res)
 }
 

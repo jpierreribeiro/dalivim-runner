@@ -110,6 +110,10 @@ deploy with `RUNNER_SANDBOX=require` is how you prove it engaged.
   (`RUNNER_MAX_CONCURRENT_RUNS`); excess requests are shed immediately with `503`
   + `Retry-After` so the caller can fall back instead of the container being
   driven into swap/OOM.
+- **Infra failover:** if the runner cannot stand up the sandbox for a run
+  (`status: internal_error`), it replies `503` + `Retry-After`, not a terminal
+  `200`, so the gateway treats it as a provider failure and can fall back. Student
+  outcomes (`success`/`runtime_error`/`timeout`/`memory_exceeded`) stay `200`.
 - **Fork bombs:** contained **per-run** by the nsjail backend (`--rlimit_nproc`
   against a jail-private uid), never a process-wide `RLIMIT_NPROC` — a global cap
   is enforced per real-uid and would throttle the runner itself on a busy host
