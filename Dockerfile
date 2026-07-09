@@ -78,11 +78,14 @@ ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC
 # compile would pay a ~14 s cold stdlib rebuild (over the compile budget). The Go
 # compile jail seeds its writable /tmp/gocache from this (see goSpec); a warm build
 # is ~0.3 s. World-readable so the jail-private uid can copy it.
+# NOTE: -trimpath below MUST match the real compiles (single-file goSpec.compile
+# and multi-file compiled_multifile.go). It is part of Go's build-cache key, so a
+# mismatch makes this warm cache useless → cold stdlib rebuild → compile timeout.
 RUN set -eux; \
     mkdir -p /opt/gowarm; \
     printf 'package main\nimport (\n_ "bufio"\n_ "bytes"\n_ "container/heap"\n_ "container/list"\n_ "encoding/json"\n_ "errors"\n_ "fmt"\n_ "math"\n_ "math/rand"\n_ "net"\n_ "os"\n_ "regexp"\n_ "sort"\n_ "strconv"\n_ "strings"\n_ "sync"\n_ "time"\n)\nfunc main(){}\n' > /opt/gowarm/warm.go; \
     cd /opt/gowarm; \
-    CGO_ENABLED=0 GOCACHE=/opt/gocache GOPATH=/opt/gopath GOTOOLCHAIN=local GOENV=off go build -o /dev/null warm.go; \
+    CGO_ENABLED=0 GOCACHE=/opt/gocache GOPATH=/opt/gopath GOTOOLCHAIN=local GOENV=off go build -trimpath -o /dev/null warm.go; \
     chmod -R a+rX /opt/gocache; \
     rm -rf /opt/gowarm /opt/gopath
 USER runner
