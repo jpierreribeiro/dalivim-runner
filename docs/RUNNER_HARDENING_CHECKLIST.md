@@ -16,7 +16,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked
 | Audit | 8-layer conformance + residual-risk ranking + API contract | [x] done |
 | **F-A** | Kill global `RLIMIT_NPROC`; add concurrency cap + 503 backpressure | [x] done (verified live) |
 | Refactor | Invert Sandbox: `SysProcAttr()` provider → `Command(Spec)` constructor | [x] done |
-| F-B | `nsjailSandbox`: seccomp, tmpfs-capped `/tmp`, `no_new_privs`, per-jail nproc | [x] code done (target validation pending) |
+| F-B | `nsjailSandbox`: seccomp, tmpfs-capped `/tmp`, `no_new_privs`, per-jail nproc | [x] done (validated in CI: image builds nsjail, `RUNNER_SANDBOX=require` boots `nsjail ENABLED`, escape corpus contained) |
 | F-C / F-D | Compiled-language support (compile phase, `signal`, polyglot runtimes) | [ ] todo |
 | F-E / F-F | cgroups accounting, deterministic `memory_exceeded` classification | [ ] todo |
 
@@ -65,10 +65,47 @@ Fixes **R2** (no seccomp), **R3** (`/tmp` OOM), **R4** (no `no_new_privs`).
 - [x] Dockerfile: nsjail built from source (bookworm stage) into the runtime image.
 - [x] `RUNNER_SANDBOX=auto|require|off` dial with a boot probe (runs `/bin/true`
       in a real jail); `require` fails closed, `auto` falls back to netns. Tested.
-- [~] Netns + execution suites pass against the **nsjail** backend — deferred:
-      nsjail can't run in CI (no binary + no userns). Arg construction + the dial
-      state machine are unit-tested; end-to-end jail execution is validated on the
-      target via the boot log and a `RUNNER_SANDBOX=require` verification deploy.
+- [x] End-to-end jail execution validated by the `runner-smoke` CI job
+      (`.github/workflows/ci.yml`): it builds the shipped image (nsjail compiled
+      from source), boots it under target-like limits with `RUNNER_SANDBOX=require`
+      (fail-closed — a failed probe crashes the container, never a silent netns
+      downgrade), asserts the boot log shows `nsjail ENABLED`, and runs a real
+      `POST /run` plus the §4.4 escape corpus (`scripts/smoke-escape.sh`: fork
+      bomb → contained + host survives; `/etc/shadow`/host-env read → denied;
+      dangerous syscall → killed by seccomp; output flood → truncated, no OOM).
+      Arg construction + the dial state machine remain unit-tested for the paths
+      CI's single kernel cannot exercise.
+    - **CI finding (containment relaxation):** nsjail cannot create its user
+      namespace or mount its rootfs under Docker's *default* seccomp/AppArmor
+      profiles, so the smoke container runs with
+      `--security-opt seccomp=unconfined --security-opt apparmor=unconfined`.
+      This relaxes only the **outer** container around the runner daemon — it
+      adds no capabilities and keeps the non-root `runner` user. The **inner**
+      per-run jail (userns + read-only rootfs + tmpfs `/tmp` + seccomp denylist +
+      `no_new_privs` + per-jail rlimits) is unchanged; the passing escape corpus
+      is the proof. See README → *Why the smoke container relaxes Docker's own
+      sandbox*.
+
+## CI gates — runner-smoke + escape corpus (plan §4.3 / §4.4 / §4.5)
+
+First CI in the repo. `.github/workflows/ci.yml`:
+
+- [x] **`test`** job — `go vet` + `go test -race ./...` (matches what passes locally).
+- [x] **`runner-smoke`** job (§4.3) — build the image (nsjail from source) → boot
+      under target-like limits with `RUNNER_SANDBOX=require` → wait `/healthz`
+      (container-exit detection makes a failed fail-closed probe a loud job
+      failure) → assert `nsjail ENABLED` in the boot log → real `POST /run`
+      `print(2+2)` ⇒ `success` / `"4\n"`.
+- [x] **Escape corpus** (§4.4) — `scripts/smoke-escape.sh`: fork bomb, secret /
+      host-env read, seccomp-killed syscall, output flood. Each asserted
+      contained; a final host-survival run must still succeed.
+- [x] Helper `scripts/smoke-run.sh` — `POST /run`, exact stdout+status assertion,
+      non-zero exit on mismatch (reused by the corpus).
+- [ ] `runner-security` as a *separate* periodic job, image CVE scan
+      (trivy/grype), and the compiler-bomb / stress-concurrency corpus rows —
+      deferred with F-C/F-D (no compiled runtime yet) and F-A stress tooling.
+
+Signed-off: `claude/dalivim-runner-ci-smoke-3sscm8` — 2026-07-09.
 
 ## F-C / F-D — compiled languages (forward-compat, not blocking)
 
@@ -90,8 +127,8 @@ Fixes **R6** (fragile `memory_exceeded` substring heuristic).
 | ID | Risk | Addressed by |
 |---|---|---|
 | R1 | Global `RLIMIT_NPROC` → auto-DoS (`errno=11`, **confirmed**) | F-A ✅ closed |
-| R2 | No seccomp filter | F-B ✅ code done (kafel denylist; target-validate) |
-| R3 | `/tmp` unbounded → host OOM | F-B ✅ code done (tmpfs `/tmp`; target-validate) |
-| R4 | No `no_new_privs` | F-B ✅ code done (nsjail default; target-validate) |
+| R2 | No seccomp filter | F-B ✅ closed (kafel denylist; CI escape corpus kills `unshare` via seccomp) |
+| R3 | `/tmp` unbounded → host OOM | F-B ✅ closed (tmpfs `/tmp`; CI output-flood truncated, no OOM) |
+| R4 | No `no_new_privs` | F-B ✅ closed (nsjail default; CI `RUNNER_SANDBOX=require` boot asserts jail engaged) |
 | R5 | Runner has no backpressure (never emits 503) | F-A ✅ closed |
 | R6 | `memory_exceeded` from fragile stderr substring | F-E/F-F |

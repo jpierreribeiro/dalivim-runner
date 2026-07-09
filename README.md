@@ -150,14 +150,49 @@ curl -s localhost:8090/run \
   -d '{"language":"python","source_code":"print(2+2)"}'
 ```
 
-## Test
+## Test / CI
 
 ```sh
-go test ./...
+go vet ./...
+go test -race ./...
 ```
 
 Execution tests skip cleanly when `python3` is absent; network-namespace tests
 skip when the platform forbids unprivileged namespaces.
+
+CI (`.github/workflows/ci.yml`) has two jobs:
+
+- **`test`** — `go vet` + `go test -race ./...` (the unit suite: arg builder,
+  sandbox dial state machine, transport, executor).
+- **`runner-smoke`** — builds the Docker image (nsjail compiled from source),
+  boots it under **target-like limits** (`--pids-limit`, `--cpus=1`,
+  `--memory=512m`, `GOMAXPROCS=1`) with **`RUNNER_SANDBOX=require`** so a failed
+  nsjail boot probe **crashes the container** instead of downgrading, asserts the
+  boot log shows `nsjail ENABLED`, hits `/healthz`, then does a real
+  `POST /run` for `print(2+2)` and the adversarial **escape corpus**
+  (`scripts/smoke-escape.sh`): fork bomb, secret/host-env read, seccomp-killed
+  syscall, output flood — each must be contained and the runner must survive.
+
+### Why the smoke container relaxes Docker's own sandbox
+
+nsjail builds each per-run jail by creating an unprivileged **user namespace**
+and `mount`-ing a read-only rootfs + tmpfs `/tmp`. Docker's *default* seccomp
+profile blocks the `CLONE_NEWUSER` unshare, and the default AppArmor profile
+denies those mounts — so nsjail cannot start unless the **outer** container is
+run with `--security-opt seccomp=unconfined --security-opt apparmor=unconfined`.
+
+That relaxation applies **only to the runner daemon's container**. It adds **no
+capabilities**, the container still runs as the non-root `runner` user, and it
+does **not** touch the inner per-run jail: every submission still executes inside
+its own user/pid/net/mount namespaces, a read-only rootfs, a size-capped tmpfs
+`/tmp`, the seccomp **denylist**, `no_new_privs`, and per-jail `RLIMIT_NPROC`/
+`FSIZE`. The escape corpus is the proof the inner jail is intact. In production
+(Railway) the runner is the container's only workload, so the same relaxation is
+the correct posture — the meaningful boundary is the per-run jail, not Docker's
+generic profile around a single-purpose daemon.
+
+`scripts/smoke-run.sh` (`POST /run`, exact stdout+status assertion, non-zero on
+mismatch) is the low-level helper both the happy path and the corpus reuse.
 
 ## Container
 
