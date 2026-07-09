@@ -17,10 +17,28 @@
 # Case applicability (encoded in run_universal / the Python-only block):
 #   egress, host-write, secret-read, cpu-spin  — ALL languages (kernel/mount/net
 #       containment is language-agnostic, so we assert it for each runtime).
-#   mem-bomb                                    — python, c, cpp only: these get a
-#       hard RLIMIT_AS, so a bomb is contained DETERMINISTICALLY. go/js/java opt
-#       out of RLIMIT_AS (huge virtual reservation) and are bounded by the cgroup
-#       memory.max instead, which is asserted on the cgroup path, not here.
+#   mem-bomb                                    — ASSERTED FOR EVERY LANGUAGE, but
+#       HOW depends on the memory-bound posture, which this script PROBES from
+#       /readyz (memory_accounting) instead of assuming:
+#         * python/c/cpp get a hard RLIMIT_AS, so a bomb is contained
+#           DETERMINISTICALLY regardless of cgroup — asserted here in EVERY run.
+#         * go/js/java opt OUT of RLIMIT_AS (they reserve a huge virtual cage a
+#           tight RLIMIT_AS refuses) and are bounded by the delegated cgroup
+#           memory.max / -Xmx instead. Their bomb is contained as memory_exceeded
+#           ONLY when a delegated cgroup is engaged (memory_accounting=cgroup-v2).
+#           When it is (deploy/deploy.sh verify on the R6 VPS, and the
+#           runner-smoke-cgroup CI job), this script RUNS their bombs and asserts
+#           memory_exceeded. When it is NOT (cgroup=auto — the default GitHub CI
+#           runner-smoke, Railway, local dev), it does NOT silently skip: it prints
+#           an EXPLICIT skip line naming the reason and where the case IS proven, so
+#           the coverage gap is visible, never hidden.
+#
+#       COVERAGE MATRIX (mem-bomb):
+#         python/c/cpp  RLIMIT_AS           contained everywhere (asserted every run)
+#         go/js/java    cgroup memory.max   memory_exceeded — asserted where cgroup
+#                                           is engaged (VPS deploy verify +
+#                                           runner-smoke-cgroup); explicitly skipped
+#                                           (with a printed reason) where it is not.
 #   fork bomb / env minimality / dangerous syscall — expressed once in Python:
 #       they assert daemon/kernel-level controls (the --rlimit_nproc pids cap, the
 #       minimal explicit env, the seccomp denylist SIGSYS) that are enforced by
@@ -335,8 +353,14 @@ src_spin() {
   esac
 }
 
-# mem-bomb: allocate far past the budget. Only for languages under a hard
-# RLIMIT_AS (python/c/cpp), where containment is deterministic.
+# mem-bomb: allocate far past the budget.
+#
+# python/c/cpp die under the hard RLIMIT_AS (python -> MemoryError/OOM; c/cpp ->
+# malloc returns NULL and the program self-reports a non-zero exit). go/js/java opt
+# out of RLIMIT_AS, so their bombs commit REAL pages the delegated cgroup
+# memory.max (or the JVM -Xmx heap) must stop — they OOM only where a cgroup is
+# engaged. Every bomb allocates SILENTLY (no per-iteration print): a print loop
+# would trip the output cap first and mask the memory outcome we are asserting.
 src_membomb() {
   case "$1" in
     python) printf 'b = b"x" * (10 ** 10)\nprint(len(b))\n' ;;
@@ -352,6 +376,50 @@ int main(void) {
   }
 }
 C
+    ;;
+    # Go: keep growing a slice of touched 64 MiB buffers. No RLIMIT_AS bounds Go,
+    # so RSS climbs until the run's cgroup memory.max OOM-kills it (memory_exceeded).
+    go) cat <<'GO'
+package main
+
+func main() {
+	var keep [][]byte
+	for {
+		b := make([]byte, 64*1024*1024)
+		for i := 0; i < len(b); i += 4096 {
+			b[i] = 1 // commit the pages so RSS actually grows
+		}
+		keep = append(keep, b)
+	}
+}
+GO
+    ;;
+    # Node: OFF-HEAP Buffers, which --max-old-space-size does NOT bound — so RLIMIT_AS
+    # and the V8 heap flag both miss them, and only the cgroup memory.max stops the
+    # climb. Exactly the bound this case exists to prove.
+    javascript) cat <<'JS'
+const keep = [];
+for (;;) {
+  keep.push(Buffer.alloc(64 * 1024 * 1024, 1));
+}
+JS
+    ;;
+    # Java: retain 64 MiB byte[] chunks past the -Xmx heap. The allocation exceeds
+    # the heap (OutOfMemoryError, classified via the memErrSubstr fallback) and/or
+    # the cgroup memory.max (OOM-kill) — either way memory_exceeded.
+    java) cat <<'JAVA'
+import java.util.ArrayList;
+import java.util.List;
+
+public class Main {
+    public static void main(String[] a) {
+        List<byte[]> keep = new ArrayList<>();
+        for (;;) {
+            keep.add(new byte[64 * 1024 * 1024]);
+        }
+    }
+}
+JAVA
     ;;
     *) echo "UNSUPPORTED_LANG:$1" >&2; return 1 ;;
   esac
@@ -386,7 +454,9 @@ run_universal() {
   jqtrue "$resp" '.status == "timeout"'               || fail "spin/$lang" "CPU spin was not stopped by the timeout" "$resp"
 }
 
-# mem-bomb, only where RLIMIT_AS makes containment deterministic.
+# mem-bomb for the RLIMIT_AS languages (python/c/cpp): a bomb is contained
+# DETERMINISTICALLY here (the hard address-space cap refuses the mapping), so we
+# only assert it did NOT report success and the runner stayed up.
 run_membomb() {
   local lang="$1" resp
   echo "-- [$lang] memory bomb contained (hard RLIMIT_AS)"
@@ -395,15 +465,70 @@ run_membomb() {
   jqtrue "$resp" '.status != "success"'               || fail "membomb/$lang" "a huge allocation reported success — not contained" "$resp"
 }
 
+# mem-bomb for the RLIMIT_AS-incompatible languages (go/js/java): these are bounded
+# by the delegated cgroup memory.max (and Java's -Xmx), so a bomb is contained as
+# memory_exceeded — the AUTHORITATIVE kernel-OOM classification — but ONLY when a
+# cgroup is engaged. Asserts the exact status, not merely "not success", because
+# that is the guarantee this case exists to prove. Never called unless
+# memory_accounting is cgroup-v2.
+run_membomb_cgroup() {
+  local lang="$1" resp
+  echo "-- [$lang] memory bomb => memory_exceeded (cgroup memory.max authoritative)"
+  resp="$(post "$lang" "$(src_membomb "$lang")" || true)"
+  [ -n "$resp" ] || fail "membomb/$lang" "runner did not respond — possible host OOM" "$resp"
+  jqtrue "$resp" '.status == "memory_exceeded"'       || fail "membomb/$lang" "cgroup did not classify the bomb as memory_exceeded (status=$(echo "$resp" | jq -r '.status // "<none>"'))" "$resp"
+}
+
+# cgroup_engaged probes /readyz (unauthenticated) for the runtime memory-bound
+# posture. True iff a delegated cgroup v2 subtree is giving each run an
+# authoritative memory.max — the only condition under which the go/js/java bombs
+# are contained as memory_exceeded. This is the honest, runtime-observed gate: the
+# corpus asserts the strong case exactly when the mechanism it depends on is live,
+# and says so explicitly when it is not.
+cgroup_engaged() {
+  local ready
+  ready="$(curl -fsS "${BASE}/readyz" 2>/dev/null || true)"
+  echo "$ready" | jq -e '(.memory_accounting // "") | test("^cgroup")' >/dev/null 2>&1
+}
+
 echo "== escape corpus (languages: ${LANGS[*]}) =="
 for lang in "${LANGS[@]}"; do
   run_universal "$lang"
 done
+
+# Resolve the posture ONCE (a single /readyz probe) and drive every decision from it.
+if cgroup_engaged; then
+  CG_ENGAGED=1; CG_MODE="engaged (cgroup memory.max authoritative)"
+else
+  CG_ENGAGED=0; CG_MODE="rlimit-only (no delegated cgroup)"
+fi
+echo "== memory bombs — memory_accounting: $CG_MODE =="
+
+deferred=()
 for lang in "${LANGS[@]}"; do
   case " $lang " in
+    # RLIMIT_AS languages: contained deterministically, every run.
     " python "|" c "|" cpp ") run_membomb "$lang" ;;
+    # RLIMIT_AS-incompatible languages: memory_exceeded ONLY under a live cgroup.
+    " go "|" javascript "|" java ")
+      if [ "$CG_ENGAGED" = 1 ]; then
+        run_membomb_cgroup "$lang"
+      else
+        echo "-- [$lang] memory bomb — SKIPPED here (memory_accounting=rlimit-only)"
+        echo "     $lang opts out of RLIMIT_AS (capAddressSpace:false), so its bomb is bounded"
+        echo "     by the delegated cgroup memory.max / -Xmx — NOT engaged in this environment."
+        echo "     PROVEN ON-TARGET where the cgroup is live: 'deploy/deploy.sh verify' on the"
+        echo "     R6 VPS and the runner-smoke-cgroup CI job. (See this script's header matrix.)"
+        deferred+=("$lang")
+      fi
+      ;;
   esac
 done
+if [ "${#deferred[@]}" -gt 0 ]; then
+  echo "== NOTE: memory-bomb containment for [${deferred[*]}] is NOT asserted in THIS run"
+  echo "         (rlimit-only posture). It is asserted where a delegated cgroup is engaged —"
+  echo "         deploy/deploy.sh verify (R6 VPS) and the runner-smoke-cgroup CI job. No silent gap."
+fi
 
 # ---------------------------------------------------------------------------
 # Kernel/daemon-level controls, expressed once (Python). These assert the SAME

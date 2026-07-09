@@ -545,6 +545,171 @@ jobs:
         if: always()
         run: docker rm -f runner runner-bp runner-seccomp || true
 
+  # ---------------------------------------------------------------------------
+  # Memory-containment proof for the RLIMIT_AS-incompatible runtimes (Go, JS,
+  # Java). These opt OUT of RLIMIT_AS (capAddressSpace:false) — they reserve a
+  # huge virtual cage a tight RLIMIT_AS refuses — so their memory bound is the
+  # delegated cgroup v2 memory.max, NOT rlimits. The default runner-smoke job runs
+  # cgroup=auto (rlimit-only, no delegated cgroup), so a Go/JS/Java memory bomb
+  # there is NOT contained as memory_exceeded — which is exactly why the escape
+  # corpus skips them in that context. This job closes that gap IN CI by engaging a
+  # REAL delegated cgroup with the SAME mechanism the prod R6 VPS uses
+  # (RUNNER_CGROUP=require + --cgroup-parent, cgroupfs driver — see docs/DEPLOY.md
+  # §8b), so memory.max is authoritative and the bombs are contained + classified
+  # from the kernel OOM event.
+  #
+  # It is FAIL-CLOSED end to end: RUNNER_CGROUP=require means the container refuses
+  # to boot if the delegated cgroup did not truly engage, and the boot-log +
+  # /readyz assertions below reject a silent downgrade — so this job can never
+  # report a false green. If a future GitHub-hosted-runner change makes cgroup
+  # delegation impossible here, this job reds LOUDLY (an honest infra signal), and
+  # the guarantee still holds on-target via `deploy/deploy.sh verify` on the VPS.
+  runner-smoke-cgroup:
+    name: cgroup mem-containment (go/js/java)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build runner image (compiles nsjail from source)
+        run: docker build -t runner:smoke .
+
+      # Same Ubuntu 24.04 userns-mount relaxation the default smoke job needs (host
+      # sysctl, not container-scoped) so nsjail can build its per-run jails.
+      - name: Allow unprivileged-userns mounts on the runner host (Ubuntu 24.04)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      # --cgroup-parent=/dalivim (a raw cgroup path) needs Docker's cgroupfs driver;
+      # the GitHub-hosted runner defaults to the systemd driver. Switch it on this
+      # single-purpose runner VM exactly as docs/DEPLOY.md §8b documents for a
+      # cgroupfs-driver box, then restart docker. (Isolated to THIS job's VM.)
+      - name: Use the cgroupfs cgroup driver (needed for --cgroup-parent=/dalivim)
+        run: |
+          echo '{ "exec-opts": ["native.cgroupdriver=cgroupfs"] }' | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+          driver="$(docker info --format '{{.CgroupDriver}}')"
+          version="$(docker info --format '{{.CgroupVersion}}')"
+          echo "docker cgroup driver=$driver version=$version"
+          [ "$driver" = cgroupfs ] || { echo "::error::docker cgroup driver is $driver, not cgroupfs"; exit 1; }
+          [ "$version" = 2 ] || { echo "::error::host is cgroup v$version, not v2 — cannot delegate a v2 subtree"; exit 1; }
+
+      # Delegate a writable cgroup v2 subtree to the runner's in-container uid, with
+      # +memory +pids in its subtree_control, so the runner can give each run a leaf
+      # cgroup with an authoritative memory.max. The uid is read from the image (not
+      # hardcoded) so a base-image user change can't silently mis-chown the subtree.
+      - name: Delegate a cgroup v2 subtree to the runner uid
+        run: |
+          # Ensure the controllers are available to enable in the child subtree
+          # (best-effort at root; on a cgroupfs host they are usually already there).
+          echo "+memory +pids" | sudo tee /sys/fs/cgroup/cgroup.subtree_control >/dev/null 2>&1 || true
+          sudo mkdir -p /sys/fs/cgroup/dalivim
+          echo "+memory +pids" | sudo tee /sys/fs/cgroup/dalivim/cgroup.subtree_control
+          RUID="$(docker run --rm --entrypoint id runner:smoke -u)"
+          echo "runner in-container uid=$RUID"
+          sudo chown -R "$RUID:$RUID" /sys/fs/cgroup/dalivim
+          # Pre-flight: the delegation must actually carry memory+pids, else the boot
+          # below would fail-close for a reason that is easy to misread. Assert it
+          # here so a delegation failure is self-diagnosing (infra), distinct from a
+          # containment failure (the bombs).
+          sc="$(cat /sys/fs/cgroup/dalivim/cgroup.subtree_control)"
+          echo "dalivim subtree_control: [$sc]"
+          echo "$sc" | grep -qw memory || { echo "::error::memory controller not delegated to /sys/fs/cgroup/dalivim"; exit 1; }
+          echo "$sc" | grep -qw pids   || { echo "::error::pids controller not delegated to /sys/fs/cgroup/dalivim"; exit 1; }
+
+      # Boot the shipped image INSIDE the delegated subtree (--cgroup-parent=/dalivim
+      # puts the container's own cgroup under it, so CLONE_INTO_CGROUP shares a
+      # writable ancestor with the per-run leaves) with RUNNER_CGROUP=require so a
+      # cgroup that did not truly engage fails the boot closed instead of downgrading.
+      - name: Boot with a delegated cgroup engaged (RUNNER_CGROUP=require)
+        run: |
+          docker run -d --name runner-cg \
+            --cgroup-parent=/dalivim \
+            --cgroupns=host \
+            -v /sys/fs/cgroup/dalivim:/sys/fs/cgroup/dalivim \
+            --pids-limit=512 \
+            --cpus=1 --memory=1g \
+            --security-opt seccomp=unconfined \
+            --security-opt apparmor=unconfined \
+            -e RUNNER_ENV=development \
+            -e RUNNER_SANDBOX=require \
+            -e RUNNER_CGROUP=require \
+            -e RUNNER_CGROUP_MOUNT=/sys/fs/cgroup/dalivim \
+            -e GOMAXPROCS=1 \
+            -p 8090:8090 \
+            runner:smoke
+
+      - name: Wait for /healthz (fail-closed boot proves nsjail + cgroup engaged)
+        run: |
+          for i in $(seq 1 40); do
+            if curl -fs localhost:8090/healthz >/dev/null; then
+              echo "healthz up after $((i))/40 tries"; exit 0
+            fi
+            if ! docker ps --filter name=runner-cg --filter status=running -q | grep -q .; then
+              echo "::error::runner-cg exited during boot — RUNNER_CGROUP=require could not engage the delegated cgroup"
+              docker logs runner-cg 2>&1 || true
+              exit 1
+            fi
+            sleep 0.5
+          done
+          echo "::error::/healthz never came up"; docker logs runner-cg 2>&1 || true; exit 1
+
+      # The boot log is the source of truth that BOTH the jail AND the per-run cgroup
+      # engaged. Without the cgroup line, memory.max is not authoritative and the
+      # go/js/java bombs below would not be contained — assert it explicitly.
+      - name: Assert boot log shows nsjail ENABLED + cgroup memory accounting ENABLED
+        run: |
+          docker logs runner-cg 2>&1 | tee /tmp/boot-cg.log
+          grep -q "nsjail ENABLED" /tmp/boot-cg.log \
+            || { echo "::error::boot log missing 'nsjail ENABLED'"; exit 1; }
+          grep -q "cgroup memory accounting ENABLED" /tmp/boot-cg.log \
+            || { echo "::error::boot log missing 'cgroup memory accounting ENABLED' — delegation did not take"; exit 1; }
+
+      # /readyz must report the cgroup-v2 posture — this is exactly what the escape
+      # corpus probes to decide it can assert the go/js/java memory bombs here.
+      - name: Assert /readyz reports cgroup-v2 memory accounting
+        run: |
+          curl -s localhost:8090/readyz | tee /tmp/ready-cg.json; echo
+          jq -e '.ready == true and .backend == "nsjail" and (.memory_accounting | test("^cgroup-v2"))' /tmp/ready-cg.json >/dev/null \
+            || { echo "::error::/readyz did not report cgroup-v2 memory accounting"; exit 1; }
+
+      # Explicit, per-language proof (clear failure point): each RLIMIT_AS-incompatible
+      # runtime's memory bomb allocates real pages the per-run cgroup memory.max must
+      # stop, and MUST be classified memory_exceeded from the kernel OOM event — the
+      # exact guarantee cgroup=auto CI cannot make. The container stays up (host
+      # survives): the per-run leaf OOMs, not the 1g container.
+      - name: Go/JS/Java memory bombs => memory_exceeded (cgroup memory.max)
+        run: |
+          bomb() { # <lang> <source>
+            local lang="$1" src="$2" resp
+            resp="$(jq -nc --arg l "$lang" --arg s "$src" '{language:$l,source_code:$s,timeout_ms:8000}' \
+              | curl -fsS localhost:8090/run -H 'content-type: application/json' -d @-)"
+            echo "$resp" | jq '{lang:"'"$lang"'", status, duration_ms, peak_mem:.memory_kb}'
+            echo "$resp" | jq -e '.status=="memory_exceeded"' >/dev/null \
+              || { echo "::error::$lang memory bomb was not contained as memory_exceeded"; exit 1; }
+          }
+          bomb go         'package main
+          func main(){ var k [][]byte; for { b:=make([]byte,64*1024*1024); for i:=0;i<len(b);i+=4096 { b[i]=1 }; k=append(k,b) } }'
+          bomb javascript 'const k=[];for(;;){k.push(Buffer.alloc(64*1024*1024,1));}'
+          bomb java       'import java.util.*;
+          public class Main { public static void main(String[] a){ List<byte[]> k=new ArrayList<>(); for(;;){ k.add(new byte[64*1024*1024]); } } }'
+          echo "SMOKE OK   [R6] go/js/java memory bombs contained as memory_exceeded on the delegated cgroup"
+
+      # And the full escape corpus, which — seeing memory_accounting=cgroup-v2 on
+      # /readyz — now RUNS the go/js/java memory-bomb cases (not the explicit-skip
+      # branch) and asserts them alongside every other containment guarantee. The
+      # host-survival gate at its end proves the daemon outlived the whole corpus.
+      - name: Escape corpus (cgroup engaged — go/js/java bombs asserted here)
+        run: ./scripts/smoke-escape.sh
+
+      - name: Runner logs (always)
+        if: always()
+        run: docker logs runner-cg 2>&1 || true
+
+      - name: Teardown
+        if: always()
+        run: |
+          docker rm -f runner-cg || true
+          sudo rmdir /sys/fs/cgroup/dalivim 2>/dev/null || true
+
   # §4.5(c) — image CVE scan. A separate job (not a step in runner-smoke) so a
   # CVE finding gives a clean, independent signal instead of muddying the
   # functional/containment smoke result, and so it can run on its own cadence via

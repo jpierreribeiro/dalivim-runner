@@ -27,6 +27,7 @@ type handler struct {
 	// readiness posture (G4.3), resolved once at boot.
 	backend             string // active sandbox backend ("nsjail"/"netns"/"none")
 	networkIsolated     bool
+	memoryAccounting    string // "cgroup-v2:<parent>" or "rlimit-only"
 	readyRequiresNsjail bool
 }
 
@@ -285,6 +286,14 @@ func (h *handler) ready(w http.ResponseWriter, _ *http.Request) {
 		"ready":            ok,
 		"backend":          h.backend,
 		"network_isolated": h.networkIsolated,
+		// The per-run memory-bound posture: "cgroup-v2:<parent>" means each run has
+		// an authoritative memory.max (so the RLIMIT_AS-incompatible runtimes —
+		// Go/JS/Java — are contained on a memory bomb and classified memory_exceeded
+		// from the kernel OOM event); "rlimit-only" means memory is bounded by
+		// RLIMIT_AS / the interpreter heap flag alone. The escape corpus reads this to
+		// decide whether to assert the Go/JS/Java memory-bomb cases here or defer them
+		// to the on-target (cgroup-engaged) proof.
+		"memory_accounting": h.memoryAccounting,
 	})
 }
 

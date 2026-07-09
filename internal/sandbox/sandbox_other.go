@@ -25,6 +25,9 @@ func Configure(_, _, _, _ string) (Sandbox, error) {
 func (s *stubSandbox) NetworkIsolated() bool { return false }
 func (s *stubSandbox) Backend() string       { return "none" }
 
+// MemoryAccounting: the stub provides no containment; there is no cgroup here.
+func (s *stubSandbox) MemoryAccounting() string { return "rlimit-only" }
+
 // Command runs the argv directly with no containment (no shell wrapper: ulimit
 // semantics are Linux-specific). It still honours the context deadline. There is
 // no cgroup accounting off Linux, so RunAccounting is always nil.

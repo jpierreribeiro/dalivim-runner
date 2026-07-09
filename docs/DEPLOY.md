@@ -141,6 +141,18 @@ with the `memory`+`pids` controllers (Railway can't delegate these, a root VPS
 can). It is **fail-safe**: without it the runner uses the rlimit/heap bound
 exactly as before.
 
+> **This is where Go/JS/Java memory containment is proven.** Those three opt out of
+> `RLIMIT_AS` (`capAddressSpace:false`), so a memory bomb is contained as
+> `memory_exceeded` **only** when this delegated cgroup is engaged — the runtime
+> posture is reported on `/readyz` as `memory_accounting`. GitHub CI's default
+> `runner-smoke` job runs `cgroup=auto` (rlimit-only) and therefore **cannot** prove
+> it; the escape corpus prints an explicit skip there. It is proven **on this VPS**
+> by `deploy/deploy.sh verify` (which asserts `memory_exceeded` for `python` **and**
+> `go`/`js`/`java` against the live cgroup), and in CI by the dedicated
+> `runner-smoke-cgroup` job, which stands up the very delegation described below.
+> `deploy.sh verify` fails closed if `/readyz` is not `cgroup-v2`, so a rlimit-only
+> deploy cannot pass off the weaker guarantee as R6.
+
 **Ship prod now with `RUNNER_CGROUP=auto`** (or leave it unset — `auto` is the
 default). If no delegated cgroup is present it silently falls back to rlimits, and
 your `--memory=1g` on the container is already a coarse OOM ceiling. Turning on the

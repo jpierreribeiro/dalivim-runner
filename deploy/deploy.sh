@@ -123,27 +123,66 @@ cmd_verify() {
   need docker
   # Hit 127.0.0.1:8090 from INSIDE the container: the docker bridge is firewalled on
   # many VPSes, so a host-side published-port curl returns empty (looks broken, isn't).
+  #
+  # This is the ON-TARGET proof of the memory containment GitHub CI cannot assert:
+  # the R6 VPS runs with a delegated cgroup (RUNNER_CGROUP=require + --cgroup-parent),
+  # so memory.max is authoritative and the RLIMIT_AS-incompatible runtimes (Go, JS,
+  # Java) are contained as memory_exceeded — a guarantee the cgroup=auto CI runner
+  # cannot make. It first confirms the cgroup posture from /readyz, then bombs each
+  # of the three and requires memory_exceeded, so a silent downgrade to rlimit-only
+  # fails the acceptance loudly instead of passing a weaker guarantee.
   docker exec -i "$CONTAINER" python3 - <<'PY'
 import os, sys, json, urllib.request
 tok = os.environ.get("RUNNER_SERVICE_TOKEN", "")
 hdr = {"content-type": "application/json"}
 if tok: hdr["X-Runner-Token"] = tok
-def call(tag, src, want):
+
+def call(tag, lang, src, want, timeout_ms=None):
+    payload = {"language": lang, "source_code": src}
+    if timeout_ms:
+        payload["timeout_ms"] = timeout_ms
     req = urllib.request.Request("http://127.0.0.1:8090/run",
-        data=json.dumps({"language": "python", "source_code": src}).encode(), headers=hdr)
-    body = urllib.request.urlopen(req, timeout=20).read().decode()
+        data=json.dumps(payload).encode(), headers=hdr)
+    body = urllib.request.urlopen(req, timeout=30).read().decode()
     good = ('"status":"%s"' % want) in body
-    print(("  ok  " if good else "  FAIL") + f" {tag}: want {want} -> {body[:80]}")
+    print(("  ok  " if good else "  FAIL") + f" {tag}: want {want} -> {body[:90]}")
     return good
+
 print("health:", urllib.request.urlopen("http://127.0.0.1:8090/healthz").read().decode())
+
+# The R6 payoff is the cgroup posture: confirm memory_accounting is cgroup-v2 before
+# asserting the Go/JS/Java bombs, so a FAIL there is unambiguous (posture, not bomb).
+ready = json.loads(urllib.request.urlopen("http://127.0.0.1:8090/readyz").read().decode())
+mem_acct = ready.get("memory_accounting", "")
+cgroup_on = mem_acct.startswith("cgroup")
+print(f"readyz: backend={ready.get('backend')} memory_accounting={mem_acct}")
+if not cgroup_on:
+    print("  FAIL cgroup posture: memory_accounting is not cgroup-v2 — this deploy is")
+    print("       rlimit-only, so Go/JS/Java memory bombs are NOT contained as")
+    print("       memory_exceeded. Enable the delegated cgroup (RUNNER_CGROUP=require +")
+    print("       --cgroup-parent — see docs/DEPLOY.md §8b) before trusting the R6 guarantee.")
+    sys.exit(1)
+
+# Memory bombs for the RLIMIT_AS-incompatible runtimes — allocate real pages the
+# cgroup memory.max must stop, silently (a print loop would trip the output cap and
+# mask the memory outcome). Each MUST come back memory_exceeded on the live cgroup.
+GO_BOMB   = "package main\nfunc main(){ var k [][]byte; for { b:=make([]byte,64*1024*1024); for i:=0;i<len(b);i+=4096 { b[i]=1 }; k=append(k,b) } }\n"
+JS_BOMB   = "const k=[];for(;;){k.push(Buffer.alloc(64*1024*1024,1));}\n"
+JAVA_BOMB = ("import java.util.*;\npublic class Main { public static void main(String[] a){ "
+            "List<byte[]> k=new ArrayList<>(); for(;;){ k.add(new byte[64*1024*1024]); } } }\n")
+
 results = [
-    call("execute",   "print(2+2)", "success"),
-    call("egress",    "import socket;socket.setdefaulttimeout(3);socket.create_connection(('1.1.1.1',80))", "runtime_error"),
-    call("mem-bomb",  "b=bytearray(10**10)", "memory_exceeded"),
+    call("execute",       "python",     "print(2+2)", "success"),
+    call("egress",        "python",     "import socket;socket.setdefaulttimeout(3);socket.create_connection(('1.1.1.1',80))", "runtime_error"),
+    call("mem-bomb py",   "python",     "b=bytearray(10**10)", "memory_exceeded"),
+    # R6 on-target: the cases GitHub CI (cgroup=auto) cannot prove.
+    call("mem-bomb go",   "go",         GO_BOMB,   "memory_exceeded", timeout_ms=8000),
+    call("mem-bomb js",   "javascript", JS_BOMB,   "memory_exceeded", timeout_ms=8000),
+    call("mem-bomb java", "java",       JAVA_BOMB, "memory_exceeded", timeout_ms=8000),
 ]
 sys.exit(0 if all(results) else 1)
 PY
-  ok "acceptance passed (execute + egress-contained + memory_exceeded)"
+  ok "acceptance passed (execute + egress-contained + memory_exceeded for python/go/js/java on the live cgroup)"
 }
 
 case "${1:-}" in

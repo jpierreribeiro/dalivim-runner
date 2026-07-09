@@ -251,12 +251,19 @@ func TestReadyz_ReflectsPosture(t *testing.T) {
 		t.Fatalf("readyz body should report posture, got %v", body)
 	}
 
-	// nsjail active => ready (200).
-	ok := New(svc, Config{Backend: "nsjail", ReadyRequiresNsjail: true}).Handler()
+	// nsjail active => ready (200), and the memory-accounting posture is reported so
+	// the escape corpus can tell whether the RLIMIT_AS-incompatible runtimes are
+	// contained on a memory bomb here (cgroup engaged) or only on-target.
+	ok := New(svc, Config{Backend: "nsjail", MemoryAccounting: "cgroup-v2:/sys/fs/cgroup/dalivim", ReadyRequiresNsjail: true}).Handler()
 	rr = httptest.NewRecorder()
 	ok.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if rr.Code != http.StatusOK {
 		t.Fatalf("nsjail posture must be 200, got %d", rr.Code)
+	}
+	body = nil
+	_ = json.NewDecoder(rr.Body).Decode(&body)
+	if body["memory_accounting"] != "cgroup-v2:/sys/fs/cgroup/dalivim" {
+		t.Fatalf("readyz must report the memory_accounting posture, got %v", body["memory_accounting"])
 	}
 
 	// Requirement relaxed => ready even on netns.

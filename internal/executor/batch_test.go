@@ -252,8 +252,9 @@ func (s *countingSandbox) Command(ctx context.Context, spec sandbox.Spec) (*exec
 	s.runs++
 	return exec.CommandContext(ctx, "/bin/cat"), nil
 }
-func (s *countingSandbox) NetworkIsolated() bool { return false }
-func (s *countingSandbox) Backend() string       { return "fake" }
+func (s *countingSandbox) NetworkIsolated() bool    { return false }
+func (s *countingSandbox) Backend() string          { return "fake" }
+func (s *countingSandbox) MemoryAccounting() string { return "rlimit-only" }
 
 func countingBatchService(sb *countingSandbox) *Service {
 	return NewService(

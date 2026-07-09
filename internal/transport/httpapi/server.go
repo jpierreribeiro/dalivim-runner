@@ -52,8 +52,12 @@ type Config struct {
 	ShutdownGrace time.Duration
 
 	// Readiness posture (G4.3), resolved from the sandbox at boot.
-	Backend             string // "nsjail" / "netns" / "none"
-	NetworkIsolated     bool
+	Backend         string // "nsjail" / "netns" / "none"
+	NetworkIsolated bool
+	// MemoryAccounting is the per-run memory-bound posture ("cgroup-v2:<parent>" or
+	// "rlimit-only"), reported on /readyz so a caller (the escape corpus) can tell
+	// whether the RLIMIT_AS-incompatible runtimes are contained on a memory bomb here.
+	MemoryAccounting    string
 	ReadyRequiresNsjail bool // /readyz returns 503 unless nsjail is the active backend
 }
 
@@ -78,6 +82,7 @@ func New(svc *executor.Service, cfg Config) *Server {
 		maxBatchStdinBytes:  cfg.MaxBatchStdinBytes,
 		backend:             cfg.Backend,
 		networkIsolated:     cfg.NetworkIsolated,
+		memoryAccounting:    cfg.MemoryAccounting,
 		readyRequiresNsjail: cfg.ReadyRequiresNsjail,
 	}
 
