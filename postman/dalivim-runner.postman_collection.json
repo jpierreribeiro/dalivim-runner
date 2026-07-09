@@ -1,0 +1,173 @@
+{
+  "info": {
+    "_postman_id": "da11d120-0000-4000-8000-da11d1000run",
+    "name": "Dalivim Runner",
+    "description": "Direct tests for the dalivim-runner service (nsjail sandbox). Set `runnerUrl` and `runnerToken` in the environment, then run this folder top to bottom — each request asserts its expected outcome, so a green run is the acceptance. The token is sent as X-Runner-Token at the collection level; only 'Auth — wrong token' overrides it on purpose.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      { "key": "key", "value": "X-Runner-Token", "type": "string" },
+      { "key": "value", "value": "{{runnerToken}}", "type": "string" },
+      { "key": "in", "value": "header", "type": "string" }
+    ]
+  },
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "auth": { "type": "noauth" },
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{runnerUrl}}/healthz", "host": ["{{runnerUrl}}"], "path": ["healthz"] }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200', () => pm.response.to.have.status(200));",
+              "pm.test('body is ok', () => pm.expect(pm.response.text().trim()).to.eql('ok'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Run — 2+2",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"language\": \"python\",\n  \"source_code\": \"print(2+2)\"\n}"
+        },
+        "url": { "raw": "{{runnerUrl}}/run", "host": ["{{runnerUrl}}"], "path": ["run"] }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200', () => pm.response.to.have.status(200));",
+              "const j = pm.response.json();",
+              "pm.test('status success', () => pm.expect(j.status).to.eql('success'));",
+              "pm.test('stdout is 4', () => pm.expect(j.stdout).to.eql('4\\n'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Run — stdin echo",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"language\": \"python\",\n  \"source_code\": \"import sys; print(sys.stdin.read().strip().upper())\",\n  \"stdin\": \"dalivim\"\n}"
+        },
+        "url": { "raw": "{{runnerUrl}}/run", "host": ["{{runnerUrl}}"], "path": ["run"] }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200', () => pm.response.to.have.status(200));",
+              "const j = pm.response.json();",
+              "pm.test('status success', () => pm.expect(j.status).to.eql('success'));",
+              "pm.test('echoes stdin', () => pm.expect(j.stdout).to.eql('DALIVIM\\n'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Run — egress blocked ★",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"language\": \"python\",\n  \"source_code\": \"import socket; socket.setdefaulttimeout(3); socket.create_connection((\\\"1.1.1.1\\\", 80)); print(\\\"VAZOU\\\")\"\n}"
+        },
+        "url": { "raw": "{{runnerUrl}}/run", "host": ["{{runnerUrl}}"], "path": ["run"] }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200', () => pm.response.to.have.status(200));",
+              "const j = pm.response.json();",
+              "pm.test('NOT success (containment held)', () => pm.expect(j.status).to.not.eql('success'));",
+              "pm.test('did not leak', () => pm.expect(j.stdout || '').to.not.include('VAZOU'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Run — timeout",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"language\": \"python\",\n  \"source_code\": \"while True: pass\"\n}"
+        },
+        "url": { "raw": "{{runnerUrl}}/run", "host": ["{{runnerUrl}}"], "path": ["run"] }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200', () => pm.response.to.have.status(200));",
+              "const j = pm.response.json();",
+              "pm.test('status timeout', () => pm.expect(j.status).to.eql('timeout'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Auth — wrong token",
+      "request": {
+        "auth": {
+          "type": "apikey",
+          "apikey": [
+            { "key": "key", "value": "X-Runner-Token", "type": "string" },
+            { "key": "value", "value": "definitely-not-the-token", "type": "string" },
+            { "key": "in", "value": "header", "type": "string" }
+          ]
+        },
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"language\": \"python\",\n  \"source_code\": \"print(1)\"\n}"
+        },
+        "url": { "raw": "{{runnerUrl}}/run", "host": ["{{runnerUrl}}"], "path": ["run"] }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('401 unauthorized', () => pm.response.to.have.status(401));"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
