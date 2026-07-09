@@ -48,6 +48,13 @@ file at the language's default entry name (`main.c`, `Main.java`, …). With
 Write every file under the jail workdir (`/sandbox`), creating parent dirs. This
 is the **security-critical** step — see below.
 
+Both runtime kinds need it: `interpreted.go` and `compiled.go` each write a
+*single* file today. Factor **one shared `materialize(workDir, files)` helper** in
+the executor package that both call — don't duplicate the write+validation logic.
+Split the checks by layer: the **shape validation** (path charset, `..`, count/size
+caps → `400`) lives in the handler *before* touching disk; the **`filepath.Clean`
+prefix re-check** lives inside the shared writer as the last line of defence.
+
 ### Compile flow per language
 - **C/C++**: compile *all* `.c`/`.cpp` translation units together:
   `gcc -O2 -static -o {out} {all .c files} {link}`. Headers (`.h`) are just
@@ -83,6 +90,14 @@ Enforce, in the handler before touching disk:
   by the runner process *before* the jail execs, so the traversal check is the
   only thing standing between a malicious `path` and the host FS. Treat it as the
   highest-severity validation in the codebase.
+- **Go is a shell-injection surface, uniquely.** The other compiled langs `exec`
+  the compiler directly (argv, no shell), but the Go compile is a
+  `/bin/sh -c "..."` prelude (it seeds the pre-warmed `GOCACHE`;
+  `compileArgv0Absolute: true`). Expanding `{srcs}` into that shell string injects
+  caller-derived paths into a shell command. The charset allowlist
+  (`[A-Za-z0-9._/-]`) already blocks shell metacharacters, but **shell-quote each
+  path anyway** as defence in depth — this is the subtlest interaction in the
+  phase, and the one spot where the traversal charset and the compile builder meet.
 
 ## Contract / config impact
 - New `files[]`, `entrypoint` fields (additive; `source_code` still works).
@@ -102,11 +117,42 @@ Enforce, in the handler before touching disk:
   class, a Go package with two files, a Python program importing a sibling module
   — all `success`.
 - Regression: every single-file test still passes unchanged.
+- **`smoke-run.sh` can't send `files[]`** — it takes a single `source_code`
+  (+ `SMOKE_STDIN`, added in G1). Add a `files[]`-capable helper for the on-target
+  multi-file CI steps: extend it with a `SMOKE_FILES` JSON env, or add
+  `scripts/smoke-files.sh`.
+- **CI base-rate gotchas** (don't chase these as G3 bugs): the CI
+  `runner-smoke` container runs `cgroup=auto` (rlimit-only, **no delegated
+  cgroup**) → don't assert Go/Java `memory_exceeded` there, it needs the cgroup;
+  the openjdk/Go toolchains make the image build heavy (fine, just slow); the
+  `trivy` job flakes on GitHub-API rate limits (already hardened with retry+token
+  on main); and a tight interpreter timeout under `-race` flakes (Node tests sit
+  at 8 s for this reason).
+
+## Implementation notes (field-tested from G1/G2/G4)
+G1, G2, and G4 have landed, so G3's preconditions are met — the seams to
+generalise from now exist, and G3 is **more mechanical than "L" reads**:
+
+- **`{src}` → `{srcs}` is a token→list expansion**, not another replacer pair.
+  Today `{src}` is substituted 1:1 via `strings.NewReplacer` in `subst()`. Multi-
+  file needs one `{srcs}` token that expands into N paths — a small structural
+  change to the compile-argv builder. Filter by extension per language: C/C++
+  compile only `.c`/`.cpp` translation units (headers just sit on disk, found via
+  the `-I.` you must add); Java compiles all `.java`; Go builds all `.go`.
+- **Java's entrypoint is a class name, not a path.** The run argv hardcodes `Main`
+  today. For `Entrypoint`, derive the class from the filename (`Foo.java` → `Foo`),
+  keep `Main`/`Main.java` as the default, and update the artifact-existence check
+  (it validates `Main.class` today) to validate the entrypoint's `.class`. The
+  public-class-==-filename rule still applies per file.
+- **Interpreted entrypoint**: only the entrypoint file is executed; siblings just
+  need to be on disk for `import`/`require`. The `runArgs` reference `sourceFile`
+  today — make that the *resolved entrypoint*.
 
 ## Effort
-L — contract change, per-language compile changes, a rigorous path-safety layer,
-and backend coordination. Do **after** G1/G2 so the per-language compile specs
-(and Go/Java) already exist to generalise from.
+L in raw scope (contract change, per-language compile changes, a rigorous
+path-safety layer, backend coordination) — but the seams above make it more
+mechanical than that grade suggests. Do **after** G1/G2 (done) so the per-language
+compile specs and Go/Java already exist to generalise from.
 
 ## Phase G3 acceptance
 - Multi-file C/C++/Java/Go/Python/JS submissions compile and run.
