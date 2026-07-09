@@ -4,6 +4,11 @@ Living tracker for the roadmap defined in
 [RUNNER_AUDIT_AND_CONTRACT.md](./RUNNER_AUDIT_AND_CONTRACT.md) and
 [RUNNER_ARCHITECTURE_AND_HARDENING_PLAN.md](./RUNNER_ARCHITECTURE_AND_HARDENING_PLAN.md).
 
+> This tracker is the **task queue** for the spec-driven agent loop in
+> [AGENT_HARDENING_LOOP.md](./AGENT_HARDENING_LOOP.md): each loop reads the plan
+> (the spec), takes the next actionable item here, ships a draft PR, and updates
+> these boxes.
+
 Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked
 
 ---
