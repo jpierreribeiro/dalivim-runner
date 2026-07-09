@@ -132,12 +132,25 @@ First CI in the repo. `.github/workflows/ci.yml`:
       (not queued, no crash) and the runner still serves after the burst.
 - [x] Helper `scripts/smoke-run.sh` — `POST /run`, exact stdout+status assertion,
       non-zero exit on mismatch (reused by the corpus + stress).
-- [ ] Still open: `runner-security` as a *separate* periodic job, image CVE scan
-      (trivy/grype), and the **compiler-bomb** corpus row — the last deferred with
-      F-D (no compiled runtime yet).
+- [x] **Image CVE scan** (§4.5c) — separate `security-scan` job builds the shipped
+      image and runs `trivy image --severity HIGH,CRITICAL --ignore-unfixed
+      --exit-code 1`. `--ignore-unfixed` keeps it actionable (fails only on a
+      *fixable* HIGH/CRITICAL, never on an unpatched upstream CVE); scanning the
+      shipped image covers the runtime + nsjail libs now and the Node/gcc
+      toolchains F-C/F-D add.
+- [x] **Periodic security gate** (§4.4 "rodado no CI e periodicamente") — a weekly
+      `schedule` trigger re-runs both the escape corpus (via `runner-smoke`) and
+      the CVE scan (`security-scan`), so base-image drift / post-merge CVEs surface
+      without a code change. This is the "separate periodic job" for the security
+      corpus: the corpus stays a per-PR gate in `runner-smoke` **and** fires on the
+      weekly cadence, and `security-scan` is its own independent job.
+- [~] **Compiler-bomb corpus row** (§4.4 last row) — deferred with **F-D**: needs a
+      compiled runtime to produce `compile_error` at the compile timeout. Add the
+      row to `smoke-escape.sh` (or a compiled-language corpus) in the F-D PR.
 
 Signed-off: `claude/dalivim-runner-ci-smoke-3sscm8` — 2026-07-09
-(escape-corpus completion + backpressure gate: 2026-07-09).
+(escape-corpus completion + backpressure gate: 2026-07-09;
+trivy CVE scan + weekly periodic gate: 2026-07-09).
 
 ## F-C — interpreted polyglot (Node)
 
