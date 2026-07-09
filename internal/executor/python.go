@@ -3,7 +3,6 @@ package executor
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,21 +15,27 @@ import (
 
 // PythonRuntime executes Python 3 source in the sandbox. It is the only runtime
 // wired today; the Runtime interface exists so a second language is purely
-// additive.
+// additive. It only describes WHAT to run (argv, workdir, limits) via a Spec —
+// the sandbox owns HOW it is contained.
 type PythonRuntime struct {
-	sandbox     *sandbox.Sandbox
-	version     string
-	outputLimit int
+	sandbox       sandbox.Sandbox
+	version       string
+	outputLimit   int
+	maxProcesses  int // per-run RLIMIT_NPROC in the jail (fork-bomb cap)
+	maxFileSizeMB int // per-run RLIMIT_FSIZE in the jail
 }
 
 // NewPython builds the Python runtime. It detects the interpreter version once at
 // construction so every result carries real provenance rather than a
-// hand-configured value. outputLimit caps captured stdout/stderr.
-func NewPython(sb *sandbox.Sandbox, outputLimit int) *PythonRuntime {
+// hand-configured value. outputLimit caps captured stdout/stderr; maxProcesses
+// and maxFileSizeMB are the per-run jail caps (honoured by the nsjail backend).
+func NewPython(sb sandbox.Sandbox, outputLimit, maxProcesses, maxFileSizeMB int) *PythonRuntime {
 	return &PythonRuntime{
-		sandbox:     sb,
-		version:     detectPythonVersion(),
-		outputLimit: outputLimit,
+		sandbox:       sb,
+		version:       detectPythonVersion(),
+		outputLimit:   outputLimit,
+		maxProcesses:  maxProcesses,
+		maxFileSizeMB: maxFileSizeMB,
 	}
 }
 
@@ -69,20 +74,20 @@ func (p *PythonRuntime) Run(ctx context.Context, req runnerapi.RunRequest) runne
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(req.TimeoutMs)*time.Millisecond)
 	defer cancel()
 
-	// Per-run caps set inside the child shell before exec'ing python. Only -v
-	// (address space) and -t (CPU seconds) are used: the container's /bin/sh is
-	// dash, which lacks `ulimit -u`, so the process cap (RLIMIT_NPROC, fork-bomb
-	// containment) is applied process-wide at startup instead. -t contains
-	// CPU-bound loops even when wall-clock cancellation races.
-	cpuSeconds := (req.TimeoutMs+999)/1000 + 1 // CPU cap just above the wall-clock timeout
-	shellCmd := fmt.Sprintf("ulimit -v %d; ulimit -t %d; exec python3 -I main.py", req.MemoryMB*1024, cpuSeconds)
-	//#nosec G204 -- executing submitted code is the runner's purpose; the shell string interpolates only integer limits, the source is written to main.py (not the command), and the process runs sandboxed (empty netns, rlimits, restricted PATH/env).
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", shellCmd)
-	cmd.Dir = workDir
+	// Describe the run; the sandbox turns this into a fully contained command
+	// (namespaces, rlimits, seccomp, process group, timeout kill). "main.py" is
+	// resolved against the sandbox-set working directory; the source lives in that
+	// file, never on the command line, so there is no shell injection.
+	cmd := p.sandbox.Command(ctx, sandbox.Spec{
+		Argv:          []string{"python3", "-I", "main.py"},
+		WorkDir:       workDir,
+		TimeoutMs:     req.TimeoutMs,
+		MemoryMB:      req.MemoryMB,
+		MaxProcesses:  p.maxProcesses,
+		MaxFileSizeMB: p.maxFileSizeMB,
+	})
 	cmd.Stdin = strings.NewReader(req.Stdin)
 	cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "PYTHONUNBUFFERED=1"}
-	cmd.SysProcAttr = p.sandbox.SysProcAttr()
-	cmd.Cancel = sandbox.CancelCmd(cmd)
 
 	stdout := &limitedBuffer{limit: p.outputLimit}
 	stderr := &limitedBuffer{limit: p.outputLimit}

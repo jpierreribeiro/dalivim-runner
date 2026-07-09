@@ -1,0 +1,152 @@
+//go:build linux
+
+package sandbox
+
+import (
+	"strings"
+	"testing"
+)
+
+// argValue returns the token following the first occurrence of flag, or "" when
+// the flag is absent (so tests can assert both presence and value).
+func argValue(args []string, flag string) string {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+func hasArg(args []string, flag string) bool {
+	for _, a := range args {
+		if a == flag {
+			return true
+		}
+	}
+	return false
+}
+
+func sampleSpec() Spec {
+	return Spec{
+		Argv:          []string{"python3", "-I", "main.py"},
+		WorkDir:       "/tmp/dalivim-run-abc",
+		TimeoutMs:     3000,
+		MemoryMB:      128,
+		MaxProcesses:  256,
+		MaxFileSizeMB: 64,
+	}
+}
+
+// TestNsjailArgs_AppliesEveryLayer pins that each containment control the plan
+// requires is present with the right value. This is the CI-observable contract
+// for a jail that cannot itself be exercised without the binary + userns.
+func TestNsjailArgs_AppliesEveryLayer(t *testing.T) {
+	args := nsjailArgs(1000, 1000, sampleSpec())
+
+	// Read-only rootfs, per-run tmpfs /tmp, source mounted read-only at /sandbox.
+	if argValue(args, "--bindmount_ro") != "/" { // first ro mount is the whole rootfs
+		t.Fatalf("expected a read-only rootfs bind mount, got %q", argValue(args, "--bindmount_ro"))
+	}
+	if argValue(args, "--tmpfsmount") != "/tmp" {
+		t.Fatalf("expected tmpfs /tmp, got %q", argValue(args, "--tmpfsmount"))
+	}
+	if !hasArg(args, "/tmp/dalivim-run-abc:/sandbox") {
+		t.Fatalf("expected the workdir bound read-only to /sandbox, args=%v", args)
+	}
+	if argValue(args, "--cwd") != "/sandbox" {
+		t.Fatalf("expected cwd /sandbox, got %q", argValue(args, "--cwd"))
+	}
+
+	// Per-run rlimits derived from the spec.
+	if argValue(args, "--rlimit_as") != "128" {
+		t.Fatalf("expected RLIMIT_AS 128MB, got %q", argValue(args, "--rlimit_as"))
+	}
+	if argValue(args, "--rlimit_cpu") != "4" { // (3000+999)/1000 + 1
+		t.Fatalf("expected RLIMIT_CPU 4s, got %q", argValue(args, "--rlimit_cpu"))
+	}
+	if argValue(args, "--rlimit_nproc") != "256" {
+		t.Fatalf("expected RLIMIT_NPROC 256, got %q", argValue(args, "--rlimit_nproc"))
+	}
+	if argValue(args, "--rlimit_fsize") != "64" {
+		t.Fatalf("expected RLIMIT_FSIZE 64MB, got %q", argValue(args, "--rlimit_fsize"))
+	}
+	if argValue(args, "--time_limit") != "3" { // ceil(3000/1000)
+		t.Fatalf("expected wall time_limit 3s, got %q", argValue(args, "--time_limit"))
+	}
+
+	// Seccomp denylist + uid/gid single-id mapping (rootless, newuidmap-free).
+	if !strings.Contains(argValue(args, "--seccomp_string"), "KILL") {
+		t.Fatal("expected a seccomp kafel policy with a KILL block")
+	}
+	if argValue(args, "--uid_mapping") != "0:1000:1" || argValue(args, "--gid_mapping") != "0:1000:1" {
+		t.Fatalf("expected single-id root mapping, got uid=%q gid=%q",
+			argValue(args, "--uid_mapping"), argValue(args, "--gid_mapping"))
+	}
+	if !hasArg(args, "--iface_no_lo") || !hasArg(args, "--disable_proc") || !hasArg(args, "--keep_env") {
+		t.Fatalf("expected --iface_no_lo, --disable_proc and --keep_env, args=%v", args)
+	}
+}
+
+// TestNsjailArgs_ArgvIsAfterSeparator ensures the student argv is placed after
+// the `--` guard so no token can be reinterpreted as an nsjail flag.
+func TestNsjailArgs_ArgvIsAfterSeparator(t *testing.T) {
+	args := nsjailArgs(1000, 1000, sampleSpec())
+	sep := -1
+	for i, a := range args {
+		if a == "--" {
+			sep = i
+			break
+		}
+	}
+	if sep == -1 {
+		t.Fatal("expected a -- separator before the argv")
+	}
+	got := strings.Join(args[sep+1:], " ")
+	if got != "python3 -I main.py" {
+		t.Fatalf("argv after separator = %q, want %q", got, "python3 -I main.py")
+	}
+}
+
+// TestNsjailArgs_OptionalLimitsOmitted confirms a zero nproc/fsize leaves the
+// flag off (nsjail default), rather than emitting a "0" cap.
+func TestNsjailArgs_OptionalLimitsOmitted(t *testing.T) {
+	spec := sampleSpec()
+	spec.MaxProcesses = 0
+	spec.MaxFileSizeMB = 0
+	args := nsjailArgs(1000, 1000, spec)
+	if hasArg(args, "--rlimit_nproc") {
+		t.Fatal("MaxProcesses=0 must omit --rlimit_nproc")
+	}
+	if hasArg(args, "--rlimit_fsize") {
+		t.Fatal("MaxFileSizeMB=0 must omit --rlimit_fsize")
+	}
+}
+
+func TestCapSeconds(t *testing.T) {
+	if got := cpuCapSeconds(3000); got != 4 {
+		t.Fatalf("cpuCapSeconds(3000) = %d, want 4", got)
+	}
+	if got := cpuCapSeconds(1); got != 2 {
+		t.Fatalf("cpuCapSeconds(1) = %d, want 2", got)
+	}
+	if got := wallCapSeconds(3000); got != 3 {
+		t.Fatalf("wallCapSeconds(3000) = %d, want 3", got)
+	}
+	if got := wallCapSeconds(1); got != 1 {
+		t.Fatalf("wallCapSeconds(1) = %d, want 1 (min)", got)
+	}
+	if got := wallCapSeconds(0); got != 1 {
+		t.Fatalf("wallCapSeconds(0) = %d, want 1 (min)", got)
+	}
+}
+
+func TestShJoin_QuotesEveryToken(t *testing.T) {
+	if got := shJoin([]string{"python3", "-I", "main.py"}); got != `'python3' '-I' 'main.py'` {
+		t.Fatalf("shJoin = %q", got)
+	}
+	// A single quote in a token must not break out of the quoting.
+	if got := shJoin([]string{"a'b"}); got != `'a'\''b'` {
+		t.Fatalf("shJoin single-quote escaping = %q", got)
+	}
+}

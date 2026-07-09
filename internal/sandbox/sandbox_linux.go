@@ -1,14 +1,9 @@
 //go:build linux
 
-// Package sandbox owns the OS-level containment primitives shared by every
-// runtime: per-run process attributes (empty network namespace + own process
-// group), the process-group kill that enforces timeouts, and the process-wide
-// fork-bomb cap. Keeping the syscall-heavy, security-sensitive code behind this
-// small API is what lets the executor stay portable and readable, and is the
-// seam where future hardening (nsjail, cgroups, seccomp) will plug in.
 package sandbox
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -16,69 +11,99 @@ import (
 	"os/exec"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // rlimitNPROC is RLIMIT_NPROC on Linux; package syscall does not export it.
 const rlimitNPROC = 6
 
-// isolationCloneflags creates the empty network namespace. CLONE_NEWUSER is what
-// lets an unprivileged uid create a network namespace at all; CLONE_NEWNET gives
-// the child a namespace with only a (down) loopback and no route off-host.
+// isolationCloneflags creates the empty network namespace for the netns backend.
+// CLONE_NEWUSER is what lets an unprivileged uid create a network namespace at
+// all; CLONE_NEWNET gives the child a namespace with only a (down) loopback and
+// no route off-host.
 const isolationCloneflags = syscall.CLONE_NEWUSER | syscall.CLONE_NEWNET
 
-// Sandbox holds the containment decisions resolved once at startup and consulted
-// per run. It is safe for concurrent use (its fields are read-only after
-// Configure).
-type Sandbox struct {
+// Configure selects and validates the containment backend against what the
+// kernel actually permits, logs the decision, and returns the ready Sandbox.
+//
+// sandboxPolicy (RUNNER_SANDBOX) is auto|require|off (empty => auto):
+//   - off:     use the netns backend only (F-03 baseline).
+//   - auto:    probe nsjail; use it when it works, else warn and fall back to netns.
+//   - require: use nsjail and FAIL CLOSED at boot if the probe fails.
+//
+// netPolicy (RUNNER_NETWORK_ISOLATION) governs the netns backend's egress
+// guarantee and is consulted only when nsjail is not the active backend (nsjail
+// always runs each command in its own empty network namespace).
+func Configure(sandboxPolicy, netPolicy string) (Sandbox, error) {
+	switch policy := normalizePolicy(sandboxPolicy); policy {
+	case "off":
+		slog.Info("nsjail DISABLED (RUNNER_SANDBOX=off); using netns-only backend (F-03)")
+		return configureNetns(netPolicy)
+	case "auto", "require":
+		nj, detail, err := tryNsjail()
+		if err == nil {
+			slog.Info("nsjail ENABLED: each run is contained by a read-only rootfs, mount/pid/ipc/user/net namespaces, a size-capped tmpfs /tmp, a seccomp denylist, no_new_privs, and per-jail rlimits",
+				"bin", nj.bin)
+			return nj, nil
+		}
+		if policy == "require" {
+			return nil, fmt.Errorf("RUNNER_SANDBOX=require but nsjail is unavailable: %s", detail)
+		}
+		slog.Warn("nsjail unavailable; falling back to netns-only backend (F-03) — set RUNNER_SANDBOX=require to fail closed instead",
+			"detail", detail)
+		return configureNetns(netPolicy)
+	default:
+		return nil, fmt.Errorf("RUNNER_SANDBOX must be auto, require, or off (got %q)", policy)
+	}
+}
+
+// normalizePolicy lower-cases/trims a policy value, defaulting empty to "auto".
+func normalizePolicy(p string) string {
+	p = strings.ToLower(strings.TrimSpace(p))
+	if p == "" {
+		return "auto"
+	}
+	return p
+}
+
+// ---------------------------------------------------------------------------
+// netns backend (F-03): empty network namespace + per-run rlimits via the shell
+// ---------------------------------------------------------------------------
+
+// netnsSandbox is the baseline backend: it runs each command in its own process
+// group and (when permitted) an empty network namespace, applying the memory and
+// CPU rlimits through the child shell. It does NOT apply a per-run process or
+// file-size cap: a process-wide RLIMIT_NPROC is a per-uid shared resource that
+// starves the Go runtime, so fork-bomb containment lives in the nsjail backend.
+type netnsSandbox struct {
 	netns bool
 }
 
-// NetworkIsolated reports whether each run executes in an empty network
-// namespace (egress denied by THIS process, independent of the deploy network).
-func (s *Sandbox) NetworkIsolated() bool { return s.netns }
+func (s *netnsSandbox) NetworkIsolated() bool { return s.netns }
+func (s *netnsSandbox) Backend() string       { return "netns" }
 
-// Configure resolves the network-isolation policy against what the kernel
-// actually permits, logs the decision, and returns the sandbox. Policy is
-// auto|require|off (empty => auto): "require" fails closed (returns an error)
-// when unprivileged namespaces are unavailable; "auto" falls back to the deploy
-// network with a loud warning; "off" disables in-process isolation.
-func Configure(policy string) (*Sandbox, error) {
-	policy = strings.ToLower(strings.TrimSpace(policy))
-	if policy == "" {
-		policy = "auto"
-	}
-	switch policy {
-	case "off":
-		slog.Warn("network isolation DISABLED (policy=off); egress must be blocked by the deployment network")
-		return &Sandbox{netns: false}, nil
-	case "auto", "require":
-		if probeNetns() {
-			slog.Info("network isolation ENABLED: each run executes in an empty network namespace (no egress)")
-			return &Sandbox{netns: true}, nil
-		}
-		if policy == "require" {
-			return nil, errors.New("network isolation required but this platform forbids unprivileged network namespaces; cannot guarantee egress denial")
-		}
-		slog.Warn("network isolation UNAVAILABLE on this platform; code egress is NOT contained by this process — block egress at the deploy layer or set RUNNER_NETWORK_ISOLATION=require to fail closed")
-		return &Sandbox{netns: false}, nil
-	default:
-		return nil, fmt.Errorf("network isolation policy must be auto, require, or off (got %q)", policy)
-	}
+// Command wraps the argv in a shell that sets the per-run rlimits, then execs it
+// (exec so the shell does not linger as an extra process in the group). Only -v
+// (address space) and -t (CPU seconds) are applied: the container's /bin/sh is
+// dash, which lacks `ulimit -u`, so the process cap is a per-jail (nsjail)
+// concern. The source is written to a file in WorkDir, never the command line.
+func (s *netnsSandbox) Command(ctx context.Context, spec Spec) *exec.Cmd {
+	//nolint:gosec // G204: executing submitted code is the runner's purpose; the
+	// shell string interpolates only integer limits and a single-quoted argv, the
+	// source lives in a file, and the child runs sandboxed (netns, rlimits, env).
+	shellCmd := fmt.Sprintf("ulimit -v %d; ulimit -t %d; exec %s",
+		spec.MemoryMB*1024, cpuCapSeconds(spec.TimeoutMs), shJoin(spec.Argv))
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", shellCmd)
+	cmd.Dir = spec.WorkDir
+	cmd.SysProcAttr = s.sysProcAttr()
+	cmd.Cancel = CancelCmd(cmd)
+	return cmd
 }
 
-// idMappings maps the runner's real uid/gid to root inside the new user
-// namespace so the interpreter can read its own script; the real kernel uid is
-// unchanged, so the process-wide RLIMIT_NPROC still contains fork bombs across
-// the namespace.
-func idMappings() ([]syscall.SysProcIDMap, []syscall.SysProcIDMap) {
-	return []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
-		[]syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}}
-}
-
-// SysProcAttr builds the per-run attributes: always its own process group (so the
+// sysProcAttr builds the per-run attributes: always its own process group (so the
 // whole tree is killable on timeout) plus, when isolation is enabled, an empty
 // network namespace.
-func (s *Sandbox) SysProcAttr() *syscall.SysProcAttr {
+func (s *netnsSandbox) sysProcAttr() *syscall.SysProcAttr {
 	attr := &syscall.SysProcAttr{Setpgid: true}
 	if s.netns {
 		uidMap, gidMap := idMappings()
@@ -87,6 +112,39 @@ func (s *Sandbox) SysProcAttr() *syscall.SysProcAttr {
 		attr.GidMappings = gidMap
 	}
 	return attr
+}
+
+// configureNetns resolves the network-isolation policy against what the kernel
+// permits and returns the netns backend. Policy is auto|require|off (empty =>
+// auto): "require" fails closed when unprivileged namespaces are unavailable;
+// "auto" falls back to the deploy network with a loud warning; "off" disables
+// in-process network isolation.
+func configureNetns(policy string) (*netnsSandbox, error) {
+	switch p := normalizePolicy(policy); p {
+	case "off":
+		slog.Warn("network isolation DISABLED (policy=off); egress must be blocked by the deployment network")
+		return &netnsSandbox{netns: false}, nil
+	case "auto", "require":
+		if probeNetns() {
+			slog.Info("network isolation ENABLED: each run executes in an empty network namespace (no egress)")
+			return &netnsSandbox{netns: true}, nil
+		}
+		if p == "require" {
+			return nil, errors.New("network isolation required but this platform forbids unprivileged network namespaces; cannot guarantee egress denial")
+		}
+		slog.Warn("network isolation UNAVAILABLE on this platform; code egress is NOT contained by this process — block egress at the deploy layer or set RUNNER_NETWORK_ISOLATION=require to fail closed")
+		return &netnsSandbox{netns: false}, nil
+	default:
+		return nil, fmt.Errorf("network isolation policy must be auto, require, or off (got %q)", p)
+	}
+}
+
+// idMappings maps the runner's real uid/gid to root inside the new user
+// namespace so the interpreter can read its own script; the real kernel uid is
+// unchanged.
+func idMappings() ([]syscall.SysProcIDMap, []syscall.SysProcIDMap) {
+	return []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
+		[]syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}}
 }
 
 // probeNetns reports whether this process can create an empty network namespace
@@ -100,6 +158,96 @@ func probeNetns() bool {
 		GidMappings: gidMap,
 	}
 	return cmd.Run() == nil
+}
+
+// ---------------------------------------------------------------------------
+// nsjail backend (F-B / F-05 / F-11)
+// ---------------------------------------------------------------------------
+
+// nsjailSandbox runs each command under a probed nsjail binary. Every run gets a
+// read-only rootfs, its own mount/pid/ipc/user/net namespaces, a size-capped
+// tmpfs /tmp, a seccomp denylist, no_new_privs, and per-jail nproc/fsize caps.
+type nsjailSandbox struct {
+	bin string
+	uid int
+	gid int
+}
+
+// NetworkIsolated is always true: nsjail clones a fresh, empty network namespace
+// for every run (loopback stays down via --iface_no_lo).
+func (s *nsjailSandbox) NetworkIsolated() bool { return true }
+func (s *nsjailSandbox) Backend() string       { return "nsjail" }
+
+// Command builds the nsjail invocation for one run. nsjail owns the child's cwd,
+// namespaces, and rlimits; we still put nsjail itself in its own process group so
+// a timeout SIGKILLs nsjail and every descendant together. The caller's cmd.Env
+// flows to the child unchanged via --keep_env.
+func (s *nsjailSandbox) Command(ctx context.Context, spec Spec) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, s.bin, nsjailArgs(s.uid, s.gid, spec)...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = CancelCmd(cmd)
+	return cmd
+}
+
+// tryNsjail locates the nsjail binary and proves it actually works in this
+// environment (user namespace creation, seccomp acceptance) by running /bin/true
+// inside a real jail. It returns a human-readable detail on failure for the boot
+// log or the fail-closed error.
+func tryNsjail() (*nsjailSandbox, string, error) {
+	bin, err := exec.LookPath("nsjail")
+	if err != nil {
+		return nil, "nsjail binary not found on PATH", err
+	}
+	s := &nsjailSandbox{bin: bin, uid: os.Getuid(), gid: os.Getgid()}
+	if detail, ok := probeNsjail(s); !ok {
+		return nil, detail, errors.New(detail)
+	}
+	return s, "", nil
+}
+
+// probeNsjail runs /bin/true through a real jail to confirm the kernel permits
+// the namespaces and accepts the seccomp policy. It mirrors the F-03 netns probe:
+// the boot log (nsjail ENABLED vs fallback) is the source of truth on a platform
+// where nsjail cannot be exercised in CI.
+func probeNsjail(s *nsjailSandbox) (string, bool) {
+	dir, err := os.MkdirTemp("", "dalivim-probe-*")
+	if err != nil {
+		return "cannot create probe workdir: " + err.Error(), false
+	}
+	defer os.RemoveAll(dir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cmd := s.Command(ctx, Spec{
+		Argv:          []string{"/bin/true"},
+		WorkDir:       dir,
+		TimeoutMs:     2000,
+		MemoryMB:      128,
+		MaxProcesses:  64,
+		MaxFileSizeMB: 4,
+	})
+	cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin"}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Sprintf("probe run failed: %v: %s", err, strings.TrimSpace(string(out))), false
+	}
+	return "", true
+}
+
+// ---------------------------------------------------------------------------
+// shared helpers
+// ---------------------------------------------------------------------------
+
+// shJoin renders argv as a POSIX-sh-safe command string for the netns backend's
+// `exec`. The argv is runtime-defined (never student source), but every token is
+// single-quoted so a path containing a space or shell metacharacter can never
+// alter the command.
+func shJoin(argv []string) string {
+	q := make([]string, len(argv))
+	for i, a := range argv {
+		q[i] = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
+	}
+	return strings.Join(q, " ")
 }
 
 // CancelCmd is assigned to exec.Cmd.Cancel: it SIGKILLs the whole process group
@@ -116,9 +264,9 @@ func CancelCmd(cmd *exec.Cmd) func() error {
 // It is deliberately NOT called at startup: RLIMIT_NPROC is enforced per
 // real-uid, so lowering it process-wide throttles every process this uid runs
 // and can make the runner fail to fork ("errno=11") on a busy shared host.
-// Fork-bomb containment must be per-run instead — the per-jail sandbox applies
-// it (nsjail --rlimit_nproc) against a jail-private uid. This primitive is kept
-// only for that future per-jail path; do not reintroduce it as a global cap.
+// Fork-bomb containment is per-run instead — the nsjail backend applies it
+// (--rlimit_nproc) against a jail-private uid. This primitive is kept only for
+// that reasoning's paper trail and its test; do not reintroduce it as a global cap.
 func LimitProcesses(n int) error {
 	var lim syscall.Rlimit
 	if err := syscall.Getrlimit(rlimitNPROC, &lim); err != nil {
@@ -133,7 +281,9 @@ func LimitProcesses(n int) error {
 }
 
 // MaxRSSkb returns the peak resident set size (KiB) reported for a finished
-// command, or 0 when unavailable.
+// command, or 0 when unavailable. Under the nsjail backend this reflects nsjail's
+// own peak rather than the child's (authoritative per-run accounting arrives with
+// cgroups v2 — see the plan's F-E/F-F), so treat it as best-effort.
 func MaxRSSkb(cmd *exec.Cmd) int {
 	if cmd.ProcessState == nil {
 		return 0

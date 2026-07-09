@@ -15,14 +15,17 @@ import (
 func isolatedPython(t *testing.T) *PythonRuntime {
 	t.Helper()
 	requirePython(t)
-	sb, err := sandbox.Configure("auto")
+	// Force the netns backend (RUNNER_SANDBOX=off) with network isolation resolved
+	// from the platform, so this drives the F-03 egress guarantee specifically —
+	// independent of whether nsjail happens to be installed.
+	sb, err := sandbox.Configure("off", "auto")
 	if err != nil {
 		t.Fatalf("configure sandbox: %v", err)
 	}
 	if !sb.NetworkIsolated() {
 		t.Skip("unprivileged network namespaces unavailable on this platform")
 	}
-	return NewPython(sb, 64*1024)
+	return NewPython(sb, 64*1024, 256, 64)
 }
 
 // TestNetworkIsolation_DeniesEgress verifies that isolated code cannot open a
