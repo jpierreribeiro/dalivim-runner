@@ -206,13 +206,30 @@ docker run -d --name runner-cgtest \
   -e RUNNER_CGROUP_MOUNT=/sys/fs/cgroup/dalivim \
   --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
   --pids-limit=512 --cpus=1 --memory=1g \
-  -p 8091:8090 dalivim-runner
+  dalivim-runner        # NOTE: no -p — validate from INSIDE the container (below)
 
 sleep 2
 docker logs runner-cgtest 2>&1 | tail -30     # want: nsjail ENABLED + cgroup memory accounting ENABLED
-curl -s 127.0.0.1:8091/run -H 'content-type: application/json' \
-  -d '{"language":"javascript","source_code":"const a=[];while(true){a.push(new Array(1e6).fill(7))}"}'; echo
-#   -> {"status":"memory_exceeded",...}   (was runtime_error before R6)
+
+# Validate the run path from INSIDE the container, hitting 127.0.0.1:8090 directly.
+# Do NOT test the throwaway via a published port (-p 8091:8090 + curl 127.0.0.1:8091):
+# the same VPSes that firewall the docker bridge (why section 7's prod runner uses
+# --network host) drop that traffic, so every curl returns EMPTY and R6 looks broken
+# when it is fine. docker exec sidesteps the bridge entirely; the image ships python3.
+docker exec -i runner-cgtest python3 - <<'PY'
+import urllib.request, json
+def call(tag, src):
+    req = urllib.request.Request("http://127.0.0.1:8090/run",
+        data=json.dumps({"language": "python", "source_code": src}).encode(),
+        headers={"content-type": "application/json"})
+    try:
+        print(tag, urllib.request.urlopen(req, timeout=20).read().decode())
+    except Exception as e:
+        print(tag, "ERR", e)
+print("health:", urllib.request.urlopen("http://127.0.0.1:8090/healthz").read())
+call("run   ->", "print(2+2)")                       # -> success, stdout "4\n"
+call("bomb  ->", "b=bytearray(10**10)")              # -> memory_exceeded  (the R6 payoff)
+PY
 docker rm -f runner-cgtest
 ```
 
@@ -220,12 +237,30 @@ If the container exits at boot, `docker logs` prints exactly why (with `require`
 it fails closed) — a persisting `permission denied` on the clone means the
 container is still outside the subtree (check `--cgroup-parent` and the driver).
 
+> **Empty responses ≠ R6 broken.** If you validate via `-p`/`curl` and get nothing
+> back while `docker logs` shows `listening` and no request errors, the requests
+> never reached the container — it's the docker-bridge firewall, not the runner.
+> Use the `docker exec` method above, or `--network host` (which collides with the
+> prod runner's `:8090`, so prefer `docker exec` for the throwaway).
+
 ### Cut the real runner over
 
 Once the throwaway shows `cgroup memory accounting ENABLED` + `memory_exceeded`,
 re-run the **section 7** `docker run` for the real `runner` with these additions.
 Start with `RUNNER_CGROUP=auto` — it uses the cgroup when present and falls back to
-rlimits otherwise, so it is safe even before persistence is set up:
+rlimits otherwise, so it is safe even before persistence is set up.
+
+If a runner is **already live** (you are hardening an existing box, not a fresh
+install), capture its token from the running container **before** you `docker rm`
+it — otherwise the recreated runner gets a new/blank secret and the backend's
+`X-Runner-Token` no longer matches:
+
+```sh
+export TOKEN=$(docker exec runner printenv RUNNER_SERVICE_TOKEN)   # 64 hex
+docker rm -f runner && docker run -d --name runner ... -e RUNNER_SERVICE_TOKEN=$TOKEN ...
+```
+
+The additions to the section 7 `docker run`:
 
 ```sh
   --cgroup-parent=/dalivim \
