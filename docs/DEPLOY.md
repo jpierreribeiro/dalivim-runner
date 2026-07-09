@@ -127,7 +127,9 @@ curl -s 127.0.0.1:8090/run -H "X-Runner-Token: $TOKEN" \
 #   -> status runtime_error, "Network is unreachable"  (must NOT connect)
 ```
 
-All three passing = the runner is executing untrusted code, contained.
+All three passing = the runner is executing untrusted code, contained. The full
+test matrix (curl **and** a ready Postman collection, plus the `unauthorized`
+gotcha) lives in [TESTING.md](TESTING.md).
 
 ## 9. Expose over HTTPS (Caddy) + firewall
 
