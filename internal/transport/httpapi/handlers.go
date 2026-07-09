@@ -16,11 +16,13 @@ import (
 )
 
 type handler struct {
-	svc            *executor.Service
-	metrics        *metrics.Metrics
-	maxSourceBytes int
-	maxStdinBytes  int
-	maxFilesBytes  int
+	svc                *executor.Service
+	metrics            *metrics.Metrics
+	maxSourceBytes     int
+	maxStdinBytes      int
+	maxFilesBytes      int
+	maxBatch           int // most stdins[] elements a batch request may carry (G6)
+	maxBatchStdinBytes int // summed stdin bytes across a batch (G6)
 
 	// readiness posture (G4.3), resolved once at boot.
 	backend             string // active sandbox backend ("nsjail"/"netns"/"none")
@@ -94,7 +96,11 @@ func (h *handler) decode(w http.ResponseWriter, r *http.Request) (runnerapi.RunR
 	if int64(h.maxFilesBytes) > bodyCap {
 		bodyCap = int64(h.maxFilesBytes)
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, bodyCap+int64(h.maxStdinBytes)+64*1024)
+	stdinCap := int64(h.maxStdinBytes)
+	if int64(h.maxBatchStdinBytes) > stdinCap {
+		stdinCap = int64(h.maxBatchStdinBytes) // a batch may carry more total stdin than one run
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, bodyCap+stdinCap+64*1024)
 	var req runnerapi.RunRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -108,10 +114,35 @@ func (h *handler) decode(w http.ResponseWriter, r *http.Request) (runnerapi.RunR
 		http.Error(w, "stdin too large", http.StatusBadRequest)
 		return runnerapi.RunRequest{}, false
 	}
+	// Batch (stdins[]) size caps (G6): the input count, each element (same cap as
+	// a single stdin), and the summed bytes — all before anything executes. The
+	// deeper shape rules (stdin/stdins exclusivity) live in the executor.
+	if n := len(req.Stdins); n > 0 {
+		if h.maxBatch > 0 && n > h.maxBatch {
+			http.Error(w, "too many stdins", http.StatusBadRequest)
+			return runnerapi.RunRequest{}, false
+		}
+		total := 0
+		for _, in := range req.Stdins {
+			if h.maxStdinBytes > 0 && len(in) > h.maxStdinBytes {
+				http.Error(w, "stdin element too large", http.StatusBadRequest)
+				return runnerapi.RunRequest{}, false
+			}
+			total += len(in)
+		}
+		if h.maxBatchStdinBytes > 0 && total > h.maxBatchStdinBytes {
+			http.Error(w, "batch stdin total too large", http.StatusBadRequest)
+			return runnerapi.RunRequest{}, false
+		}
+	}
 	return req, true
 }
 
 func (h *handler) execute(ctx context.Context, w http.ResponseWriter, req runnerapi.RunRequest, reqID string) {
+	if len(req.Stdins) > 0 {
+		h.executeBatch(ctx, w, req, reqID)
+		return
+	}
 	res, err := h.svc.Run(ctx, req)
 	if errors.Is(err, executor.ErrUnsupportedLanguage) {
 		http.Error(w, "unsupported language", http.StatusBadRequest)
@@ -159,6 +190,69 @@ func (h *handler) execute(ctx context.Context, w http.ResponseWriter, req runner
 	// runtime_error, timeout, memory_exceeded, compile_error, output_limit_exceeded)
 	// stay 200 — deterministic; a fallback would only repeat them. The body still
 	// carries the RunResult so a Gateway that logs it keeps the detail.
+	if res.Status == runnerapi.StatusInternalError {
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+	_ = json.NewEncoder(w).Encode(res)
+}
+
+// executeBatch runs a stdins[] request (G6) and encodes the batch envelope. It
+// mirrors execute: 400 for validation, 503 (+Retry-After) when the failure is
+// ours, 200 for every student-code outcome — including a compile_error batch
+// and an Aborted partial batch, both deterministic.
+func (h *handler) executeBatch(ctx context.Context, w http.ResponseWriter, req runnerapi.RunRequest, reqID string) {
+	res, err := h.svc.RunBatch(ctx, req)
+	if errors.Is(err, executor.ErrUnsupportedLanguage) {
+		http.Error(w, "unsupported language", http.StatusBadRequest)
+		return
+	}
+	var ve *executor.ValidationError
+	if errors.As(err, &ve) {
+		http.Error(w, ve.Msg, http.StatusBadRequest)
+		return
+	}
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Telemetry: per-input series (so batch runs count in the same metrics as
+	// single runs) with the shared compile time observed once, plus ONE
+	// payload-free batch log line — never per input, and never any student data.
+	lang := res.RuntimeName
+	if lang == "" {
+		lang = req.Language
+	}
+	if len(res.Results) == 0 {
+		// compile_error / internal_error: nothing executed; record the compile.
+		h.metrics.ObserveRun(lang, res.Status, 0, res.CompileMs)
+	}
+	totalMs := 0
+	for i, r := range res.Results {
+		compileMs := 0
+		if i == 0 {
+			compileMs = res.CompileMs // the shared compile, observed exactly once
+		}
+		h.metrics.ObserveRun(lang, r.Status, r.DurationMs, compileMs)
+		totalMs += r.DurationMs
+	}
+	slog.Info("batch",
+		"request_id", reqID,
+		"language", lang,
+		"status", res.Status,
+		"inputs", len(req.Stdins),
+		"results", len(res.Results),
+		"aborted", res.Aborted,
+		"compile_ms", res.CompileMs,
+		"total_run_ms", totalMs,
+	)
+
+	w.Header().Set("Content-Type", "application/json")
+	// Same failover contract as a single run: OUR infra failure is 503 +
+	// Retry-After so the gateway retries/fails over; student-code outcomes stay
+	// 200. Per-input internal_error inside Results is not escalated — the batch
+	// itself completed and the caller sees exactly which inputs need a re-run.
 	if res.Status == runnerapi.StatusInternalError {
 		w.Header().Set("Retry-After", "1")
 		w.WriteHeader(http.StatusServiceUnavailable)

@@ -54,6 +54,15 @@ type Config struct {
 	MaxPathBytes  int // longest a single file path may be
 	MaxPathDepth  int // deepest a path may nest (number of components)
 
+	// Batch execution caps (G6). A stdins[] batch holds ONE concurrency slot for
+	// its whole duration, so worst-case wall pressure is
+	// MaxConcurrentRuns × MaxBatch × per-run timeout — these caps bound that
+	// product. MaxBatchTotalMs is the batch-wide wall budget (compile included);
+	// crossing it aborts the batch with partial results.
+	MaxBatch           int // most stdins one request may carry
+	MaxBatchTotalMs    int // batch-wide wall budget in ms
+	MaxBatchStdinBytes int // summed stdin bytes across a batch
+
 	// Compiled-language (C/C++) compile phase — separate budget from execution.
 	CompileTimeoutMs    int // default per-run compile wall/CPU budget
 	MaxCompileTimeoutMs int // hard ceiling for compile time
@@ -117,6 +126,10 @@ func Load() (Config, error) {
 		MaxFilesBytes: envInt("RUNNER_MAX_FILES_BYTES", 1_048_576),
 		MaxPathBytes:  envInt("RUNNER_MAX_PATH_BYTES", 180),
 		MaxPathDepth:  envInt("RUNNER_MAX_PATH_DEPTH", 8),
+
+		MaxBatch:           envInt("RUNNER_MAX_BATCH", 100),
+		MaxBatchTotalMs:    envInt("RUNNER_MAX_BATCH_TOTAL_MS", 60_000),
+		MaxBatchStdinBytes: envInt("RUNNER_MAX_BATCH_STDIN_BYTES", 4_000_000),
 
 		CompileTimeoutMs:    envInt("RUNNER_COMPILE_TIMEOUT_MS", 10_000),
 		MaxCompileTimeoutMs: envInt("RUNNER_MAX_COMPILE_TIMEOUT_MS", 20_000),

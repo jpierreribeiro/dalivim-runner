@@ -65,6 +65,7 @@ func main() {
 			MaxMemoryMB:           cfg.MaxMemoryMB,
 			DefaultCompileTimeout: cfg.CompileTimeoutMs,
 			MaxCompileTimeoutMs:   cfg.MaxCompileTimeoutMs,
+			MaxBatchTotalMs:       cfg.MaxBatchTotalMs,
 			Files: executor.FileCaps{
 				MaxFiles:      cfg.MaxFiles,
 				MaxFileBytes:  cfg.MaxFileBytes,
@@ -87,6 +88,8 @@ func main() {
 		MaxSourceBytes:      cfg.MaxSourceBytes,
 		MaxStdinBytes:       cfg.MaxStdinBytes,
 		MaxFilesBytes:       cfg.MaxFilesBytes,
+		MaxBatch:            cfg.MaxBatch,
+		MaxBatchStdinBytes:  cfg.MaxBatchStdinBytes,
 		MaxConcurrentRuns:   cfg.MaxConcurrentRuns,
 		MetricsTokens:       cfg.MetricsTokens,
 		ShutdownGrace:       time.Duration(cfg.ShutdownGraceMs) * time.Millisecond,

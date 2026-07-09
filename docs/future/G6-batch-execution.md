@@ -5,14 +5,12 @@ on the **executor** side of the line: the runner runs one program against **many
 inputs** and returns **many raw results** — it never compares them to expected
 output. The backend still judges.
 
-> **Status — demand-gated (grounded 2026-07-09).** A backend sweep found the
-> platform has **no judge today**: no expected-output/test-case model, no output
-> comparison, one run per submission
-> (`backend/internal/submissions/service.go:56-93`; tasks carry no expected
-> output; Judge0's WA/AC is discarded at `judge0/mapper.go:115`). **So `stdins[]`
-> has no caller yet.** This spec stays here, ready, but is gated on a backend
-> test-case/judge model existing first — promote it the moment judging lands (it's
-> exactly what makes a test-suite fan-out cheap).
+> **Status — IMPLEMENTED (2026-07-09), demand gate overridden by owner
+> decision.** The original grounding stands — the backend has no judge yet, so
+> `stdins[]` has no caller today — but the owner chose to build the executor
+> side ahead of the judge so it's ready the moment a test-case model lands. The
+> contract is additive, so shipping it early costs nothing on the wire. See
+> **Implementation notes** at the bottom for the decisions locked at build time.
 
 ---
 
@@ -165,3 +163,38 @@ holding **one** concurrency slot. Bound it explicitly:
 - The batch-total budget bounds worst-case work per request; the host survives a
   max-size, max-timeout batch.
 - The runner returns N **raw** results; no comparison or verdict anywhere.
+
+## Implementation notes (as landed)
+
+- **Envelope**: `runnerapi.BatchResult` as specced; the "decide at
+  implementation" choice went to the response-level `aborted` flag (no new
+  per-run status). Batch-level `status` is `"ok"` (`BatchStatusOK`),
+  `compile_error`, or `internal_error` (the last maps to 503 + `Retry-After`,
+  same failover contract as a single run). Provenance is stamped once on the
+  envelope; per-input results carry no `runtime_*`/`compile_ms`.
+- **Dispatch**: `Service.RunBatch` mirrors `Run` (same normalize → clamp →
+  floors pipeline, shared via `clampLimits`); runtimes implement the optional
+  `batchRunner` interface, discovered by assertion like `limitFloorer`.
+  `Service.Run` rejects a `stdins[]` request so batches can't slip down the
+  single path. The shared sequential loop + budget lives in `batchLoop`
+  (`batch.go`).
+- **Budget epoch includes the compile**: a compile that eats the whole
+  `RUNNER_MAX_BATCH_TOTAL_MS` aborts before the first input. The budget is
+  checked *between* runs (each run is already bounded by its own timeout), so
+  the worst overshoot is one per-run timeout past the budget.
+- **Env**: `RUNNER_MAX_BATCH` (100), `RUNNER_MAX_BATCH_TOTAL_MS` (60000),
+  `RUNNER_MAX_BATCH_STDIN_BYTES` (4000000). Count/bytes are enforced at the
+  transport next to the existing stdin cap (each element also obeys
+  `RUNNER_MAX_STDIN_BYTES`); the wall budget is the executor's.
+- **Isolation caveat (on-target concern)**: inputs share the per-batch
+  `workDir` (that's the amortization). Under **nsjail** it is mounted read-only
+  in every run jail and `/tmp` is a fresh per-jail tmpfs, so no state survives
+  between inputs — assert this in the on-target smoke (input A writes, input B
+  must not see it). The `off`/netns dev fallback cannot make that guarantee
+  (writable cwd), consistent with its generally weaker posture.
+- **Tests**: `batch_test.go` (compile-once proven by a jail-counting fake
+  sandbox; index alignment; per-input independence; budget abort end-to-end;
+  validation) and `handlers_test.go` (envelope, caps, stdin/stdins
+  exclusivity). Single-run regression: the whole pre-existing suite.
+- **Multi-file works too**: `files[]` + `stdins[]` compose — the batch path
+  reuses the same plan/prepare seams G3 introduced.

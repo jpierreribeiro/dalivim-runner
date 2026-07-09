@@ -103,6 +103,18 @@ curl -s 127.0.0.1:8090/run -H "X-Runner-Token: $TOKEN" -H 'content-type: applica
 curl -s -o /dev/null -w '%{http_code}\n' 127.0.0.1:8090/run \
   -H 'X-Runner-Token: nope' -H 'content-type: application/json' \
   -d '{"language":"python","source_code":"print(1)"}'
+
+# batch (G6): compile once, run once per stdins element — expect a batch
+# envelope with compile_ms once and results[] index-aligned to stdins[]
+curl -s 127.0.0.1:8090/run -H "X-Runner-Token: $TOKEN" -H 'content-type: application/json' \
+  -d '{"language":"c","source_code":"#include <stdio.h>\nint main(){int a,b;scanf(\"%d %d\",&a,&b);printf(\"%d\\n\",a+b);return 0;}","stdins":["1 2","3 4"]}'; echo
+#   -> {"status":"ok","compile_ms":...,"results":[{"status":"success","stdout":"3\n",...},{"...":"7\n",...}]}
+
+# batch isolation (on-target): input A writes /tmp, input B must not see it —
+# each element runs in a fresh jail with its own tmpfs
+curl -s 127.0.0.1:8090/run -H "X-Runner-Token: $TOKEN" -H 'content-type: application/json' \
+  -d '{"language":"python","source_code":"import sys,os\ns=sys.stdin.read().strip()\nif s==\"write\": open(\"/tmp/mark\",\"w\").write(\"x\"); print(\"wrote\")\nelse: print(os.path.exists(\"/tmp/mark\"))","stdins":["write","read"]}'; echo
+#   -> results[1].stdout MUST be "False\n" (no state survives between inputs)
 ```
 
 ---

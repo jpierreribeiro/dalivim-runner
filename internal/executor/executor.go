@@ -35,6 +35,14 @@ type Limits struct {
 	// FilePolicy during request validation — the one place, like the timeouts,
 	// that limits live.
 	Files FileCaps
+
+	// MaxBatchTotalMs is the batch-wide wall budget for a stdins[] request (G6):
+	// when the cumulative wall time (compile included) crosses it, the batch
+	// stops with Aborted=true and partial results. It is THE containment control
+	// for batches — a batch holds one concurrency slot for its whole duration,
+	// so worst-case pressure is MaxConcurrentRuns × MaxBatch × per-run timeout
+	// without it. 0 disables the budget (not recommended outside tests).
+	MaxBatchTotalMs int
 }
 
 // Floors are optional per-language lower bounds on a request's run limits,
@@ -54,6 +62,19 @@ type Floors struct {
 // languages without floors are untouched.
 type limitFloorer interface {
 	LimitFloors() Floors
+}
+
+// batchRunner is implemented by a Runtime that can amortize per-request setup
+// across many stdins (G6): compiled languages compile once and loop the run
+// jail; interpreted languages write the source once and loop the interpreter.
+// Each input still executes in its own fresh jail — the amortized part is the
+// preparation, never the containment. Discovered by assertion, like
+// limitFloorer, so the Runtime interface stays minimal.
+type batchRunner interface {
+	// RunBatch executes req once per req.Stdins element, sequentially and
+	// index-aligned, stopping early (Aborted) when totalBudgetMs of wall time —
+	// compile included — is exhausted. Limits on req are already clamped.
+	RunBatch(ctx context.Context, req runnerapi.RunRequest, totalBudgetMs int) runnerapi.BatchResult
 }
 
 // Runtime executes source code for exactly one language inside the sandbox.
@@ -104,6 +125,12 @@ func (s *Service) Run(ctx context.Context, req runnerapi.RunRequest) (runnerapi.
 	if !ok {
 		return runnerapi.RunResult{}, fmt.Errorf("%w: %q", ErrUnsupportedLanguage, req.Language)
 	}
+	if len(req.Stdins) > 0 {
+		// A stdins[] request must take the batch path (RunBatch) — rejecting it
+		// here keeps the single-run contract crisp instead of silently ignoring
+		// the extra inputs.
+		return runnerapi.RunResult{}, invalid("stdins_on_single_run", "stdins requires the batch execution path")
+	}
 	// Validate and normalize the submission shape (single-file sugar vs multi-file)
 	// before anything runs. A *ValidationError here is a 400 the transport surfaces;
 	// it is the fail-fast gate in front of materialization.
@@ -111,18 +138,7 @@ func (s *Service) Run(ctx context.Context, req runnerapi.RunRequest) (runnerapi.
 	if err != nil {
 		return runnerapi.RunResult{}, err
 	}
-	req = normalized
-
-	req.TimeoutMs = clamp(req.TimeoutMs, s.limits.DefaultTimeout, s.limits.MaxTimeoutMs)
-	req.MemoryMB = clamp(req.MemoryMB, s.limits.DefaultMemory, s.limits.MaxMemoryMB)
-	req.CompileTimeoutMs = clamp(req.CompileTimeoutMs, s.limits.DefaultCompileTimeout, s.limits.MaxCompileTimeoutMs)
-	if lf, ok := rt.(limitFloorer); ok {
-		// Per-language floors (G6) raise an undersized budget so the runtime can
-		// start at all; the global ceiling still wins over any floor.
-		f := lf.LimitFloors()
-		req.TimeoutMs = raiseToFloor(req.TimeoutMs, f.TimeoutMs, s.limits.MaxTimeoutMs)
-		req.MemoryMB = raiseToFloor(req.MemoryMB, f.MemoryMB, s.limits.MaxMemoryMB)
-	}
+	req = s.clampLimits(normalized, rt)
 
 	res := rt.Run(ctx, req)
 	res.RuntimeName = rt.Language()
@@ -135,6 +151,57 @@ func (s *Service) Run(ctx context.Context, req runnerapi.RunRequest) (runnerapi.
 		res.PythonVersion = res.RuntimeVersion
 	}
 	return res, nil
+}
+
+// RunBatch is the stdins[] entry point (G6): one program, many inputs, many raw
+// results. The submission shape and limits are validated/clamped exactly like a
+// single run; the runtime then amortizes preparation (the compile, for compiled
+// languages) across the inputs. The runner never compares outputs to anything —
+// the results are raw and the backend judges.
+func (s *Service) RunBatch(ctx context.Context, req runnerapi.RunRequest) (runnerapi.BatchResult, error) {
+	rt, ok := s.runtimes[req.Language]
+	if !ok {
+		return runnerapi.BatchResult{}, fmt.Errorf("%w: %q", ErrUnsupportedLanguage, req.Language)
+	}
+	if len(req.Stdins) == 0 {
+		return runnerapi.BatchResult{}, invalid("empty_batch", "stdins must carry at least one input")
+	}
+	if req.Stdin != "" {
+		return runnerapi.BatchResult{}, invalid("both_stdin_and_stdins", "exactly one of stdin or stdins may be set, not both")
+	}
+	br, ok := rt.(batchRunner)
+	if !ok {
+		return runnerapi.BatchResult{}, invalid("unsupported_batch", "language %q does not support batch execution", req.Language)
+	}
+	normalized, err := s.normalize(req)
+	if err != nil {
+		return runnerapi.BatchResult{}, err
+	}
+	req = s.clampLimits(normalized, rt)
+
+	res := br.RunBatch(ctx, req, s.limits.MaxBatchTotalMs)
+	res.RuntimeName = rt.Language()
+	if res.RuntimeVersion == "" {
+		res.RuntimeVersion = rt.Version()
+	}
+	return res, nil
+}
+
+// clampLimits applies the limit policy to one request: defaults for omitted
+// values, the global ceilings, then any per-language floors (G6) — the single
+// place limits are enforced for both the single-run and batch paths.
+func (s *Service) clampLimits(req runnerapi.RunRequest, rt Runtime) runnerapi.RunRequest {
+	req.TimeoutMs = clamp(req.TimeoutMs, s.limits.DefaultTimeout, s.limits.MaxTimeoutMs)
+	req.MemoryMB = clamp(req.MemoryMB, s.limits.DefaultMemory, s.limits.MaxMemoryMB)
+	req.CompileTimeoutMs = clamp(req.CompileTimeoutMs, s.limits.DefaultCompileTimeout, s.limits.MaxCompileTimeoutMs)
+	if lf, ok := rt.(limitFloorer); ok {
+		// Per-language floors raise an undersized budget so the runtime can
+		// start at all; the global ceiling still wins over any floor.
+		f := lf.LimitFloors()
+		req.TimeoutMs = raiseToFloor(req.TimeoutMs, f.TimeoutMs, s.limits.MaxTimeoutMs)
+		req.MemoryMB = raiseToFloor(req.MemoryMB, f.MemoryMB, s.limits.MaxMemoryMB)
+	}
+	return req
 }
 
 // normalize enforces the submission contract and canonicalizes the request:

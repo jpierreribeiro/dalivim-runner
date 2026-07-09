@@ -49,6 +49,14 @@ type RunRequest struct {
 	TimeoutMs int    `json:"timeout_ms,omitempty"`
 	MemoryMB  int    `json:"memory_mb,omitempty"`
 
+	// Stdins is the batch form (G6): the program is prepared once (for compiled
+	// languages, compiled once) and executed once per element, each execution in
+	// its own fresh jail with per-run limits unchanged. Mutually exclusive with
+	// Stdin. The response becomes a BatchResult whose Results are index-aligned
+	// with this slice. These are raw inputs, never "test cases" — the runner
+	// holds no expected output and renders no verdict.
+	Stdins []string `json:"stdins,omitempty"`
+
 	// CompileTimeoutMs bounds the compile phase of a compiled language (C/C++),
 	// separate from TimeoutMs which bounds execution. Ignored for interpreted
 	// languages. Falls back to the service default when zero, clamped to a ceiling.
@@ -84,6 +92,44 @@ type RunResult struct {
 	// runtime_version.
 	PythonVersion string `json:"python_version,omitempty"`
 }
+
+// BatchResult is the response of POST /run when the request carries stdins[]
+// (G6). The compile phase happens once, so its telemetry lives here on the
+// envelope; Results carries one raw RunResult per input, index-aligned with the
+// request's stdins. Provenance (runtime name/version) is stamped once on the
+// envelope rather than repeated per result.
+type BatchResult struct {
+	// Status is the batch-level outcome: BatchStatusOK when the program was
+	// prepared (compiled) and the inputs were executed; StatusCompileError when
+	// the compile phase failed (Results is then empty — nothing was executed);
+	// StatusInternalError when the failure is ours, not the submitted code's.
+	Status         string `json:"status"`
+	RuntimeName    string `json:"runtime_name"`
+	RuntimeVersion string `json:"runtime_version"`
+
+	// CompileMs / CompileOutput are the SHARED compile telemetry — the whole
+	// point of the batch is that compilation happened once for every input.
+	// Zero/empty for interpreted languages.
+	CompileMs     int    `json:"compile_ms,omitempty"`
+	CompileOutput string `json:"compile_output,omitempty"`
+
+	// Results holds one RunResult per stdins element, in the same order
+	// (results[i] ran against stdins[i]). Per-input failures are independent —
+	// a timeout on one input never affects the others. Empty on compile_error.
+	Results []RunResult `json:"results"`
+
+	// Aborted means the batch-total wall budget was exhausted before every
+	// input ran: Results is a partial prefix and the caller re-submits the rest.
+	// It bounds how long one request can hold a concurrency slot; it is a
+	// batch-level flag, not a per-run status.
+	Aborted bool `json:"aborted,omitempty"`
+}
+
+// BatchStatusOK is the BatchResult status when the program was prepared and the
+// batch executed (individually failing inputs included — their outcomes live in
+// Results). It is distinct from the per-run status set below, which describes
+// single executions.
+const BatchStatusOK = "ok"
 
 // Status is the closed set of execution outcomes. A run that reaches a runtime
 // always ends in one of these; internal_error means the failure is ours, not the

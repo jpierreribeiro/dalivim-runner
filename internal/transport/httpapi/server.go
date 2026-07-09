@@ -33,6 +33,12 @@ type Config struct {
 	MaxFilesBytes     int // multi-file total-content budget, for the body-size ceiling
 	MaxConcurrentRuns int
 
+	// Batch (stdins[]) request caps (G6): most inputs one request may carry, and
+	// the summed stdin bytes across them. Per-element stdin still obeys
+	// MaxStdinBytes. The batch-wide wall budget is the executor's, not ours.
+	MaxBatch           int
+	MaxBatchStdinBytes int
+
 	// MetricsToken / MetricsTokens gate GET /metrics; when both are empty they fall
 	// back to the service token set so /metrics is never public in production
 	// (metrics leak submission volume/patterns).
@@ -68,6 +74,8 @@ func New(svc *executor.Service, cfg Config) *Server {
 		maxSourceBytes:      cfg.MaxSourceBytes,
 		maxStdinBytes:       cfg.MaxStdinBytes,
 		maxFilesBytes:       cfg.MaxFilesBytes,
+		maxBatch:            cfg.MaxBatch,
+		maxBatchStdinBytes:  cfg.MaxBatchStdinBytes,
 		backend:             cfg.Backend,
 		networkIsolated:     cfg.NetworkIsolated,
 		readyRequiresNsjail: cfg.ReadyRequiresNsjail,
