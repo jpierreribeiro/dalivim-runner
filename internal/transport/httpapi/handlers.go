@@ -13,6 +13,7 @@ import (
 type handler struct {
 	svc            *executor.Service
 	maxSourceBytes int
+	maxStdinBytes  int
 }
 
 // run handles POST /run: the generic, language-dispatched entry point. The
@@ -43,9 +44,11 @@ func (h *handler) runPythonCompat(w http.ResponseWriter, r *http.Request) {
 }
 
 // decode reads and validates the request body, bounding it so an oversized
-// payload cannot exhaust memory before the length check.
+// payload cannot exhaust memory before the length check. The body ceiling covers
+// source + stdin + JSON slack so a legitimate large stdin (judge inputs commonly
+// exceed 64 KiB) is not cut off at the transport layer before its own check.
 func (h *handler) decode(w http.ResponseWriter, r *http.Request) (runnerapi.RunRequest, bool) {
-	r.Body = http.MaxBytesReader(w, r.Body, int64(h.maxSourceBytes)+64*1024)
+	r.Body = http.MaxBytesReader(w, r.Body, int64(h.maxSourceBytes)+int64(h.maxStdinBytes)+64*1024)
 	var req runnerapi.RunRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -53,6 +56,10 @@ func (h *handler) decode(w http.ResponseWriter, r *http.Request) (runnerapi.RunR
 	}
 	if len(req.SourceCode) == 0 || len(req.SourceCode) > h.maxSourceBytes {
 		http.Error(w, "source_code missing or too large", http.StatusBadRequest)
+		return runnerapi.RunRequest{}, false
+	}
+	if h.maxStdinBytes > 0 && len(req.Stdin) > h.maxStdinBytes {
+		http.Error(w, "stdin too large", http.StatusBadRequest)
 		return runnerapi.RunRequest{}, false
 	}
 	return req, true

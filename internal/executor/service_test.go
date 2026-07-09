@@ -51,6 +51,34 @@ func TestService_ClampsLimitsToCeiling(t *testing.T) {
 	}
 }
 
+// TestService_ClampsCompileTimeout pins G1.2: compile_timeout_ms is now honoured
+// but clamped in the service layer — a request may lower the compile bound but
+// never raise it past the ceiling, and zero falls back to the default.
+func TestService_ClampsCompileTimeout(t *testing.T) {
+	stub := &stubRuntime{lang: "c"}
+	limits := Limits{
+		DefaultTimeout: 3000, MaxTimeoutMs: 10000, DefaultMemory: 128, MaxMemoryMB: 512,
+		DefaultCompileTimeout: 10000, MaxCompileTimeoutMs: 20000,
+	}
+	svc := NewService(limits, stub)
+
+	cases := []struct{ in, want int }{
+		{0, 10000},     // omitted → default
+		{5000, 5000},   // below ceiling → honoured (lowers the bound)
+		{99999, 20000}, // above ceiling → clamped down (never raises it)
+	}
+	for _, c := range cases {
+		if _, err := svc.Run(context.Background(), runnerapi.RunRequest{
+			Language: "c", SourceCode: "int main(){}", CompileTimeoutMs: c.in,
+		}); err != nil {
+			t.Fatalf("run(compile_timeout_ms=%d): %v", c.in, err)
+		}
+		if stub.got.CompileTimeoutMs != c.want {
+			t.Fatalf("compile_timeout_ms %d clamped to %d, want %d", c.in, stub.got.CompileTimeoutMs, c.want)
+		}
+	}
+}
+
 func TestService_AppliesDefaultsAndProvenance(t *testing.T) {
 	stub := &stubRuntime{lang: "python"}
 	svc := newService(stub)

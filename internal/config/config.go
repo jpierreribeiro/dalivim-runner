@@ -30,6 +30,7 @@ type Config struct {
 	DefaultMemoryMB  int
 	MaxMemoryMB      int
 	MaxSourceBytes   int
+	MaxStdinBytes    int // per-request stdin cap, independent of the source budget
 	MaxOutputBytes   int
 
 	// Compiled-language (C/C++) compile phase — separate budget from execution.
@@ -64,6 +65,7 @@ func Load() (Config, error) {
 		DefaultMemoryMB:   envInt("RUNNER_DEFAULT_MEMORY_MB", 128),
 		MaxMemoryMB:       envInt("RUNNER_MAX_MEMORY_MB", 512),
 		MaxSourceBytes:    envInt("RUNNER_MAX_SOURCE_BYTES", 200_000),
+		MaxStdinBytes:     envInt("RUNNER_MAX_STDIN_BYTES", 1_000_000),
 		MaxOutputBytes:    envInt("RUNNER_MAX_OUTPUT_BYTES", 64*1024),
 
 		CompileTimeoutMs:    envInt("RUNNER_COMPILE_TIMEOUT_MS", 10_000),

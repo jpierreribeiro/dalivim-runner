@@ -32,7 +32,7 @@ func testServer(t *testing.T, token string) http.Handler {
 		executor.Limits{DefaultTimeout: 3000, MaxTimeoutMs: 10000, DefaultMemory: 128, MaxMemoryMB: 512},
 		executor.NewPython(sb, 64*1024, 256, 64),
 	)
-	return New(svc, Config{Addr: ":0", Token: token, MaxSourceBytes: 200_000}).Handler()
+	return New(svc, Config{Addr: ":0", Token: token, MaxSourceBytes: 200_000, MaxStdinBytes: 1_000_000}).Handler()
 }
 
 func post(h http.Handler, path, token, body string) *httptest.ResponseRecorder {
@@ -113,6 +113,34 @@ func TestRunPythonCompat_Alias(t *testing.T) {
 	}
 	if res.Status != runnerapi.StatusSuccess || res.Stdout != "legacy\n" {
 		t.Fatalf("unexpected result: %+v", res)
+	}
+}
+
+// TestRun_StdinCap pins G1.3: stdin has its own size bound, independent of the
+// source budget. Over the cap → 400 (a bad request, not a run outcome); at/under
+// the cap the request is accepted (reaches the runtime).
+func TestRun_StdinCap(t *testing.T) {
+	sb, err := sandbox.Configure("off", "off", "off", "")
+	if err != nil {
+		t.Fatalf("configure sandbox: %v", err)
+	}
+	svc := executor.NewService(
+		executor.Limits{DefaultTimeout: 3000, MaxTimeoutMs: 10000, DefaultMemory: 128, MaxMemoryMB: 512},
+		executor.NewPython(sb, 64*1024, 256, 64),
+	)
+	// Small stdin cap so the test body stays tiny; source cap stays generous to
+	// prove the two limits are independent.
+	h := New(svc, Config{Addr: ":0", MaxSourceBytes: 200_000, MaxStdinBytes: 100}).Handler()
+
+	big, _ := json.Marshal(runnerapi.RunRequest{Language: "python", SourceCode: "print(1)", Stdin: strings.Repeat("x", 101)})
+	if rec := post(h, "/run", "", string(big)); rec.Code != http.StatusBadRequest {
+		t.Fatalf("oversized stdin must be 400, got %d", rec.Code)
+	}
+
+	requirePython(t)
+	ok, _ := json.Marshal(runnerapi.RunRequest{Language: "python", SourceCode: "print(1)", Stdin: strings.Repeat("x", 100), TimeoutMs: 3000, MemoryMB: 128})
+	if rec := post(h, "/run", "", string(ok)); rec.Code != http.StatusOK {
+		t.Fatalf("stdin at the cap must be accepted, got %d", rec.Code)
 	}
 }
 

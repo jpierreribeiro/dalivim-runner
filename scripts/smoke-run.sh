@@ -16,6 +16,8 @@
 # Env:
 #   RUNNER_URL             base URL of the runner   (default http://localhost:8090)
 #   RUNNER_SERVICE_TOKEN   sent as X-Runner-Token   (optional; dev boot needs none)
+#   SMOKE_STDIN            optional stdin fed to the submission (default: none),
+#                          so a run that reads input can be asserted end to end
 set -euo pipefail
 
 BASE="${RUNNER_URL:-http://localhost:8090}"
@@ -29,8 +31,8 @@ if [ -n "${RUNNER_SERVICE_TOKEN:-}" ]; then
   auth=(-H "X-Runner-Token: ${RUNNER_SERVICE_TOKEN}")
 fi
 
-body="$(jq -nc --arg lang "$lang" --arg src "$src" \
-  '{language: $lang, source_code: $src}')"
+body="$(jq -nc --arg lang "$lang" --arg src "$src" --arg stdin "${SMOKE_STDIN:-}" \
+  '{language: $lang, source_code: $src} + (if $stdin == "" then {} else {stdin: $stdin} end)')"
 
 resp="$(curl -fsS "${BASE}/run" \
   -H 'content-type: application/json' \

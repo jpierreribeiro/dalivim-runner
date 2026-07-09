@@ -80,6 +80,11 @@ func (r *interpretedRuntime) Run(ctx context.Context, req runnerapi.RunRequest) 
 
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(req.TimeoutMs)*time.Millisecond)
 	defer cancel()
+	// A second, cause-carrying cancel so an output flood can kill the child (via
+	// cmd.Cancel → SIGKILL of the process group) and be told apart from a deadline
+	// afterwards through context.Cause (G1.4).
+	ctx, cancelCause := context.WithCancelCause(ctx)
+	defer cancelCause(nil)
 
 	// Build the jail argv: interpreter + any per-run memory flags + the language's
 	// run args (flags and the source FILENAME — never the code, so no shell
@@ -112,8 +117,11 @@ func (r *interpretedRuntime) Run(ctx context.Context, req runnerapi.RunRequest) 
 	cmd.Stdin = strings.NewReader(req.Stdin)
 	cmd.Env = r.spec.env
 
-	stdout := &limitedBuffer{limit: r.outputLimit}
-	stderr := &limitedBuffer{limit: r.outputLimit}
+	// Both streams share one kill signal so a flood on either (stdout OR stderr)
+	// stops the run; the child is SIGKILLed as soon as one crosses the cap.
+	onFlood := func() { cancelCause(errOutputLimit) }
+	stdout := &limitedBuffer{limit: r.outputLimit, onLimit: onFlood}
+	stderr := &limitedBuffer{limit: r.outputLimit, onLimit: onFlood}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
@@ -133,7 +141,10 @@ func (r *interpretedRuntime) Run(ctx context.Context, req runnerapi.RunRequest) 
 
 	// Classification order: a clean exit is success regardless of anything else;
 	// otherwise the cgroup OOM event is the AUTHORITATIVE memory verdict (F-E/R6),
-	// and the stderr substring is only the fallback for the no-cgroup path.
+	// and the stderr substring is only the fallback for the no-cgroup path. An
+	// output flood is checked before runtime_error but after timeout/memory so a
+	// flood-then-deadline race resolves to whichever fired first (Cause reflects
+	// the earlier cancel).
 	switch {
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		res.Status = runnerapi.StatusTimeout
@@ -143,6 +154,8 @@ func (r *interpretedRuntime) Run(ctx context.Context, req runnerapi.RunRequest) 
 		res.Status = runnerapi.StatusMemoryExceeded
 	case r.spec.memErrSubstr != "" && strings.Contains(res.Stderr, r.spec.memErrSubstr):
 		res.Status = runnerapi.StatusMemoryExceeded
+	case errors.Is(context.Cause(ctx), errOutputLimit):
+		res.Status = runnerapi.StatusOutputLimitExceeded
 	default:
 		res.Status = runnerapi.StatusRuntimeError
 	}

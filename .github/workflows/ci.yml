@@ -154,6 +154,73 @@ jobs:
       - name: C run jail has no toolchain (execv gcc fails)
         run: ./scripts/smoke-run.sh c $'#include <unistd.h>\n#include <stdio.h>\nint main(void){ execl("/usr/bin/gcc","gcc",(char*)0); printf("no-gcc\\n"); return 0; }' $'no-gcc\n'
 
+      # ---- G1 executor-robustness acceptance on the shipped image ----
+
+      # G1.1: ordinary C using <math.h> now links libm (-lm rendered AFTER {src})
+      # instead of failing as a bogus compile_error — the exact program that
+      # regressed during F-D bring-up. `volatile` defeats gcc -O2 constant-folding
+      # so a real call to sqrt is emitted and the link against libm is exercised.
+      - name: G1.1 C <math.h> links libm => success / "4\n"
+        run: ./scripts/smoke-run.sh c $'#include <stdio.h>\n#include <math.h>\nint main(void){ volatile double x = 16.0; printf("%d\\n", (int)sqrt(x)); return 0; }' $'4\n'
+
+      # G1.2: compile_timeout_ms is now honoured (was silently ignored). A 1 ms
+      # compile budget cannot finish any real compile, so it deterministically
+      # short-circuits to compile_error [compile timed out]; before the fix the
+      # field was a no-op and the program would have compiled and succeeded.
+      - name: G1.2 compile_timeout_ms honoured => compile_error [compile timed out]
+        run: |
+          body="$(jq -nc '{language:"c",source_code:"int main(void){return 0;}",compile_timeout_ms:1}')"
+          resp="$(curl -fsS localhost:8090/run -H 'content-type: application/json' -d "$body")"
+          echo "$resp" | jq '{status, compile_output}'
+          echo "$resp" | jq -e '.status=="compile_error" and (.compile_output|contains("[compile timed out]"))' >/dev/null \
+            || { echo "::error::compile_timeout_ms not honoured"; exit 1; }
+
+      # G1.3: stdin has its own cap, independent of the source budget. ~40k ints
+      # (well over the old 64 KiB body slack) are summed to prove a large judge
+      # input flows end to end.
+      - name: G1.3 large stdin (>64 KiB) flows end to end => success
+        run: |
+          SMOKE_STDIN="$(yes 1 | head -n 40000)" \
+            ./scripts/smoke-run.sh c $'#include <stdio.h>\nint main(void){ long s=0,x; while(scanf("%ld",&x)==1) s+=x; printf("%ld\\n", s); return 0; }' $'40000\n'
+
+      # G1.3: oversized stdin (> RUNNER_MAX_STDIN_BYTES, default 1 MB) is rejected
+      # at the transport layer with 400 — a bad request, not a run outcome.
+      - name: G1.3 oversized stdin => 400
+        run: |
+          big="$(head -c 1100000 /dev/zero | tr '\0' 'x')"
+          code="$(jq -nc --arg s "$big" '{language:"python",source_code:"print(1)",stdin:$s}' \
+            | curl -sS -o /dev/null -w '%{http_code}' localhost:8090/run -H 'content-type: application/json' -d @-)"
+          echo "http_code=$code"
+          [ "$code" = "400" ] || { echo "::error::oversized stdin not rejected (got $code)"; exit 1; }
+
+      # G1.4: an unbounded print loop is KILLED the moment it crosses the output
+      # cap (SIGKILL of the process group in the REAL jail) and classified
+      # output_limit_exceeded, ending far short of the 8 s deadline — not
+      # truncated-and-left-running. Proven on both run paths: Python (interpreted)
+      # and C (the static-artifact run jail).
+      - name: G1.4 Python output flood => output_limit_exceeded, killed under deadline
+        run: |
+          src=$'while True:\n    print("x" * 1024)'
+          body="$(jq -nc --arg s "$src" '{language:"python",source_code:$s,timeout_ms:8000}')"
+          resp="$(curl -fsS localhost:8090/run -H 'content-type: application/json' -d "$body")"
+          echo "$resp" | jq '{status, duration_ms, stdout_len:(.stdout|length)}'
+          echo "$resp" | jq -e '.status=="output_limit_exceeded" and .duration_ms < 4000' >/dev/null \
+            || { echo "::error::Python flood not killed fast as output_limit_exceeded"; exit 1; }
+
+      - name: G1.4 C output flood => output_limit_exceeded, killed under deadline
+        run: |
+          src=$'#include <stdio.h>\nint main(void){ for(;;) putchar(\'x\'); return 0; }'
+          body="$(jq -nc --arg s "$src" '{language:"c",source_code:$s,timeout_ms:8000}')"
+          resp="$(curl -fsS localhost:8090/run -H 'content-type: application/json' -d "$body")"
+          echo "$resp" | jq '{status, duration_ms, stdout_len:(.stdout|length)}'
+          echo "$resp" | jq -e '.status=="output_limit_exceeded" and .duration_ms < 4000' >/dev/null \
+            || { echo "::error::C flood not killed fast as output_limit_exceeded"; exit 1; }
+
+      # Regression: output strictly under the cap is still a clean success with
+      # full output (the kill path must not fire early).
+      - name: G1.4 output under the cap => success, full output
+        run: ./scripts/smoke-run.sh python 'print("y" * 1000)' "$(printf 'y%.0s' $(seq 1000))"$'\n'
+
       # F-D follow-up: the static run jail can take a tight seccomp ALLOWLIST
       # (DEFAULT KILL) instead of the shared denylist. Prove on a dedicated
       # RUNNER_STATIC_SECCOMP=enforce container that (a) the kafel allowlist
@@ -253,7 +320,23 @@ jobs:
       - name: Install trivy
         # Official installer, pinned to /usr/local/bin. Avoids depending on a
         # marketplace-action tag existing; the vuln DB is pulled at scan time.
-        run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+        #
+        # The installer resolves trivy's latest tag via the GitHub API; unauthenticated
+        # that call is IP-rate-limited on shared runners and returns an empty tag
+        # ("unable to find ''"), failing the job for a reason unrelated to any CVE. Pass
+        # GITHUB_TOKEN so the lookup is authenticated, and retry with backoff so a
+        # transient blip doesn't red the gate.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for i in 1 2 3 4 5; do
+            if curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+                 | sh -s -- -b /usr/local/bin && trivy --version; then
+              exit 0
+            fi
+            echo "trivy install attempt $i failed; retrying in $((i*5))s..."; sleep $((i*5))
+          done
+          echo "::error::trivy install failed after 5 attempts"; exit 1
 
       - name: Scan for fixable HIGH/CRITICAL CVEs
         # --ignore-unfixed keeps the gate ACTIONABLE: it fails only when a fix is

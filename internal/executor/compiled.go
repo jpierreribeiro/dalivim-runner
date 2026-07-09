@@ -24,6 +24,7 @@ type compiledLangSpec struct {
 	name       string   // wire identifier, e.g. "c"
 	sourceFile string   // basename the source is written to, e.g. "main.c"
 	compile    []string // {out}/{src}-templated compiler argv; runs in the compile jail
+	link       []string // link libraries appended AFTER {src} (e.g. "-lm"); order matters
 	run        []string // {out}-templated run argv; runs in the stricter run jail
 	binNames   []string // compiler lookup candidates (for version provenance)
 }
@@ -33,7 +34,13 @@ var cSpec = compiledLangSpec{
 	sourceFile: "main.c",
 	// -static: no dynamic loader at runtime, so the run jail can be a minimal
 	// rootfs with no libc present — the artifact needs nothing but itself.
-	compile:  []string{"gcc", "-O2", "-static", "-o", "{out}", "{src}"},
+	compile: []string{"gcc", "-O2", "-static", "-o", "{out}", "{src}"},
+	// -lm links libm so ordinary C using <math.h> (sqrt/pow/sin…) resolves instead
+	// of failing as a bogus compile_error. It MUST come after {src}: gcc resolves
+	// libraries left-to-right, so a lib before the object that needs it is dropped.
+	// libm only — no networking/dynamic-loading libs (would break the static run
+	// jail and its seccomp allowlist).
+	link:     []string{"-lm"},
 	run:      []string{"{out}"},
 	binNames: []string{"gcc", "cc"},
 }
@@ -41,9 +48,10 @@ var cSpec = compiledLangSpec{
 var cppSpec = compiledLangSpec{
 	name:       "cpp",
 	sourceFile: "main.cpp",
-	compile:    []string{"g++", "-O2", "-static", "-std=c++20", "-o", "{out}", "{src}"},
-	run:        []string{"{out}"},
-	binNames:   []string{"g++"},
+	// No explicit link libs: the g++ driver folds -lm in and links libstdc++.
+	compile:  []string{"g++", "-O2", "-static", "-std=c++20", "-o", "{out}", "{src}"},
+	run:      []string{"{out}"},
+	binNames: []string{"g++"},
 }
 
 // artifactName is the compiled binary's basename inside the per-run workdir; it
@@ -56,31 +64,29 @@ const artifactName = "bin"
 // minimal-rootfs run jail that executes only that artifact. It implements the
 // same Runtime interface as interpreted languages, so dispatch never changes.
 type compiledRuntime struct {
-	spec              compiledLangSpec
-	sandbox           sandbox.Sandbox
-	compilerBin       string // absolute compiler path (nsjail execve's argv[0] directly)
-	version           string
-	outputLimit       int
-	maxProcesses      int
-	maxFileSizeMB     int
-	compileTimeoutMs  int                    // default per-run compile budget
-	maxCompileTimeout int                    // ceiling
-	compileMemoryMB   int                    // RLIMIT_AS/cgroup for the compile phase
-	maxArtifactBytes  int                    // reject artifacts larger than this (compile bombs)
-	runSeccomp        sandbox.SeccompProfile // seccomp profile for the run jail
+	spec             compiledLangSpec
+	sandbox          sandbox.Sandbox
+	compilerBin      string // absolute compiler path (nsjail execve's argv[0] directly)
+	version          string
+	outputLimit      int
+	maxProcesses     int
+	maxFileSizeMB    int
+	compileMemoryMB  int                    // RLIMIT_AS/cgroup for the compile phase
+	maxArtifactBytes int                    // reject artifacts larger than this (compile bombs)
+	runSeccomp       sandbox.SeccompProfile // seccomp profile for the run jail
 }
 
 // CompiledConfig carries the compile-phase knobs (execution knobs are shared with
-// interpreted runtimes and passed positionally).
+// interpreted runtimes and passed positionally). The compile timeout is NOT here:
+// like the run timeout it is clamped in the service layer and arrives on the
+// request (req.CompileTimeoutMs), so there is one place limits are enforced.
 type CompiledConfig struct {
-	OutputLimit       int
-	MaxProcesses      int
-	MaxFileSizeMB     int
-	CompileTimeoutMs  int
-	MaxCompileTimeout int
-	CompileMemoryMB   int
-	MaxArtifactBytes  int
-	RunSeccomp        sandbox.SeccompProfile
+	OutputLimit      int
+	MaxProcesses     int
+	MaxFileSizeMB    int
+	CompileMemoryMB  int
+	MaxArtifactBytes int
+	RunSeccomp       sandbox.SeccompProfile
 }
 
 // NewC / NewCpp build the C and C++ runtimes on the shared sandbox.
@@ -94,18 +100,16 @@ func NewCpp(sb sandbox.Sandbox, cfg CompiledConfig) *compiledRuntime {
 func newCompiled(spec compiledLangSpec, sb sandbox.Sandbox, cfg CompiledConfig) *compiledRuntime {
 	bin := resolveBin(spec.binNames)
 	return &compiledRuntime{
-		spec:              spec,
-		sandbox:           sb,
-		compilerBin:       bin,
-		version:           detectVersion(bin, languageSpec{versionArgs: []string{"-dumpfullversion"}, parseVersion: strings.TrimSpace}),
-		outputLimit:       cfg.OutputLimit,
-		maxProcesses:      cfg.MaxProcesses,
-		maxFileSizeMB:     cfg.MaxFileSizeMB,
-		compileTimeoutMs:  cfg.CompileTimeoutMs,
-		maxCompileTimeout: cfg.MaxCompileTimeout,
-		compileMemoryMB:   cfg.CompileMemoryMB,
-		maxArtifactBytes:  cfg.MaxArtifactBytes,
-		runSeccomp:        cfg.RunSeccomp,
+		spec:             spec,
+		sandbox:          sb,
+		compilerBin:      bin,
+		version:          detectVersion(bin, languageSpec{versionArgs: []string{"-dumpfullversion"}, parseVersion: strings.TrimSpace}),
+		outputLimit:      cfg.OutputLimit,
+		maxProcesses:     cfg.MaxProcesses,
+		maxFileSizeMB:    cfg.MaxFileSizeMB,
+		compileMemoryMB:  cfg.CompileMemoryMB,
+		maxArtifactBytes: cfg.MaxArtifactBytes,
+		runSeccomp:       cfg.RunSeccomp,
 	}
 }
 
@@ -126,7 +130,7 @@ func (r *compiledRuntime) Run(ctx context.Context, req runnerapi.RunRequest) run
 		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "could not write source"}
 	}
 
-	if res, ok := r.compile(ctx, workDir); !ok {
+	if res, ok := r.compile(ctx, req, workDir); !ok {
 		return res // compile_error or internal_error — nothing was executed
 	}
 	return r.execute(ctx, req, workDir)
@@ -134,14 +138,18 @@ func (r *compiledRuntime) Run(ctx context.Context, req runnerapi.RunRequest) run
 
 // compile runs the compile jail. It returns (result, false) to short-circuit on
 // compile_error/internal_error, or (zero, true) when a valid artifact exists.
-func (r *compiledRuntime) compile(ctx context.Context, workDir string) (runnerapi.RunResult, bool) {
-	timeout := clamp(0, r.compileTimeoutMs, r.maxCompileTimeout)
+func (r *compiledRuntime) compile(ctx context.Context, req runnerapi.RunRequest, workDir string) (runnerapi.RunResult, bool) {
+	// req.CompileTimeoutMs is already clamped to [default, ceiling] by the service
+	// (mirrors req.TimeoutMs for the run phase).
+	timeout := req.CompileTimeoutMs
 	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Millisecond)
 	defer cancel()
 
 	srcJail := sandbox.JailPath(r.spec.sourceFile)
 	outJail := sandbox.JailPath(artifactName)
-	argv := subst(r.spec.compile, srcJail, outJail)
+	// Link libraries go AFTER {src} on the line so left-to-right symbol resolution
+	// works regardless of which libs a future language adds (see spec.link).
+	argv := subst(append(append([]string{}, r.spec.compile...), r.spec.link...), srcJail, outJail)
 	argv[0] = r.compilerBin // absolute path; nsjail does no PATH search
 
 	cmd, acct := r.sandbox.Command(cctx, sandbox.Spec{
@@ -196,6 +204,10 @@ func (r *compiledRuntime) compile(ctx context.Context, workDir string) (runnerap
 func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest, workDir string) runnerapi.RunResult {
 	rctx, cancel := context.WithTimeout(ctx, time.Duration(req.TimeoutMs)*time.Millisecond)
 	defer cancel()
+	// Cause-carrying cancel so an output flood kills the artifact and is told apart
+	// from a deadline afterwards through context.Cause (G1.4).
+	rctx, cancelCause := context.WithCancelCause(rctx)
+	defer cancelCause(nil)
 
 	argv := subst(r.spec.run, "", sandbox.JailPath(artifactName))
 
@@ -222,8 +234,9 @@ func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest,
 	// allowlist tight. Harmless under the denylist too.
 	cmd.Env = []string{"GLIBC_TUNABLES=glibc.pthread.rseq=0"}
 
-	stdout := &limitedBuffer{limit: r.outputLimit}
-	stderr := &limitedBuffer{limit: r.outputLimit}
+	onFlood := func() { cancelCause(errOutputLimit) }
+	stdout := &limitedBuffer{limit: r.outputLimit, onLimit: onFlood}
+	stderr := &limitedBuffer{limit: r.outputLimit, onLimit: onFlood}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
@@ -249,6 +262,8 @@ func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest,
 		res.Status = runnerapi.StatusSuccess
 	case acct != nil && acct.OOMKilled():
 		res.Status = runnerapi.StatusMemoryExceeded
+	case errors.Is(context.Cause(rctx), errOutputLimit):
+		res.Status = runnerapi.StatusOutputLimitExceeded
 	default:
 		res.Status = runnerapi.StatusRuntimeError
 	}
