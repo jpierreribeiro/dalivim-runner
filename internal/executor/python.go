@@ -19,19 +19,22 @@ import (
 // the sandbox owns HOW it is contained.
 type PythonRuntime struct {
 	sandbox       sandbox.Sandbox
+	bin           string // absolute interpreter path
 	version       string
 	outputLimit   int
 	maxProcesses  int // per-run RLIMIT_NPROC in the jail (fork-bomb cap)
 	maxFileSizeMB int // per-run RLIMIT_FSIZE in the jail
 }
 
-// NewPython builds the Python runtime. It detects the interpreter version once at
-// construction so every result carries real provenance rather than a
-// hand-configured value. outputLimit caps captured stdout/stderr; maxProcesses
-// and maxFileSizeMB are the per-run jail caps (honoured by the nsjail backend).
+// NewPython builds the Python runtime. It resolves the interpreter's absolute
+// path and version once at construction: the nsjail backend execve's the argv
+// directly (no PATH search), so a bare "python3" would fail with ENOENT — the
+// absolute path works under both backends. outputLimit caps captured
+// stdout/stderr; maxProcesses and maxFileSizeMB are the per-run jail caps.
 func NewPython(sb sandbox.Sandbox, outputLimit, maxProcesses, maxFileSizeMB int) *PythonRuntime {
 	return &PythonRuntime{
 		sandbox:       sb,
+		bin:           detectPythonBin(),
 		version:       detectPythonVersion(),
 		outputLimit:   outputLimit,
 		maxProcesses:  maxProcesses,
@@ -41,6 +44,16 @@ func NewPython(sb sandbox.Sandbox, outputLimit, maxProcesses, maxFileSizeMB int)
 
 func (p *PythonRuntime) Language() string { return "python" }
 func (p *PythonRuntime) Version() string  { return p.version }
+
+// detectPythonBin resolves the interpreter's absolute path via PATH. The
+// read-only rootfs the jail bind-mounts is the host's, so this path is valid
+// inside the jail too. Falls back to the bare name (best effort) if not found.
+func detectPythonBin() string {
+	if p, err := exec.LookPath("python3"); err == nil {
+		return p
+	}
+	return "python3"
+}
 
 func detectPythonVersion() string {
 	out, err := exec.Command("python3", "--version").CombinedOutput()
@@ -79,7 +92,7 @@ func (p *PythonRuntime) Run(ctx context.Context, req runnerapi.RunRequest) runne
 	// resolved against the sandbox-set working directory; the source lives in that
 	// file, never on the command line, so there is no shell injection.
 	cmd := p.sandbox.Command(ctx, sandbox.Spec{
-		Argv:          []string{"python3", "-I", "main.py"},
+		Argv:          []string{p.bin, "-I", "main.py"},
 		WorkDir:       workDir,
 		TimeoutMs:     req.TimeoutMs,
 		MemoryMB:      req.MemoryMB,
