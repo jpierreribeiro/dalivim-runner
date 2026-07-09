@@ -418,9 +418,45 @@ docker rm -f runner && docker run -d --name runner --restart unless-stopped \
   --pids-limit=512 --ulimit nproc=512 --cpus=1 --memory=1g dalivim-runner
 ```
 
-Rotate the token by generating a new one, updating **both** the runner and the
-backend, and recreating both. `--restart unless-stopped` brings the runner back
-after a reboot (re-`export TOKEN` in new shells, or bake it into a `--env-file`).
+### Zero-downtime token rotation (G8.2)
+
+The runner accepts a **set** of valid tokens, so a rotation has an overlap window
+instead of a hard cutover. Set `RUNNER_SERVICE_TOKENS` to a comma- or
+space-separated list; a request authorizes if it matches **any** (each compared
+in constant time). `RUNNER_SERVICE_TOKEN` (singular) still works and is merged
+into the set. The metrics gate mirrors this with `RUNNER_METRICS_TOKENS`.
+
+```sh
+# 1. deploy with BOTH old and new valid                (no caller rejected)
+-e RUNNER_SERVICE_TOKENS="$OLD_TOKEN,$NEW_TOKEN"
+# 2. point the backend at $NEW_TOKEN, redeploy it
+# 3. drop the old one                                   (rotation complete)
+-e RUNNER_SERVICE_TOKENS="$NEW_TOKEN"
+```
+
+Up to 8 tokens are accepted; extras are ignored. Outside development an empty set
+still fails the boot closed.
+
+### Graceful drain sizing (G8.3)
+
+On `SIGTERM` (every deploy) the runner drains in-flight runs before exiting. The
+drain grace is derived to be **≥ the worst-case single request** — a full compile
+budget (`RUNNER_MAX_COMPILE_TIMEOUT_MS`) plus a full run budget
+(`RUNNER_MAX_TIMEOUT_MS`) plus slack — so a deploy never kills a long run that is
+still inside its own deadline. If you raise those ceilings the grace tracks them
+automatically; `RUNNER_SHUTDOWN_GRACE_MS` can raise it further but never below the
+invariant. The chosen grace is logged at shutdown (`"runner shutdown started"`).
+
+### Determinism (G7)
+
+Every language's run env pins `LANG=C.UTF-8`, `LC_ALL=C.UTF-8`, and `TZ=UTC`, so
+the same submission produces the same bytes across languages and deploys. This is
+set per-run inside the jail (a Dockerfile `ENV` alone does not reach the child —
+the jail uses an explicit minimal env). See [DETERMINISM.md](DETERMINISM.md) for
+what is and is not guaranteed; no operator action is needed.
+
+`--restart unless-stopped` brings the runner back after a reboot (re-`export
+TOKEN` in new shells, or bake it into a `--env-file`).
 
 ## Troubleshooting
 

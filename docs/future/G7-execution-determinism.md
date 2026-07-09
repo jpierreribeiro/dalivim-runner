@@ -1,5 +1,12 @@
 # G7 — Execution determinism (locale / timezone / env)
 
+> **Status — ✅ implemented (2026-07-09).** `LANG=C.UTF-8`, `LC_ALL=C.UTF-8`, and
+> `TZ=UTC` are now pinned in every language's run env (`determinismEnv` in
+> `internal/executor/languages.go`, applied to python/js and the C/C++/Go/Java
+> `runEnv`), belt-and-suspendered by a Dockerfile `ENV`, and documented in
+> [`docs/DETERMINISM.md`](../DETERMINISM.md). CI asserts identical epoch/locale
+> output across all six languages. The original planning notes are kept below.
+
 > **Status — cheap hygiene (reframed 2026-07-09).** This spec was written assuming
 > the backend grades by comparing stdout to expected; a backend sweep found it does
 > **not** (no judge today — see [G6](G6-batch-execution.md)). So the "silent WA"
@@ -102,8 +109,12 @@ determinism doc. The only trap is the per-spec requirement (Dockerfile alone is
 insufficient).
 
 ## Phase G7 acceptance
-- `LANG`/`LC_ALL`/`TZ` are explicit and identical across all six languages' run
-  environments.
-- The determinism guarantees are documented — what is pinned, and what is
+- ✅ `LANG`/`LC_ALL`/`TZ` are explicit and identical across all six languages' run
+  environments (`determinismEnv`, applied to every spec's `env`/`runEnv`).
+- ✅ The determinism guarantees are documented in
+  [`docs/DETERMINISM.md`](../DETERMINISM.md) — what is pinned, and what is
   explicitly *not* the runner's job.
-- The existing suite is green after the pin.
+- ✅ The existing suite is green after the pin; a CI step asserts a fixed epoch
+  formatted as local time (TZ=UTC) and the reported `LANG` are byte-identical
+  across python/js/c/cpp/go/java, and the escape corpus asserts `TZ=UTC` and env
+  minimality.

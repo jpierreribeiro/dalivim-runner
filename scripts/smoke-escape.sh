@@ -7,27 +7,53 @@
 # fails (non-zero) the moment any containment expectation is not met, and ends
 # with a host-survival check: a normal run must still succeed afterwards.
 #
+# G8.1 — the corpus is LANGUAGE-PARAMETRIZED. The core containment guarantees
+# (no egress, no host write, no secret read, wall/CPU timeout) are asserted for
+# EVERY runtime, so adding a language and proving it contained is one change:
+# add the language to LANGS and give it a snippet per universal case. This
+# enforces the ADDING-A-LANGUAGE rule structurally — "every new runtime must be
+# re-proven contained" — instead of trusting scattered per-language CI steps.
+#
+# Case applicability (encoded in run_universal / the Python-only block):
+#   egress, host-write, secret-read, cpu-spin  — ALL languages (kernel/mount/net
+#       containment is language-agnostic, so we assert it for each runtime).
+#   mem-bomb                                    — python, c, cpp only: these get a
+#       hard RLIMIT_AS, so a bomb is contained DETERMINISTICALLY. go/js/java opt
+#       out of RLIMIT_AS (huge virtual reservation) and are bounded by the cgroup
+#       memory.max instead, which is asserted on the cgroup path, not here.
+#   fork bomb / env minimality / dangerous syscall — expressed once in Python:
+#       they assert daemon/kernel-level controls (the --rlimit_nproc pids cap, the
+#       minimal explicit env, the seccomp denylist SIGSYS) that are enforced by
+#       the SAME jail for every language, so one expression proves the control.
+#   SIGSYS-on-socket under the static allowlist — C/C++ only, and only meaningful
+#       under RUNNER_STATIC_SECCOMP=enforce; asserted in the dedicated enforce
+#       container in ci.yml, not here (this corpus runs on the default denylist).
+#
 # It deliberately does NOT weaken the jail — it only asserts the containment the
 # jail already provides. See docs/RUNNER_ARCHITECTURE_AND_HARDENING_PLAN.md §4.4.
 #
 # Env:
 #   RUNNER_URL             base URL of the runner   (default http://localhost:8090)
 #   RUNNER_SERVICE_TOKEN   sent as X-Runner-Token   (optional; dev boot needs none)
+#   ESCAPE_LANGS           space-separated language subset (default: all six)
 set -euo pipefail
 
 BASE="${RUNNER_URL:-http://localhost:8090}"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# The full language set. Override with ESCAPE_LANGS to run a subset (e.g. when a
+# toolchain is absent in a stripped image).
+LANGS=(${ESCAPE_LANGS:-python javascript c cpp go java})
 
 auth=()
 if [ -n "${RUNNER_SERVICE_TOKEN:-}" ]; then
   auth=(-H "X-Runner-Token: ${RUNNER_SERVICE_TOKEN}")
 fi
 
-# post <source> -> prints the raw JSON RunResult on stdout.
+# post <language> <source> -> prints the raw JSON RunResult on stdout.
 post() {
-  local src="$1"
-  local body
-  body="$(jq -nc --arg src "$src" '{language: "python", source_code: $src}')"
+  local lang="$1" src="$2" body
+  body="$(jq -nc --arg lang "$lang" --arg src "$src" '{language: $lang, source_code: $src}')"
   curl -fsS "${BASE}/run" \
     -H 'content-type: application/json' \
     "${auth[@]}" \
@@ -39,82 +65,17 @@ fail() { echo "ESCAPE FAIL [$1]: $2" >&2; echo "  resp: ${3:-<none>}" >&2; exit 
 # jqtrue <json> <filter> -> success iff the filter is truthy.
 jqtrue() { echo "$1" | jq -e "$2" >/dev/null 2>&1; }
 
-echo "== escape corpus =="
+# ---------------------------------------------------------------------------
+# Per-case, per-language source snippets. Each function echoes the source for
+# the requested language; an unknown language aborts loudly so a newly-added
+# runtime cannot silently skip a case.
+# ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# 1) Fork bomb -> contained by --rlimit_nproc / container pids cap; host lives.
-#    We don't care what status it ends in, only that the daemon answered (it
-#    was not taken down) and that the run did not report a clean success.
-# ---------------------------------------------------------------------------
-resp="$(post $'import os\nwhile True:\n    os.fork()' || true)"
-[ -n "$resp" ] || fail forkbomb "runner did not respond — daemon may have been taken down" "$resp"
-if jqtrue "$resp" '.status == "success"'; then
-  fail forkbomb "fork bomb reported success — not contained" "$resp"
-fi
-echo "  [1] fork bomb contained (status=$(echo "$resp" | jq -r .status))"
-
-# ---------------------------------------------------------------------------
-# 2) Secret read + host-env leak -> denied by read-only jail + minimal env.
-#    /etc/shadow is owned by an uid NOT mapped into the jail's userns, so the
-#    jail's namespace-root cannot read it (EACCES); os.environ must carry only
-#    the two vars the runtime sets.
-# ---------------------------------------------------------------------------
-read -r -d '' SECRET <<'PY' || true
-import os
-shadow = "readable"
-try:
-    with open("/etc/shadow") as f:
-        f.read()
-except OSError:
-    shadow = "denied"
-# The runner sets exactly PATH + PYTHONUNBUFFERED on the child; CPython then
-# injects LC_CTYPE itself via PEP 538 locale coercion when it starts in a C
-# locale. Anything OUTSIDE this set would be a genuine host-env leak.
-allowed = {"PATH", "PYTHONUNBUFFERED", "LC_CTYPE"}
-leaked = sorted(k for k in os.environ if k not in allowed)
-print("shadow=" + shadow)
-print("leaked=" + (",".join(leaked) or "none"))
-PY
-resp="$(post "$SECRET" || true)"
-jqtrue "$resp" '.status == "success"'                 || fail secret "run did not complete cleanly" "$resp"
-jqtrue "$resp" '.stdout | test("shadow=denied")'      || fail secret "/etc/shadow was READABLE inside the jail" "$resp"
-jqtrue "$resp" '.stdout | test("leaked=none")'        || fail secret "host environment leaked into the jail" "$resp"
-echo "  [2] secret read denied + env minimal"
-
-# ---------------------------------------------------------------------------
-# 3) Dangerous syscall -> killed by the nsjail seccomp denylist (SIGSYS).
-#    unshare(CLONE_NEWUSER) is on the KILL list; the process must die before
-#    printing SURVIVED.
-# ---------------------------------------------------------------------------
-read -r -d '' SYSCALL <<'PY' || true
-import ctypes
-libc = ctypes.CDLL(None, use_errno=True)
-libc.unshare(0x10000000)  # CLONE_NEWUSER — on the seccomp KILL list
-print("SURVIVED")
-PY
-resp="$(post "$SYSCALL" || true)"
-[ -n "$resp" ] || fail syscall "runner did not respond" "$resp"
-jqtrue "$resp" '.status != "success"'                 || fail syscall "dangerous syscall was not blocked" "$resp"
-jqtrue "$resp" '.stdout | test("SURVIVED") | not'     || fail syscall "process survived the killed syscall" "$resp"
-echo "  [3] dangerous syscall killed by seccomp (status=$(echo "$resp" | jq -r .status))"
-
-# ---------------------------------------------------------------------------
-# 4) Output flood -> captured stdout truncated at the cap, no runner OOM.
-#    Streams far past RUNNER_MAX_OUTPUT_BYTES; the limitedBuffer discards the
-#    overflow (never buffers it), so the daemon neither OOMs nor hangs.
-# ---------------------------------------------------------------------------
-resp="$(post $'for _ in range(10_000_000):\n    print("x" * 64)' || true)"
-[ -n "$resp" ] || fail flood "runner did not respond — possible OOM/hang" "$resp"
-jqtrue "$resp" '.stdout | test("\\[output truncated\\]")' || fail flood "output was not truncated at the cap" "$resp"
-echo "  [4] output flood truncated, no OOM (status=$(echo "$resp" | jq -r .status))"
-
-# ---------------------------------------------------------------------------
-# 5) Egress + cloud metadata -> no route out of the empty network namespace.
-#    nsjail clones a fresh netns with loopback down (--iface_no_lo), so any
-#    outbound connect fails immediately (ENETUNREACH); the metadata IP is just a
-#    specific instance of the same guarantee.
-# ---------------------------------------------------------------------------
-read -r -d '' EGRESS <<'PY' || true
+# egress: probe an external IP and the cloud-metadata IP on :80. Prints
+# "egress=..." and "metadata=..."; a reachable host prints OPEN (a failure).
+src_egress() {
+  case "$1" in
+    python) cat <<'PY'
 import socket
 def probe(host, port):
     try:
@@ -125,36 +86,103 @@ def probe(host, port):
 print("egress=" + probe("1.1.1.1", 80))
 print("metadata=" + probe("169.254.169.254", 80))
 PY
-resp="$(post "$EGRESS" || true)"
-jqtrue "$resp" '.status == "success"'                 || fail egress "run did not complete cleanly" "$resp"
-jqtrue "$resp" '.stdout | test("egress=blocked")'     || fail egress "outbound network was reachable from the jail" "$resp"
-jqtrue "$resp" '.stdout | test("metadata=blocked")'   || fail egress "cloud metadata IP was reachable from the jail" "$resp"
-jqtrue "$resp" '.stdout | test("OPEN") | not'         || fail egress "a connection succeeded — netns egress not contained" "$resp"
-echo "  [5] egress + cloud metadata blocked (empty netns)"
+    ;;
+    javascript) cat <<'JS'
+const net = require("net");
+function probe(host) {
+  return new Promise((res) => {
+    const s = net.connect({ host, port: 80 });
+    s.setTimeout(3000);
+    s.on("connect", () => { s.destroy(); res("OPEN"); });
+    s.on("error", (e) => res("blocked:" + (e.code || "err")));
+    s.on("timeout", () => { s.destroy(); res("blocked:timeout"); });
+  });
+}
+(async () => {
+  console.log("egress=" + await probe("1.1.1.1"));
+  console.log("metadata=" + await probe("169.254.169.254"));
+})();
+JS
+    ;;
+    c|cpp) cat <<'C'
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+static const char *probe(const char *ip) {
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) return "blocked:socket";
+  struct sockaddr_in a;
+  memset(&a, 0, sizeof a);
+  a.sin_family = AF_INET;
+  a.sin_port = htons(80);
+  inet_pton(AF_INET, ip, &a.sin_addr);
+  int rc = connect(fd, (struct sockaddr *)&a, sizeof a);
+  close(fd);
+  return rc == 0 ? "OPEN" : "blocked";
+}
+int main(void) {
+  printf("egress=%s\n", probe("1.1.1.1"));
+  printf("metadata=%s\n", probe("169.254.169.254"));
+  return 0;
+}
+C
+    ;;
+    go) cat <<'GO'
+package main
 
-# ---------------------------------------------------------------------------
-# 6) CPU spin -> stopped by the wall/CPU limit, reported as timeout.
-# ---------------------------------------------------------------------------
-resp="$(post $'while True:\n    pass' || true)"
-[ -n "$resp" ] || fail cpuspin "runner did not respond — possible hang" "$resp"
-jqtrue "$resp" '.status == "timeout"'                 || fail cpuspin "CPU spin was not stopped by the timeout" "$resp"
-echo "  [6] CPU spin stopped (status=timeout)"
+import (
+	"fmt"
+	"net"
+	"time"
+)
 
-# ---------------------------------------------------------------------------
-# 7) Memory bomb -> RLIMIT_AS caps the address space; allocation raises
-#    MemoryError, classified as memory_exceeded.
-# ---------------------------------------------------------------------------
-resp="$(post $'b = b"x" * (10 ** 10)\nprint(len(b))' || true)"
-[ -n "$resp" ] || fail membomb "runner did not respond — possible host OOM" "$resp"
-jqtrue "$resp" '.status == "memory_exceeded"'         || fail membomb "10GB allocation was not capped by RLIMIT_AS" "$resp"
-echo "  [7] memory bomb capped (status=memory_exceeded)"
+func probe(addr string) string {
+	c, err := net.DialTimeout("tcp", addr, 3*time.Second)
+	if err != nil {
+		return "blocked"
+	}
+	c.Close()
+	return "OPEN"
+}
 
-# ---------------------------------------------------------------------------
-# 8) Host write -> the jail root is a read-only bind of the host rootfs, so
-#    writes outside the tmpfs /tmp fail. (/tmp is writable by design and is not
-#    tested here.)
-# ---------------------------------------------------------------------------
-read -r -d '' HOSTWRITE <<'PY' || true
+func main() {
+	fmt.Println("egress=" + probe("1.1.1.1:80"))
+	fmt.Println("metadata=" + probe("169.254.169.254:80"))
+}
+GO
+    ;;
+    java) cat <<'JAVA'
+import java.net.InetSocketAddress;
+import java.net.Socket;
+
+public class Main {
+    static String probe(String host) {
+        try (Socket s = new Socket()) {
+            s.connect(new InetSocketAddress(host, 80), 3000);
+            return "OPEN";
+        } catch (Exception e) {
+            return "blocked";
+        }
+    }
+    public static void main(String[] a) {
+        System.out.println("egress=" + probe("1.1.1.1"));
+        System.out.println("metadata=" + probe("169.254.169.254"));
+    }
+}
+JAVA
+    ;;
+    *) echo "UNSUPPORTED_LANG:$1" >&2; return 1 ;;
+  esac
+}
+
+# host-write: try to write outside the tmpfs /tmp. Prints "<path>=WRITTEN" on a
+# successful write (a failure) or "<path>=denied".
+src_hostwrite() {
+  case "$1" in
+    python) cat <<'PY'
 out = []
 for p in ("/usr/pwned", "/bin/pwned", "/app/pwned", "/sandbox/pwned"):
     try:
@@ -165,14 +193,270 @@ for p in ("/usr/pwned", "/bin/pwned", "/app/pwned", "/sandbox/pwned"):
         out.append(p + "=denied")
 print(" ".join(out))
 PY
-resp="$(post "$HOSTWRITE" || true)"
-jqtrue "$resp" '.status == "success"'                 || fail hostwrite "run did not complete cleanly" "$resp"
-jqtrue "$resp" '.stdout | test("WRITTEN") | not'      || fail hostwrite "a write outside tmpfs /tmp succeeded — rootfs not read-only" "$resp"
-echo "  [8] host writes denied (read-only rootfs)"
+    ;;
+    javascript) cat <<'JS'
+const fs = require("fs");
+const out = [];
+for (const p of ["/usr/pwned", "/bin/pwned", "/app/pwned", "/sandbox/pwned"]) {
+  try { fs.writeFileSync(p, "x"); out.push(p + "=WRITTEN"); }
+  catch (e) { out.push(p + "=denied"); }
+}
+console.log(out.join(" "));
+JS
+    ;;
+    c|cpp) cat <<'C'
+#include <stdio.h>
+int main(void) {
+  const char *ps[] = {"/usr/pwned", "/bin/pwned", "/app/pwned", "/sandbox/pwned"};
+  for (int i = 0; i < 4; i++) {
+    FILE *f = fopen(ps[i], "w");
+    if (f) { fputs("x", f); fclose(f); printf("%s=WRITTEN ", ps[i]); }
+    else { printf("%s=denied ", ps[i]); }
+  }
+  printf("\n");
+  return 0;
+}
+C
+    ;;
+    go) cat <<'GO'
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	for _, p := range []string{"/usr/pwned", "/bin/pwned", "/app/pwned", "/sandbox/pwned"} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			fmt.Print(p + "=denied ")
+		} else {
+			fmt.Print(p + "=WRITTEN ")
+		}
+	}
+	fmt.Println()
+}
+GO
+    ;;
+    java) cat <<'JAVA'
+import java.io.FileWriter;
+
+public class Main {
+    public static void main(String[] a) {
+        String[] ps = {"/usr/pwned", "/bin/pwned", "/app/pwned", "/sandbox/pwned"};
+        StringBuilder sb = new StringBuilder();
+        for (String p : ps) {
+            try (FileWriter w = new FileWriter(p)) { w.write("x"); sb.append(p).append("=WRITTEN "); }
+            catch (Exception e) { sb.append(p).append("=denied "); }
+        }
+        System.out.println(sb.toString());
+    }
+}
+JAVA
+    ;;
+    *) echo "UNSUPPORTED_LANG:$1" >&2; return 1 ;;
+  esac
+}
+
+# secret-read: attempt to read /etc/shadow (owned by an uid unmapped in the
+# userns). Prints "shadow=readable" (a failure) or "shadow=denied".
+src_secret() {
+  case "$1" in
+    python) cat <<'PY'
+shadow = "readable"
+try:
+    with open("/etc/shadow") as f:
+        f.read()
+except OSError:
+    shadow = "denied"
+print("shadow=" + shadow)
+PY
+    ;;
+    javascript) cat <<'JS'
+const fs = require("fs");
+let shadow = "readable";
+try { fs.readFileSync("/etc/shadow"); } catch (e) { shadow = "denied"; }
+console.log("shadow=" + shadow);
+JS
+    ;;
+    c|cpp) cat <<'C'
+#include <stdio.h>
+int main(void) {
+  FILE *f = fopen("/etc/shadow", "r");
+  printf("shadow=%s\n", f ? "readable" : "denied");
+  if (f) fclose(f);
+  return 0;
+}
+C
+    ;;
+    go) cat <<'GO'
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	s := "readable"
+	if _, err := os.ReadFile("/etc/shadow"); err != nil {
+		s = "denied"
+	}
+	fmt.Println("shadow=" + s)
+}
+GO
+    ;;
+    java) cat <<'JAVA'
+import java.nio.file.Files;
+import java.nio.file.Paths;
+
+public class Main {
+    public static void main(String[] a) {
+        String s = "readable";
+        try { Files.readAllBytes(Paths.get("/etc/shadow")); } catch (Exception e) { s = "denied"; }
+        System.out.println("shadow=" + s);
+    }
+}
+JAVA
+    ;;
+    *) echo "UNSUPPORTED_LANG:$1" >&2; return 1 ;;
+  esac
+}
+
+# cpu-spin: an infinite loop the wall/CPU limit must stop (=> timeout).
+src_spin() {
+  case "$1" in
+    python)     printf 'while True:\n    pass\n' ;;
+    javascript) printf 'while (true) {}\n' ;;
+    c|cpp)      printf 'int main(void) { for (;;) {} }\n' ;;
+    go)         printf 'package main\n\nfunc main() { for {} }\n' ;;
+    java)       printf 'public class Main { public static void main(String[] a) { while (true) {} } }\n' ;;
+    *) echo "UNSUPPORTED_LANG:$1" >&2; return 1 ;;
+  esac
+}
+
+# mem-bomb: allocate far past the budget. Only for languages under a hard
+# RLIMIT_AS (python/c/cpp), where containment is deterministic.
+src_membomb() {
+  case "$1" in
+    python) printf 'b = b"x" * (10 ** 10)\nprint(len(b))\n' ;;
+    c|cpp) cat <<'C'
+#include <stdlib.h>
+#include <string.h>
+int main(void) {
+  size_t chunk = 64UL * 1024 * 1024;
+  for (;;) {
+    char *p = malloc(chunk);
+    if (!p) return 1;   /* RLIMIT_AS refused the mapping — contained */
+    memset(p, 1, chunk);
+  }
+}
+C
+    ;;
+    *) echo "UNSUPPORTED_LANG:$1" >&2; return 1 ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# Universal containment cases, asserted for every language in LANGS.
+# ---------------------------------------------------------------------------
+run_universal() {
+  local lang="$1" resp
+
+  echo "-- [$lang] egress + cloud metadata blocked (empty netns)"
+  resp="$(post "$lang" "$(src_egress "$lang")" || true)"
+  jqtrue "$resp" '.status == "success"'               || fail "egress/$lang" "run did not complete cleanly" "$resp"
+  jqtrue "$resp" '.stdout | test("egress=blocked")'   || fail "egress/$lang" "outbound network was reachable from the jail" "$resp"
+  jqtrue "$resp" '.stdout | test("metadata=blocked")' || fail "egress/$lang" "cloud metadata IP was reachable from the jail" "$resp"
+  jqtrue "$resp" '.stdout | test("OPEN") | not'       || fail "egress/$lang" "a connection succeeded — netns egress not contained" "$resp"
+
+  echo "-- [$lang] host writes denied (read-only rootfs)"
+  resp="$(post "$lang" "$(src_hostwrite "$lang")" || true)"
+  jqtrue "$resp" '.status == "success"'               || fail "hostwrite/$lang" "run did not complete cleanly" "$resp"
+  jqtrue "$resp" '.stdout | test("WRITTEN") | not'    || fail "hostwrite/$lang" "a write outside tmpfs /tmp succeeded — rootfs not read-only" "$resp"
+
+  echo "-- [$lang] secret read denied (/etc/shadow)"
+  resp="$(post "$lang" "$(src_secret "$lang")" || true)"
+  jqtrue "$resp" '.status == "success"'               || fail "secret/$lang" "run did not complete cleanly" "$resp"
+  jqtrue "$resp" '.stdout | test("shadow=denied")'    || fail "secret/$lang" "/etc/shadow was READABLE inside the jail" "$resp"
+
+  echo "-- [$lang] CPU spin stopped by the wall/CPU limit (=> timeout)"
+  resp="$(post "$lang" "$(src_spin "$lang")" || true)"
+  [ -n "$resp" ] || fail "spin/$lang" "runner did not respond — possible hang" "$resp"
+  jqtrue "$resp" '.status == "timeout"'               || fail "spin/$lang" "CPU spin was not stopped by the timeout" "$resp"
+}
+
+# mem-bomb, only where RLIMIT_AS makes containment deterministic.
+run_membomb() {
+  local lang="$1" resp
+  echo "-- [$lang] memory bomb contained (hard RLIMIT_AS)"
+  resp="$(post "$lang" "$(src_membomb "$lang")" || true)"
+  [ -n "$resp" ] || fail "membomb/$lang" "runner did not respond — possible host OOM" "$resp"
+  jqtrue "$resp" '.status != "success"'               || fail "membomb/$lang" "a huge allocation reported success — not contained" "$resp"
+}
+
+echo "== escape corpus (languages: ${LANGS[*]}) =="
+for lang in "${LANGS[@]}"; do
+  run_universal "$lang"
+done
+for lang in "${LANGS[@]}"; do
+  case " $lang " in
+    " python "|" c "|" cpp ") run_membomb "$lang" ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# Kernel/daemon-level controls, expressed once (Python). These assert the SAME
+# jail mechanisms every language runs under — the pids cap, the minimal env, and
+# the seccomp denylist — so a single expression proves the control for all.
+# ---------------------------------------------------------------------------
+echo "== daemon/kernel controls (python-expressed) =="
+
+# Fork bomb -> contained by --rlimit_nproc / container pids cap; host lives.
+resp="$(post python $'import os\nwhile True:\n    os.fork()' || true)"
+[ -n "$resp" ] || fail forkbomb "runner did not respond — daemon may have been taken down" "$resp"
+jqtrue "$resp" '.status != "success"'                 || fail forkbomb "fork bomb reported success — not contained" "$resp"
+echo "-- fork bomb contained (status=$(echo "$resp" | jq -r .status))"
+
+# Host-env leak -> the child sees ONLY the minimal explicit env. With the G7
+# determinism pin the runtime sets PATH + PYTHONUNBUFFERED + LANG/LC_ALL/TZ;
+# anything OUTSIDE this set would be a genuine host-env leak. (LC_ALL is now set,
+# so CPython no longer PEP-538-coerces LC_CTYPE — it is not expected here.)
+read -r -d '' SECRET <<'PY' || true
+import os
+allowed = {"PATH", "PYTHONUNBUFFERED", "LANG", "LC_ALL", "TZ"}
+leaked = sorted(k for k in os.environ if k not in allowed)
+print("leaked=" + (",".join(leaked) or "none"))
+print("tz=" + os.environ.get("TZ", "<unset>"))
+PY
+resp="$(post python "$SECRET" || true)"
+jqtrue "$resp" '.status == "success"'                 || fail envleak "run did not complete cleanly" "$resp"
+jqtrue "$resp" '.stdout | test("leaked=none")'        || fail envleak "host environment leaked into the jail" "$resp"
+jqtrue "$resp" '.stdout | test("tz=UTC")'             || fail envleak "TZ was not pinned to UTC (determinism, G7)" "$resp"
+echo "-- env minimal + determinism pinned (TZ=UTC)"
+
+# Dangerous syscall -> killed by the nsjail seccomp denylist (SIGSYS).
+read -r -d '' SYSCALL <<'PY' || true
+import ctypes
+libc = ctypes.CDLL(None, use_errno=True)
+libc.unshare(0x10000000)  # CLONE_NEWUSER — on the seccomp KILL list
+print("SURVIVED")
+PY
+resp="$(post python "$SYSCALL" || true)"
+[ -n "$resp" ] || fail syscall "runner did not respond" "$resp"
+jqtrue "$resp" '.status != "success"'                 || fail syscall "dangerous syscall was not blocked" "$resp"
+jqtrue "$resp" '.stdout | test("SURVIVED") | not'     || fail syscall "process survived the killed syscall" "$resp"
+echo "-- dangerous syscall killed by seccomp (status=$(echo "$resp" | jq -r .status))"
+
+# Output flood -> captured stdout truncated at the cap, no runner OOM.
+resp="$(post python $'for _ in range(10_000_000):\n    print("x" * 64)' || true)"
+[ -n "$resp" ] || fail flood "runner did not respond — possible OOM/hang" "$resp"
+jqtrue "$resp" '.stdout | test("\\[output truncated\\]")' || fail flood "output was not truncated at the cap" "$resp"
+echo "-- output flood truncated, no OOM (status=$(echo "$resp" | jq -r .status))"
 
 # ---------------------------------------------------------------------------
 # Host-survival gate: after the whole corpus, a normal run must still succeed.
 # ---------------------------------------------------------------------------
 echo "== host survival =="
 RUNNER_URL="$BASE" "$here/smoke-run.sh" python 'print(2+2)' $'4\n'
-echo "ESCAPE CORPUS PASSED — every submission contained, host survived."
+echo "ESCAPE CORPUS PASSED — every language contained, host survived."

@@ -6,6 +6,45 @@ import (
 	"testing"
 )
 
+// TestRequireTokens_RotationSet pins G8.2: every token in the set authorizes (so
+// old+new overlap during a rotation), an unknown token is rejected, and an empty
+// set is a dev-only pass-through.
+func TestRequireTokens_RotationSet(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	h := RequireTokens([]string{"old-secret", "new-secret"}, ok)
+
+	call := func(tok string) int {
+		req := httptest.NewRequest(http.MethodPost, "/run", nil)
+		if tok != "" {
+			req.Header.Set("X-Runner-Token", tok)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	if code := call("old-secret"); code != http.StatusOK {
+		t.Fatalf("the old token must still authorize during rotation, got %d", code)
+	}
+	if code := call("new-secret"); code != http.StatusOK {
+		t.Fatalf("the new token must authorize, got %d", code)
+	}
+	if code := call("wrong"); code != http.StatusUnauthorized {
+		t.Fatalf("an unknown token must be 401, got %d", code)
+	}
+	if code := call(""); code != http.StatusUnauthorized {
+		t.Fatalf("a missing token must be 401, got %d", code)
+	}
+
+	// Empty set: pass-through (dev only — config fails closed in prod).
+	passthrough := RequireTokens(nil, ok)
+	rec := httptest.NewRecorder()
+	passthrough.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/run", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("an empty token set must be a pass-through, got %d", rec.Code)
+	}
+}
+
 // TestLimitConcurrency_ShedsLoadWith503 verifies the limiter admits up to max
 // executions, sheds the overflow with 503 + Retry-After (rather than queueing),
 // and frees the slot once a run completes.

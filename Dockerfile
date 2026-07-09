@@ -67,6 +67,12 @@ COPY --from=nsjail-build /nsjail/nsjail /usr/local/bin/nsjail
 # runs the resulting static artifact and never sees it.
 COPY --from=build       /usr/local/go   /usr/local/go
 ENV PATH="/usr/local/go/bin:${PATH}"
+# Determinism pin (G7), belt-and-suspenders: the jail sets these explicitly in
+# every run env (an explicit minimal cmd.Env means this ENV does NOT reach the
+# child), so this line only pins the daemon itself and any image-level tooling.
+# C.UTF-8 is built into glibc — no locale package needed; the base image has no
+# /etc/localtime, so TZ=UTC turns the accidental UTC default into policy.
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC
 # Pre-warm a read-only Go build cache (G2.1) covering the common stdlib a judged
 # program imports. Each run gets a FRESH tmpfs GOCACHE, so without this every Go
 # compile would pay a ~14 s cold stdlib rebuild (over the compile budget). The Go
