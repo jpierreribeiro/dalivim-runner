@@ -34,20 +34,25 @@ residuals.
 
 | Phase | Theme | Value | Size | Breaks contract? |
 |---|---|---|---|---|
-| **[G6](G6-batch-execution.md)** | Batch execution (compile-once, run N stdins) | 🔴 high | medium | no (additive `stdins[]`) |
-| **[G7](G7-execution-determinism.md)** | Execution determinism (locale / TZ / env) | 🟠 high | **XS/S** | no |
+| **[G6](G6-batch-execution.md)** | Batch execution (compile-once, run N stdins) | ⚪ gated¹ | medium | no (additive `stdins[]`) |
+| **[G7](G7-execution-determinism.md)** | Execution determinism (locale / TZ / env) | 🟢 hygiene¹ | **XS/S** | no |
 | **[G8](G8-ops-containment-maintenance.md)** | Ops & containment maintenance | 🟢 medium | small | no |
 
 | Guide | | | | |
 |---|---|---|---|---|
 | **[Adding a language](ADDING-A-LANGUAGE.md)** | Extension guide (the 3 runtime shapes) | — | — | — |
 
-Recommended order for Wave 2: **G7 → G6 → G8**. G7 is the cheapest and fixes a
-silent *correctness* bug (unpinned locale/TZ corrupting the backend's output
-comparison); G6 is the biggest value (collapses a submission from `N·(compile+run)`
-to `compile + N·run`); G8's three residuals are small and done opportunistically —
-G8.1 (language-parametrized escape corpus) should ride alongside every new
-language.
+¹ **Grounded correction (2026-07-09).** A backend sweep found the platform has
+**no judge today** — no expected-output/test-case model, no output comparison, one
+run per submission. That **demand-gates G6** (batch `stdins[]` has no caller until a
+test-case model exists) and **reframes G7** from "fixes silent WA" to cheap hygiene
+that becomes a prerequisite once judging lands.
+
+Recommended order for Wave 2: **G8 → G7 → G6**. G8's residuals (esp. token rotation
+and the language-parametrized escape corpus) are real now; G7 is cheap hygiene to
+bank ahead of any judge; G6 waits on the backend judge decision. The higher-leverage
+near-term work is now at the **system** level (seam consolidation, runner migration,
+abuse/quota hardening) — tracked outside this runner-only roadmap.
 
 ## How each spec is written
 

@@ -5,6 +5,15 @@ on the **executor** side of the line: the runner runs one program against **many
 inputs** and returns **many raw results** — it never compares them to expected
 output. The backend still judges.
 
+> **Status — demand-gated (grounded 2026-07-09).** A backend sweep found the
+> platform has **no judge today**: no expected-output/test-case model, no output
+> comparison, one run per submission
+> (`backend/internal/submissions/service.go:56-93`; tasks carry no expected
+> output; Judge0's WA/AC is discarded at `judge0/mapper.go:115`). **So `stdins[]`
+> has no caller yet.** This spec stays here, ready, but is gated on a backend
+> test-case/judge model existing first — promote it the moment judging lands (it's
+> exactly what makes a test-suite fan-out cheap).
+
 ---
 
 ## Motivation

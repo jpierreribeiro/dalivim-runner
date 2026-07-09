@@ -1,11 +1,16 @@
 # G7 — Execution determinism (locale / timezone / env)
 
-The backend grades by **comparing stdout to expected**. Anything non-deterministic
-in the runner's execution environment silently corrupts that comparison — the same
-code produces different output across runs or across languages, and a student gets
-a false WA (or a false AC). This phase closes the two live gaps — **locale** and
-**timezone** — both currently unpinned. It's the cheapest high-value item in the
-roadmap: no contract change, a handful of env vars, and a documented guarantee.
+> **Status — cheap hygiene (reframed 2026-07-09).** This spec was written assuming
+> the backend grades by comparing stdout to expected; a backend sweep found it does
+> **not** (no judge today — see [G6](G6-batch-execution.md)). So the "silent WA"
+> urgency doesn't apply *yet*. Determinism stays worth doing as **low-cost
+> hygiene**, and it becomes a **prerequisite** the day judging is added — pin it
+> before the first output comparison ships, not after.
+
+A deterministic execution environment matters wherever output is compared or
+diffed. The two live gaps are **locale** and **timezone**, both currently unpinned.
+It's the cheapest item in the roadmap: no contract change, a handful of env vars,
+and a documented guarantee.
 
 ---
 
