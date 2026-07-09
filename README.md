@@ -20,7 +20,8 @@ internal/
                        nsjail and netns backends + the RUNNER_SANDBOX dial/probe.
                        sandbox_linux.go = real; sandbox_other.go = dev stub
   executor/            language-agnostic core: dispatch, limit clamping, runtimes
-                       python.go = the only wired runtime today
+                       languages.go = closed languageSpec registry (python, js);
+                       interpreted.go = one spec-driven runtime both share
   transport/httpapi/   HTTP server, routing, PSK middleware, handlers
 pkg/runnerapi/         public wire contract (importable by the gateway)
 ```
@@ -117,7 +118,14 @@ deploy with `RUNNER_SANDBOX=require` is how you prove it engaged.
   + CPU/wall limits.
 - **Filesystem:** throwaway temp dir per run; under nsjail it is mounted
   **read-only** at `/sandbox` with writes confined to a size-capped tmpfs `/tmp`;
-  `python3 -I`; restricted PATH/env; runs as a non-root uid.
+  the source is written to a file (never the command line); restricted PATH/env;
+  runs as a non-root uid. Interpreted runtimes are single-file: `python3 -I` and
+  `node --disable-proto=throw` (no npm / `node_modules`).
+- **Memory:** CPython runs under a hard `RLIMIT_AS` (a memory bomb → deterministic
+  `memory_exceeded`). Node cannot — V8 reserves a multi-GB virtual cage at startup
+  that a tight `RLIMIT_AS` refuses — so Node skips the address-space cap and bounds
+  its heap with `--max-old-space-size`, with the container/cgroup memory limit as
+  the RSS backstop (per-jail cgroup `memory.max` is future work, F-E/F-F).
 
 > Linux-only by design: the isolation guarantees depend on Linux namespaces and
 > rlimits. `sandbox_other.go` lets the service build/run on other OSes for local
@@ -143,11 +151,15 @@ deploy with `RUNNER_SANDBOX=require` is how you prove it engaged.
 ## Run locally
 
 ```sh
-RUNNER_ENV=development go run ./cmd/runner    # requires python3 on PATH
+RUNNER_ENV=development go run ./cmd/runner    # python3 / node on PATH to run those
 
 curl -s localhost:8090/run \
   -H 'content-type: application/json' \
   -d '{"language":"python","source_code":"print(2+2)"}'
+
+curl -s localhost:8090/run \
+  -H 'content-type: application/json' \
+  -d '{"language":"javascript","source_code":"console.log(2+2)"}'
 ```
 
 ## Test / CI

@@ -43,8 +43,13 @@ type Spec struct {
 	// deadline and passes that context to Command.
 	TimeoutMs int
 
-	// MemoryMB caps the child's address space (RLIMIT_AS). Already clamped.
-	MemoryMB int
+	// AddressSpaceMB caps the child's virtual address space (RLIMIT_AS), in MB.
+	// 0 leaves it UNSET on purpose: a runtime like V8/Node reserves a multi-GB
+	// virtual "cage" at startup that a tight RLIMIT_AS refuses ("Failed to reserve
+	// virtual memory for CodeRange"), so such runtimes pass 0 here and bound real
+	// memory another way — an interpreter heap flag plus the container/cgroup
+	// memory limit. CPython tolerates the hard cap, so Python passes its budget.
+	AddressSpaceMB int
 
 	// MaxProcesses is the per-run process cap for fork-bomb containment
 	// (RLIMIT_NPROC inside the jail). Honoured only by the nsjail backend against

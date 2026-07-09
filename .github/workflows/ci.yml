@@ -115,8 +115,18 @@ jobs:
             exit 1
           fi
 
-      - name: Real POST /run — print(2+2) => success / "4\n"
+      - name: Real POST /run (Python) — print(2+2) => success / "4\n"
         run: ./scripts/smoke-run.sh python 'print(2+2)' $'4\n'
+
+      - name: Real POST /run (JavaScript) — console.log(2+2) => success / "4\n"
+        run: ./scripts/smoke-run.sh javascript 'console.log(2+2)' $'4\n'
+
+      # F-C acceptance criterion: JS must INHERIT the jail, not merely run. A Node
+      # submission writing outside the tmpfs /tmp is denied by the SAME read-only
+      # rootfs that contains Python — proof the containment is language-agnostic
+      # (it lives in the sandbox seam, not the runtime).
+      - name: JS inherits the jail — host write denied (read-only rootfs)
+        run: ./scripts/smoke-run.sh javascript 'try{require("fs").writeFileSync("/usr/pwned","x");console.log("WRITTEN")}catch(e){console.log("denied")}' $'denied\n'
 
       - name: Escape corpus — every submission must be contained, host survives
         run: ./scripts/smoke-escape.sh

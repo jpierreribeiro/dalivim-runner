@@ -23,7 +23,7 @@ func requirePython(t *testing.T) {
 // newPython builds a Python runtime with network isolation OFF so the test does
 // not depend on the platform permitting unprivileged namespaces. The netns
 // guarantees are exercised in netns_test.go.
-func newPython(t *testing.T) *PythonRuntime {
+func newPython(t *testing.T) *interpretedRuntime {
 	t.Helper()
 	// netns backend (RUNNER_SANDBOX=off) with network isolation off, so the test
 	// depends on neither nsjail nor the platform permitting namespaces.
@@ -34,7 +34,7 @@ func newPython(t *testing.T) *PythonRuntime {
 	return NewPython(sb, 64*1024, 256, 64)
 }
 
-func run(t *testing.T, rt *PythonRuntime, req runnerapi.RunRequest) runnerapi.RunResult {
+func run(t *testing.T, rt *interpretedRuntime, req runnerapi.RunRequest) runnerapi.RunResult {
 	t.Helper()
 	return rt.Run(context.Background(), req)
 }

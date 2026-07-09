@@ -29,12 +29,12 @@ func hasArg(args []string, flag string) bool {
 
 func sampleSpec() Spec {
 	return Spec{
-		Argv:          []string{"python3", "-I", "main.py"},
-		WorkDir:       "/tmp/dalivim-run-abc",
-		TimeoutMs:     3000,
-		MemoryMB:      128,
-		MaxProcesses:  256,
-		MaxFileSizeMB: 64,
+		Argv:           []string{"python3", "-I", "main.py"},
+		WorkDir:        "/tmp/dalivim-run-abc",
+		TimeoutMs:      3000,
+		AddressSpaceMB: 128,
+		MaxProcesses:   256,
+		MaxFileSizeMB:  64,
 	}
 }
 
@@ -110,8 +110,8 @@ func TestNsjailArgs_ArgvIsAfterSeparator(t *testing.T) {
 	}
 }
 
-// TestNsjailArgs_OptionalLimitsOmitted confirms a zero nproc/fsize leaves the
-// flag off (nsjail default), rather than emitting a "0" cap.
+// TestNsjailArgs_OptionalLimitsOmitted confirms a zero nproc/fsize/address-space
+// leaves the flag off (nsjail default), rather than emitting a "0" cap.
 func TestNsjailArgs_OptionalLimitsOmitted(t *testing.T) {
 	spec := sampleSpec()
 	spec.MaxProcesses = 0
@@ -122,6 +122,18 @@ func TestNsjailArgs_OptionalLimitsOmitted(t *testing.T) {
 	}
 	if hasArg(args, "--rlimit_fsize") {
 		t.Fatal("MaxFileSizeMB=0 must omit --rlimit_fsize")
+	}
+}
+
+// TestNsjailArgs_ZeroAddressSpaceOmitsRlimitAS pins the Node path: a run that
+// cannot take a virtual-address cap (V8's multi-GB cage) passes AddressSpaceMB=0
+// and must get NO --rlimit_as flag, not "--rlimit_as 0".
+func TestNsjailArgs_ZeroAddressSpaceOmitsRlimitAS(t *testing.T) {
+	spec := sampleSpec()
+	spec.AddressSpaceMB = 0
+	args := nsjailArgs(1000, 1000, spec)
+	if hasArg(args, "--rlimit_as") {
+		t.Fatal("AddressSpaceMB=0 must omit --rlimit_as (V8/Node cannot start under a tight cap)")
 	}
 }
 

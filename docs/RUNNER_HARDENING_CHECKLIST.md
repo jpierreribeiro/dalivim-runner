@@ -22,7 +22,8 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked
 | **F-A** | Kill global `RLIMIT_NPROC`; add concurrency cap + 503 backpressure | [x] done (verified live) |
 | Refactor | Invert Sandbox: `SysProcAttr()` provider → `Command(Spec)` constructor | [x] done |
 | F-B | `nsjailSandbox`: seccomp, tmpfs-capped `/tmp`, `no_new_privs`, per-jail nproc | [x] done (validated in CI: image builds nsjail, `RUNNER_SANDBOX=require` boots `nsjail ENABLED`, escape corpus contained) |
-| F-C / F-D | Compiled-language support (compile phase, `signal`, polyglot runtimes) | [ ] todo |
+| F-C | Interpreted polyglot (Node): `languageSpec` registry + JS runtime on the shared jail | [x] done (unit green; JS smoke + jail-inheritance gated in CI) |
+| F-D | Compiled polyglot (C/C++): compile-jail + run-jail, `signal`, `compile_output` | [ ] todo |
 | F-E / F-F | cgroups accounting, deterministic `memory_exceeded` classification | [ ] todo |
 
 ---
@@ -138,11 +139,45 @@ First CI in the repo. `.github/workflows/ci.yml`:
 Signed-off: `claude/dalivim-runner-ci-smoke-3sscm8` — 2026-07-09
 (escape-corpus completion + backpressure gate: 2026-07-09).
 
-## F-C / F-D — compiled languages (forward-compat, not blocking)
+## F-C — interpreted polyglot (Node)
+
+Criterion (plan §5): **smoke JS green; JS inherits the jail.**
+
+- [x] `languageSpec` registry (`internal/executor/languages.go`) — the closed
+      extension point invariant §6/§7 calls for: `python` + `javascript` entries
+      describing source filename, jail argv, env, version parsing, and the memory
+      model. Adding an interpreted language is an entry here plus a constructor.
+- [x] Generic `interpretedRuntime` (`interpreted.go`) replaces the hardcoded
+      `PythonRuntime`: one spec-driven runtime both languages share, still routing
+      every run through `sandbox.Command(Spec)` — no per-language syscall code.
+      `NewPython`/`NewNode` register in the composition root.
+- [x] Node runtime: `node --disable-proto=throw main.js`, single-file (no npm /
+      node_modules), 0600 source written to a file (never the command line).
+- [x] **RLIMIT_AS ≠ Node** (target-reality bug, D-6): V8 reserves a multi-GB
+      virtual "cage" at startup, so a tight `RLIMIT_AS` (128–512MB) makes Node hang
+      or fatally fail ("Failed to reserve virtual memory for CodeRange") — proven
+      locally. Fix: `Spec.AddressSpaceMB=0` skips the address-space cap for Node
+      (both backends), and the V8 heap is bounded by `--max-old-space-size=<budget>`
+      instead; the container/cgroup memory limit is the RSS backstop (plan §2.3;
+      per-jail cgroup `memory.max` is the F-E upgrade). Python keeps the hard
+      `RLIMIT_AS` → deterministic `memory_exceeded`.
+- [x] Adapter no longer Python-only: the generic `POST /run` already dispatches by
+      `language` (`handlers.go`), so JS needed only a registered runtime.
+- [x] Dockerfile installs `nodejs` (bookworm v18, supports `--disable-proto=throw`).
+- [x] Unit tests (Node available → they RUN, else skip): success, stdin,
+      runtime_error, timeout, `--disable-proto=throw` throws, version, jail
+      inheritance (netns egress denied), per-language memory model, spec registry.
+- [~] **CI smoke JS green** — added to `runner-smoke` (`console.log(2+2)` ⇒
+      `success`/`"4\n"`) plus a jail-inheritance assertion (Node host-write to
+      `/usr` denied by the read-only rootfs). Runs on GitHub Actions (Docker); this
+      environment has no Docker, so the JS smoke is verified on the PR's CI run.
+
+## F-D — compiled languages (C/C++)
 
 - [ ] Wire `compile_timeout_ms` / `compile_output` contract fields (already reserved).
 - [ ] Add `signal` to `RunResult` for SIGKILL/SIGSEGV disambiguation.
-- [ ] Second runtime (C/C++) behind the `language` dispatch.
+- [ ] Second runtime (C/C++) behind the `language` dispatch: compile-jail +
+      run-jail (the compiler is untrusted too — D-4/§3.4).
 
 ## F-E / F-F — accounting & classification
 
