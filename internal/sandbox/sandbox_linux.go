@@ -169,8 +169,6 @@ func probeNetns() bool {
 // tmpfs /tmp, a seccomp denylist, no_new_privs, and per-jail nproc/fsize caps.
 type nsjailSandbox struct {
 	bin string
-	uid int
-	gid int
 }
 
 // NetworkIsolated is always true: nsjail clones a fresh, empty network namespace
@@ -183,7 +181,7 @@ func (s *nsjailSandbox) Backend() string       { return "nsjail" }
 // a timeout SIGKILLs nsjail and every descendant together. The caller's cmd.Env
 // flows to the child unchanged via --keep_env.
 func (s *nsjailSandbox) Command(ctx context.Context, spec Spec) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, s.bin, nsjailArgs(s.uid, s.gid, spec)...)
+	cmd := exec.CommandContext(ctx, s.bin, nsjailArgs(spec)...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = CancelCmd(cmd)
 	return cmd
@@ -198,7 +196,7 @@ func tryNsjail() (*nsjailSandbox, string, error) {
 	if err != nil {
 		return nil, "nsjail binary not found on PATH", err
 	}
-	s := &nsjailSandbox{bin: bin, uid: os.Getuid(), gid: os.Getgid()}
+	s := &nsjailSandbox{bin: bin}
 	if detail, ok := probeNsjail(s); !ok {
 		return nil, detail, errors.New(detail)
 	}

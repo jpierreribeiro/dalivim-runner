@@ -177,19 +177,37 @@ The service **fails closed**: without `RUNNER_SERVICE_TOKEN` (and outside
 not a crash — set the token. Use the **same** value on the gateway
 (`RUNNER_SERVICE_TOKEN`), which sends it as `X-Runner-Token`.
 
+Run this on a host you control (a root VPS), **not** a managed container PaaS:
+nsjail rootless needs unprivileged user namespaces, and a hardened PaaS
+(Kubernetes-based) typically blocks the `clone(CLONE_NEWUSER)` it relies on, so
+the jail can't engage there.
+
 ```sh
-# 1. Generate a strong shared secret (once; store it in your secret manager)
+# 1. Host: allow unprivileged user namespaces (once). Ubuntu 23.10+ restricts
+#    them via AppArmor by default; Debian uses a different knob.
+sudo tee /etc/sysctl.d/99-userns.conf >/dev/null <<'EOF'
+kernel.apparmor_restrict_unprivileged_userns=0
+user.max_user_namespaces=15000
+EOF
+# Debian: replace the first line with  kernel.unprivileged_userns_clone=1
+sudo sysctl --system
+
+# 2. Generate a strong shared secret (once; store it in your secret manager)
 openssl rand -hex 32
 
-# 2. Run fail-closed on the sandbox too, so a broken jail stops the boot instead
-#    of silently downgrading to netns.
-docker run -d --name dalivim-runner -p 8090:8090 \
+# 3. Run it. --security-opt seccomp=unconfined/apparmor=unconfined loosen the
+#    OUTER container just enough for nsjail to create the namespaces; the jail
+#    around student code keeps its own seccomp/rootfs/rlimits (see the note below).
+#    RUNNER_SANDBOX=require fails the boot closed if the jail can't engage.
+docker run -d --name dalivim-runner -p 127.0.0.1:8090:8090 \
   -e RUNNER_SERVICE_TOKEN=<the-generated-secret> \
   -e RUNNER_SANDBOX=require \
-  --pids-limit=512 --ulimit nproc=512 --cpus=1 --memory=512m \
+  -e RUNNER_NETWORK_ISOLATION=require \
+  --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+  --pids-limit=512 --ulimit nproc=512 --cpus=1 --memory=1g \
   dalivim-runner
 
-# 3. Confirm the jail actually engaged (this is the F-B acceptance criterion)
+# 4. Confirm the jail actually engaged (this is the F-B acceptance criterion)
 docker logs dalivim-runner 2>&1 | grep -E "nsjail (ENABLED|unavailable)|network isolation"
 ```
 
@@ -205,40 +223,34 @@ For local development only (no token gate, no containment guarantees):
 docker run --rm -e RUNNER_ENV=development -p 8090:8090 dalivim-runner
 ```
 
-### Troubleshooting: nsjail unavailable / `require` fails to boot
+> **Why the `--security-opt` flags?** Docker's default seccomp profile blocks
+> `clone` with the `CLONE_NEW*` namespace flags for containers without
+> `CAP_SYS_ADMIN`, and Ubuntu's default AppArmor profile restricts unprivileged
+> userns — either one stops nsjail from *building* the jail. Setting both to
+> `unconfined` loosens only the **outer supervisor** container (our trusted code);
+> the sandbox around student code still enforces its own seccomp denylist,
+> read-only rootfs, and rlimits. **Never** use `--privileged` — nsjail does not
+> need it and it would defeat the isolation.
 
-nsjail rootless needs **unprivileged user namespaces**, and inside Docker the
-default seccomp profile can block the `clone(CLONE_NEWUSER)` it relies on. If a
-`RUNNER_SANDBOX=require` boot fails (or `auto` logs a fallback to netns), check, on
-the VPS host:
+### Troubleshooting: `RUNNER_SANDBOX=require` fails to boot
+
+The boot probe runs `/bin/true` in a real jail; the log line after the colon is
+the exact nsjail error. Common ones seen on real targets:
+
+| nsjail error | Cause | Fix |
+|---|---|---|
+| `clone(...CLONE_NEWUSER...) Operation not permitted` | the container/host blocks unprivileged userns | add the two `--security-opt ... unconfined` flags; set the host sysctls in step 1; on a managed PaaS this usually can't be fixed — move to a root VPS |
+| `execve('/usr/bin/newgidmap'): No such file or directory` | (pre-fix) an explicit uid/gid mapping forced the setuid helpers | fixed: the runner no longer passes `--uid_mapping/--gid_mapping`, so nsjail self-maps without the helper |
+| `Could not compile policy: Undefined identifier '<x>'` | a seccomp syscall name absent from kafel's table | the denylist uses only names present in kafel's amd64 table |
+
+Prove userns works on the host outside Docker (should print `ok`):
 
 ```sh
-# 1. Kernel must allow unprivileged userns (1, or the knob may be absent on newer kernels)
-sysctl kernel.unprivileged_userns_clone 2>/dev/null; cat /proc/sys/user/max_user_namespaces
-
-# 2. Prove it outside Docker first — this should print "ok" with no error
 unshare --user --net --map-root-user /bin/true && echo ok
 ```
 
-If the host allows userns but the **container** doesn't, relax only the container's
-seccomp so nsjail can create the namespace — the *jailed run* still enforces its
-own seccomp/rootfs/rlimits inside:
-
-```sh
-docker run -d --name dalivim-runner -p 8090:8090 \
-  -e RUNNER_SERVICE_TOKEN=<secret> -e RUNNER_SANDBOX=require \
-  --security-opt seccomp=unconfined \
-  --pids-limit=512 --ulimit nproc=512 --cpus=1 --memory=512m \
-  dalivim-runner
-```
-
-> `--security-opt seccomp=unconfined` loosens the **outer** container so nsjail can
-> build the jail; it does **not** loosen the sandbox around student code. Never add
-> `--privileged` — nsjail does not need it, and it would defeat the isolation.
-> If the host itself forbids unprivileged userns (`max_user_namespaces=0` or a
-> hardened kernel), enable it (`sysctl -w kernel.unprivileged_userns_clone=1`,
-> `sysctl -w user.max_user_namespaces=15000`) or run on a host/VM that allows it —
-> nsjail cannot be made to work rootless without it.
+If that fails, the host itself forbids unprivileged userns — enable it (step 1)
+or use a host/VM that allows it; nsjail cannot run rootless without it.
 
 ## Gateway integration (the main API)
 

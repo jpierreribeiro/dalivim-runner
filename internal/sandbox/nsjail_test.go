@@ -42,7 +42,7 @@ func sampleSpec() Spec {
 // requires is present with the right value. This is the CI-observable contract
 // for a jail that cannot itself be exercised without the binary + userns.
 func TestNsjailArgs_AppliesEveryLayer(t *testing.T) {
-	args := nsjailArgs(1000, 1000, sampleSpec())
+	args := nsjailArgs(sampleSpec())
 
 	// Read-only rootfs, per-run tmpfs /tmp, source mounted read-only at /sandbox.
 	if argValue(args, "--bindmount_ro") != "/" { // first ro mount is the whole rootfs
@@ -75,13 +75,14 @@ func TestNsjailArgs_AppliesEveryLayer(t *testing.T) {
 		t.Fatalf("expected wall time_limit 3s, got %q", argValue(args, "--time_limit"))
 	}
 
-	// Seccomp denylist + uid/gid single-id mapping (rootless, newuidmap-free).
+	// Seccomp denylist present.
 	if !strings.Contains(argValue(args, "--seccomp_string"), "KILL") {
 		t.Fatal("expected a seccomp kafel policy with a KILL block")
 	}
-	if argValue(args, "--uid_mapping") != "0:1000:1" || argValue(args, "--gid_mapping") != "0:1000:1" {
-		t.Fatalf("expected single-id root mapping, got uid=%q gid=%q",
-			argValue(args, "--uid_mapping"), argValue(args, "--gid_mapping"))
+	// No explicit uid/gid mapping: that would force the setuid newuidmap/newgidmap
+	// helpers; nsjail's default identity self-map keeps it rootless-helper-free.
+	if hasArg(args, "--uid_mapping") || hasArg(args, "--gid_mapping") {
+		t.Fatalf("must NOT pass uid/gid mappings (forces newuidmap/newgidmap), args=%v", args)
 	}
 	if !hasArg(args, "--iface_no_lo") || !hasArg(args, "--disable_proc") || !hasArg(args, "--keep_env") {
 		t.Fatalf("expected --iface_no_lo, --disable_proc and --keep_env, args=%v", args)
@@ -91,7 +92,7 @@ func TestNsjailArgs_AppliesEveryLayer(t *testing.T) {
 // TestNsjailArgs_ArgvIsAfterSeparator ensures the student argv is placed after
 // the `--` guard so no token can be reinterpreted as an nsjail flag.
 func TestNsjailArgs_ArgvIsAfterSeparator(t *testing.T) {
-	args := nsjailArgs(1000, 1000, sampleSpec())
+	args := nsjailArgs(sampleSpec())
 	sep := -1
 	for i, a := range args {
 		if a == "--" {
@@ -114,7 +115,7 @@ func TestNsjailArgs_OptionalLimitsOmitted(t *testing.T) {
 	spec := sampleSpec()
 	spec.MaxProcesses = 0
 	spec.MaxFileSizeMB = 0
-	args := nsjailArgs(1000, 1000, spec)
+	args := nsjailArgs(spec)
 	if hasArg(args, "--rlimit_nproc") {
 		t.Fatal("MaxProcesses=0 must omit --rlimit_nproc")
 	}

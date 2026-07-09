@@ -42,11 +42,14 @@ const jailMount = "/sandbox"
 // without the nsjail binary or unprivileged user namespaces (neither of which
 // exists in CI — see the plan's "validation on the target is mandatory" note).
 //
-// uid/gid are the runner's real ids, mapped to root inside a fresh user
-// namespace so the interpreter can read its own script — the same single-id,
-// newuidmap-free mapping the F-03 netns path uses, which is what makes nsjail
-// work rootless on Railway.
-func nsjailArgs(uid, gid int, spec Spec) []string {
+// It deliberately does NOT pass --uid_mapping/--gid_mapping. An explicit mapping
+// makes nsjail shell out to the setuid newuidmap/newgidmap helpers (from the
+// uidmap package, absent in a minimal rootless image); without them nsjail's
+// default maps the process's own uid/gid identically into the namespace via a
+// direct /proc write and handles /proc/pid/setgroups itself — no helper, which
+// is what makes it work rootless in a plain container. Bonus: the student then
+// runs as a non-root uid *inside* the jail too, not uid 0.
+func nsjailArgs(spec Spec) []string {
 	args := []string{
 		"--mode", "o", // execve once, then exit — not a persistent daemon
 		"--quiet",
@@ -55,10 +58,6 @@ func nsjailArgs(uid, gid int, spec Spec) []string {
 		"--time_limit", strconv.Itoa(wallCapSeconds(spec.TimeoutMs)), // hard wall-clock belt
 		"--rlimit_as", strconv.Itoa(spec.MemoryMB), // RLIMIT_AS, MB
 		"--rlimit_cpu", strconv.Itoa(cpuCapSeconds(spec.TimeoutMs)), // RLIMIT_CPU, s
-		// Map real uid/gid -> root inside the user namespace (single id, size 1);
-		// no newuidmap/setuid needed, so it works in an unprivileged container.
-		"--uid_mapping", "0:" + strconv.Itoa(uid) + ":1",
-		"--gid_mapping", "0:" + strconv.Itoa(gid) + ":1",
 		// Whole host rootfs read-only (arch-agnostic: brings the interpreter and
 		// its libs) + a fresh, size-capped writable /tmp (bounds the F-11 host-OOM
 		// vector) + the source dir mounted read-only at a fixed path.
