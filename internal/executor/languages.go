@@ -63,6 +63,13 @@ type languageSpec struct {
 	// memoryArgs returns per-run interpreter flags derived from the memory budget
 	// (MB), inserted before runArgs. nil when the language needs none.
 	memoryArgs func(memoryMB int) []string
+
+	// multiFileRunArgs builds the interpreter argv tail (flags + entrypoint
+	// reference) for a MULTI-FILE run, given the entrypoint's absolute in-jail path
+	// (/sandbox/src/<entry>). It replaces runArgs when the request carries files[].
+	// The single-file path (runArgs) is left untouched so its behaviour is
+	// byte-for-byte unchanged; multi-file is a separate, additive shape.
+	multiFileRunArgs func(entryJailPath string) []string
 }
 
 // pythonSpec runs CPython in isolated mode. Behaviour-identical to the original
@@ -80,6 +87,13 @@ var pythonSpec = languageSpec{
 	memErrSubstr: "MemoryError",
 	// CPython runs fine under a hard RLIMIT_AS; keep the deterministic virtual cap.
 	capAddressSpace: true,
+	// Multi-file: a controlled runpy wrapper. `-I main.py` is isolated mode, which
+	// removes the SCRIPT'S directory from sys.path — so a sibling `import helper`
+	// would fail. Instead of relaxing isolation (which would re-open the user-site
+	// and env-var import surface `-I` closes), keep `-I`/`-B` and inject exactly one
+	// hardcoded in-jail path (/sandbox/src) with runpy. The inserted path is fixed
+	// here, never caller-controlled, so a submission cannot point imports elsewhere.
+	multiFileRunArgs: pythonRunpyArgs,
 }
 
 // javascriptSpec runs a single Node file. It inherits the exact same jail as
@@ -105,6 +119,28 @@ var javascriptSpec = languageSpec{
 	// instead; the container/cgroup memory limit is the RSS backstop.
 	capAddressSpace: false,
 	memoryArgs:      nodeHeapArgs,
+	// Multi-file: run the entrypoint by absolute in-jail path. `--` ends option
+	// parsing so a filename can never be read as a Node flag; sibling require()/import
+	// of the other materialized files resolves relative to the entrypoint on disk.
+	multiFileRunArgs: nodeRunArgs,
+}
+
+// pythonRunpyArgs builds the CPython multi-file argv tail: isolated + no-bytecode
+// mode, then a runpy wrapper that runs the entrypoint as __main__ with exactly
+// the source root on sys.path. entryRel is the entrypoint relative to cwd
+// ("src/main.py"); the sys.path entry is the hardcoded source-root name, never
+// the caller's path, so imports are confined to the submitted tree.
+func pythonRunpyArgs(entryRel string) []string {
+	wrapper := "import runpy, sys; sys.path.insert(0, " + strconv.Quote(srcRootName) +
+		"); runpy.run_path(" + strconv.Quote(entryRel) + ", run_name=\"__main__\")"
+	return []string{"-I", "-B", "-c", wrapper}
+}
+
+// nodeRunArgs builds the Node multi-file argv tail: the __proto__ hardening flag,
+// `--` to stop flag parsing, then the entrypoint path (relative to cwd). sibling
+// require()/import resolves relative to the entrypoint on disk.
+func nodeRunArgs(entryRel string) []string {
+	return []string{"--disable-proto=throw", "--", entryRel}
 }
 
 // nodeHeapArgs bounds V8's old-space heap to the run's memory budget. This is
