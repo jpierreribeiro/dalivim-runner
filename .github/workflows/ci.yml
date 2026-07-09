@@ -320,7 +320,23 @@ jobs:
       - name: Install trivy
         # Official installer, pinned to /usr/local/bin. Avoids depending on a
         # marketplace-action tag existing; the vuln DB is pulled at scan time.
-        run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+        #
+        # The installer resolves trivy's latest tag via the GitHub API; unauthenticated
+        # that call is IP-rate-limited on shared runners and returns an empty tag
+        # ("unable to find ''"), failing the job for a reason unrelated to any CVE. Pass
+        # GITHUB_TOKEN so the lookup is authenticated, and retry with backoff so a
+        # transient blip doesn't red the gate.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for i in 1 2 3 4 5; do
+            if curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+                 | sh -s -- -b /usr/local/bin && trivy --version; then
+              exit 0
+            fi
+            echo "trivy install attempt $i failed; retrying in $((i*5))s..."; sleep $((i*5))
+          done
+          echo "::error::trivy install failed after 5 attempts"; exit 1
 
       - name: Scan for fixable HIGH/CRITICAL CVEs
         # --ignore-unfixed keeps the gate ACTIONABLE: it fails only when a fix is
