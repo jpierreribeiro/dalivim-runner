@@ -109,6 +109,68 @@ jqtrue "$resp" '.stdout | test("\\[output truncated\\]")' || fail flood "output 
 echo "  [4] output flood truncated, no OOM (status=$(echo "$resp" | jq -r .status))"
 
 # ---------------------------------------------------------------------------
+# 5) Egress + cloud metadata -> no route out of the empty network namespace.
+#    nsjail clones a fresh netns with loopback down (--iface_no_lo), so any
+#    outbound connect fails immediately (ENETUNREACH); the metadata IP is just a
+#    specific instance of the same guarantee.
+# ---------------------------------------------------------------------------
+read -r -d '' EGRESS <<'PY' || true
+import socket
+def probe(host, port):
+    try:
+        socket.create_connection((host, port), timeout=3).close()
+        return "OPEN"
+    except OSError as e:
+        return "blocked:" + e.__class__.__name__
+print("egress=" + probe("1.1.1.1", 80))
+print("metadata=" + probe("169.254.169.254", 80))
+PY
+resp="$(post "$EGRESS" || true)"
+jqtrue "$resp" '.status == "success"'                 || fail egress "run did not complete cleanly" "$resp"
+jqtrue "$resp" '.stdout | test("egress=blocked")'     || fail egress "outbound network was reachable from the jail" "$resp"
+jqtrue "$resp" '.stdout | test("metadata=blocked")'   || fail egress "cloud metadata IP was reachable from the jail" "$resp"
+jqtrue "$resp" '.stdout | test("OPEN") | not'         || fail egress "a connection succeeded — netns egress not contained" "$resp"
+echo "  [5] egress + cloud metadata blocked (empty netns)"
+
+# ---------------------------------------------------------------------------
+# 6) CPU spin -> stopped by the wall/CPU limit, reported as timeout.
+# ---------------------------------------------------------------------------
+resp="$(post $'while True:\n    pass' || true)"
+[ -n "$resp" ] || fail cpuspin "runner did not respond — possible hang" "$resp"
+jqtrue "$resp" '.status == "timeout"'                 || fail cpuspin "CPU spin was not stopped by the timeout" "$resp"
+echo "  [6] CPU spin stopped (status=timeout)"
+
+# ---------------------------------------------------------------------------
+# 7) Memory bomb -> RLIMIT_AS caps the address space; allocation raises
+#    MemoryError, classified as memory_exceeded.
+# ---------------------------------------------------------------------------
+resp="$(post $'b = b"x" * (10 ** 10)\nprint(len(b))' || true)"
+[ -n "$resp" ] || fail membomb "runner did not respond — possible host OOM" "$resp"
+jqtrue "$resp" '.status == "memory_exceeded"'         || fail membomb "10GB allocation was not capped by RLIMIT_AS" "$resp"
+echo "  [7] memory bomb capped (status=memory_exceeded)"
+
+# ---------------------------------------------------------------------------
+# 8) Host write -> the jail root is a read-only bind of the host rootfs, so
+#    writes outside the tmpfs /tmp fail. (/tmp is writable by design and is not
+#    tested here.)
+# ---------------------------------------------------------------------------
+read -r -d '' HOSTWRITE <<'PY' || true
+out = []
+for p in ("/usr/pwned", "/bin/pwned", "/app/pwned", "/sandbox/pwned"):
+    try:
+        with open(p, "w") as f:
+            f.write("x")
+        out.append(p + "=WRITTEN")
+    except OSError:
+        out.append(p + "=denied")
+print(" ".join(out))
+PY
+resp="$(post "$HOSTWRITE" || true)"
+jqtrue "$resp" '.status == "success"'                 || fail hostwrite "run did not complete cleanly" "$resp"
+jqtrue "$resp" '.stdout | test("WRITTEN") | not'      || fail hostwrite "a write outside tmpfs /tmp succeeded — rootfs not read-only" "$resp"
+echo "  [8] host writes denied (read-only rootfs)"
+
+# ---------------------------------------------------------------------------
 # Host-survival gate: after the whole corpus, a normal run must still succeed.
 # ---------------------------------------------------------------------------
 echo "== host survival =="
