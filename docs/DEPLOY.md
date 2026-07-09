@@ -140,7 +140,15 @@ delegate these, a root VPS can). It is **fail-safe**: without it the runner uses
 the rlimit/heap bound exactly as before, so this section is purely additive.
 
 **Prereqs** (confirm once): `stat -fc %T /sys/fs/cgroup` prints `cgroup2fs`, and
-`cat /sys/fs/cgroup/cgroup.subtree_control` lists `memory` and `pids`.
+`cat /sys/fs/cgroup/cgroup.subtree_control` lists `memory` and `pids`. And the
+image must be **built from a version that has R6** — rebuild first (this only
+retags `dalivim-runner`; the running `runner` container is untouched until you
+redeploy it):
+
+```sh
+cd ~/dalivim-runner && git fetch origin && git pull   # or: git checkout <branch>
+docker build -t dalivim-runner .                      # add --network=host if apt DNS fails
+```
 
 ```sh
 # 1) Delegate a writable subtree to the runner's IN-CONTAINER uid (1000).
