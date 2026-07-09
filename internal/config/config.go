@@ -16,8 +16,10 @@ type Config struct {
 	Addr          string // listen address, e.g. ":8090"
 	ServiceToken  string // shared secret; callers send it as X-Runner-Token
 	Development   bool   // RUNNER_ENV=development relaxes the token requirement
-	NetworkPolicy string // auto|require|off (empty => auto)
-	MaxProcesses  int    // reserved: per-run RLIMIT_NPROC for the per-jail sandbox (NOT applied process-wide)
+	SandboxPolicy string // RUNNER_SANDBOX: auto|require|off (empty => auto) — nsjail selection
+	NetworkPolicy string // RUNNER_NETWORK_ISOLATION: auto|require|off (empty => auto) — netns backend
+	MaxProcesses  int    // per-run RLIMIT_NPROC applied by the nsjail backend (fork-bomb cap)
+	MaxFileSizeMB int    // per-run RLIMIT_FSIZE applied by the nsjail backend
 
 	MaxConcurrentRuns int // simultaneous executions before the runner sheds load with 503
 
@@ -36,8 +38,10 @@ func Load() (Config, error) {
 		Addr:              ":" + port(),
 		ServiceToken:      os.Getenv("RUNNER_SERVICE_TOKEN"),
 		Development:       strings.EqualFold(strings.TrimSpace(os.Getenv("RUNNER_ENV")), "development"),
+		SandboxPolicy:     os.Getenv("RUNNER_SANDBOX"),
 		NetworkPolicy:     os.Getenv("RUNNER_NETWORK_ISOLATION"),
 		MaxProcesses:      envInt("RUNNER_MAX_PROCESSES", 256),
+		MaxFileSizeMB:     envInt("RUNNER_MAX_FILE_SIZE_MB", 64),
 		MaxConcurrentRuns: envInt("RUNNER_MAX_CONCURRENT_RUNS", 8),
 		DefaultTimeoutMs:  envInt("RUNNER_DEFAULT_TIMEOUT_MS", 3000),
 		MaxTimeoutMs:      envInt("RUNNER_MAX_TIMEOUT_MS", 10000),

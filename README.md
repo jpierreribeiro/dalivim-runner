@@ -16,7 +16,8 @@ standalone repo and restructured to clean architecture.
 cmd/runner/            composition root (config → sandbox → executor → server)
 internal/
   config/              env parsing + validation (fail-closed on missing token)
-  sandbox/             OS-level containment (netns, RLIMIT_NPROC, pgroup kill)
+  sandbox/             OS-level containment behind Sandbox.Command(Spec): the
+                       nsjail and netns backends + the RUNNER_SANDBOX dial/probe.
                        sandbox_linux.go = real; sandbox_other.go = dev stub
   executor/            language-agnostic core: dispatch, limit clamping, runtimes
                        python.go = the only wired runtime today
@@ -78,24 +79,45 @@ Unauthenticated liveness probe → `200 ok`.
 
 ## Security
 
+A Runtime only says *what* to run (argv, workdir, limits) via a `sandbox.Spec`;
+the **sandbox backend** decides *how* to contain it. Two Linux backends sit behind
+the `RUNNER_SANDBOX` dial, resolved once at boot with a live probe:
+
+| Backend | Selected when | Adds on top |
+|---|---|---|
+| **nsjail** | `RUNNER_SANDBOX=auto` (probe passes) or `require` | read-only rootfs, own mount/pid/ipc/user/net namespaces, size-capped tmpfs `/tmp`, **seccomp** denylist, `no_new_privs`, per-jail `RLIMIT_NPROC`/`FSIZE` |
+| **netns** (F-03 baseline) | `RUNNER_SANDBOX=off`, or `auto` when nsjail is unavailable | empty network namespace + per-run `RLIMIT_AS`/`RLIMIT_CPU` via the child shell |
+
+`auto` falls back to netns with a loud warning if the platform can't run nsjail;
+`require` **fails closed at boot** instead. The boot log (`nsjail ENABLED` vs
+`falling back to netns-only`) is the source of truth — nsjail can't be exercised
+in CI (it needs the binary + unprivileged user namespaces), so a verification
+deploy with `RUNNER_SANDBOX=require` is how you prove it engaged.
+
 - **Zero-trust gate:** every `/run*` request must send the pre-shared
   `X-Runner-Token`; compared in constant time. The service **refuses to boot**
   without `RUNNER_SERVICE_TOKEN` unless `RUNNER_ENV=development`.
-- **Network:** each run executes in an empty network namespace (unprivileged
-  user+net namespaces) → no egress, independent of the deploy network.
-- **CPU/wall:** wall-clock deadline + `ulimit -t`; the whole process group is
-  SIGKILLed on timeout.
-- **Memory:** best-effort address-space cap via `ulimit -v`.
+- **Network:** each run executes in an empty network namespace → no egress,
+  independent of the deploy network. nsjail also brings loopback down.
+- **Syscalls (nsjail only):** a seccomp denylist kills the syscalls a sandbox
+  escape needs — `ptrace`, `mount`/`unshare`/`setns`, `bpf`, kernel-module loads,
+  `keyctl`, `reboot`/`swapon`, `*_handle_at`, `perf_event_open`.
+- **CPU/wall:** wall-clock deadline (Go context + nsjail `--time_limit`) plus an
+  `RLIMIT_CPU` cap just above it; the whole process group is SIGKILLed on timeout.
+- **Memory:** best-effort address-space cap (`RLIMIT_AS`). Authoritative per-run
+  accounting via cgroups is future work (see the hardening plan's F-E/F-F).
 - **Overload:** a bounded number of executions run at once
   (`RUNNER_MAX_CONCURRENT_RUNS`); excess requests are shed immediately with `503`
   + `Retry-After` so the caller can fall back instead of the container being
   driven into swap/OOM.
-- **Fork bombs:** contained per-run by the sandbox, not a process-wide
-  `RLIMIT_NPROC`. A global cap is enforced per real-uid, so it throttles the
-  runner itself on a busy host (`errno=11`); per-run process caps land with the
-  per-jail sandbox (nsjail `--rlimit_nproc`).
-- **Filesystem:** throwaway temp dir per run; `python3 -I`; restricted PATH/env;
-  runs as a non-root uid.
+- **Fork bombs:** contained **per-run** by the nsjail backend (`--rlimit_nproc`
+  against a jail-private uid), never a process-wide `RLIMIT_NPROC` — a global cap
+  is enforced per real-uid and would throttle the runner itself on a busy host
+  (`errno=11`). On the netns fallback, containment is the bounded concurrency cap
+  + CPU/wall limits.
+- **Filesystem:** throwaway temp dir per run; under nsjail it is mounted
+  **read-only** at `/sandbox` with writes confined to a size-capped tmpfs `/tmp`;
+  `python3 -I`; restricted PATH/env; runs as a non-root uid.
 
 > Linux-only by design: the isolation guarantees depend on Linux namespaces and
 > rlimits. `sandbox_other.go` lets the service build/run on other OSes for local
@@ -107,9 +129,11 @@ Unauthenticated liveness probe → `200 ok`.
 |---|---|---|
 | `RUNNER_SERVICE_TOKEN` | — | Shared secret; callers send `X-Runner-Token`. **Required** unless `RUNNER_ENV=development`. |
 | `RUNNER_ENV` | (unset → strict) | `development` allows booting without a token. Leave unset in production. |
-| `RUNNER_NETWORK_ISOLATION` | `auto` | `auto`: empty netns when permitted, else warn + fall back. `require`: fail closed at boot. `off`: disable. |
+| `RUNNER_SANDBOX` | `auto` | Selects the containment backend. `auto`: use nsjail when its boot probe passes, else fall back to netns. `require`: nsjail only — **fail closed at boot** if unavailable. `off`: netns backend only. |
+| `RUNNER_NETWORK_ISOLATION` | `auto` | Governs the **netns** backend's egress guarantee (ignored when nsjail is active, which always isolates the network). `auto`: empty netns when permitted, else warn + fall back. `require`: fail closed at boot. `off`: disable. |
 | `RUNNER_MAX_CONCURRENT_RUNS` | `8` | Max simultaneous executions; excess requests get `503` + `Retry-After`. `0` disables the limit. |
-| `RUNNER_MAX_PROCESSES` | `256` | **Reserved** for the per-jail sandbox's per-run process cap; not applied process-wide (see Security → Fork bombs). |
+| `RUNNER_MAX_PROCESSES` | `256` | Per-run process cap (`RLIMIT_NPROC`) applied by the nsjail backend against a jail-private uid; never applied process-wide (see Security → Fork bombs). |
+| `RUNNER_MAX_FILE_SIZE_MB` | `64` | Per-run file-size cap (`RLIMIT_FSIZE`) applied by the nsjail backend. |
 | `RUNNER_PORT` / `PORT` | `8090` | Listen port (`PORT` is the platform-injected fallback). |
 | `RUNNER_DEFAULT_TIMEOUT_MS` / `RUNNER_MAX_TIMEOUT_MS` | `3000` / `10000` | Per-run wall-clock default + hard cap. |
 | `RUNNER_DEFAULT_MEMORY_MB` / `RUNNER_MAX_MEMORY_MB` | `128` / `512` | Per-run memory default + hard cap. |
@@ -142,7 +166,11 @@ docker build -t dalivim-runner .
 docker run --rm -e RUNNER_SERVICE_TOKEN=dev -p 8090:8090 dalivim-runner
 ```
 
-Multi-stage, static Go binary on `python:3.12-slim`, running as a non-root user.
+Multi-stage: a static Go binary + `nsjail` compiled from source, on
+`python:3.12-slim-bookworm`, running as a non-root user (nsjail runs rootless, so
+no elevated capabilities are required). Locally, without the nsjail binary the
+service boots on the netns backend; set `RUNNER_SANDBOX=require` in a verification
+deploy to confirm nsjail engaged.
 
 ## Gateway integration (the main API)
 

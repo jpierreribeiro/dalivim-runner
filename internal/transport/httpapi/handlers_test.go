@@ -23,13 +23,13 @@ func requirePython(t *testing.T) {
 // testServer builds a real server (isolation off) with the given token.
 func testServer(t *testing.T, token string) http.Handler {
 	t.Helper()
-	sb, err := sandbox.Configure("off")
+	sb, err := sandbox.Configure("off", "off")
 	if err != nil {
 		t.Fatalf("configure sandbox: %v", err)
 	}
 	svc := executor.NewService(
 		executor.Limits{DefaultTimeout: 3000, MaxTimeoutMs: 10000, DefaultMemory: 128, MaxMemoryMB: 512},
-		executor.NewPython(sb, 64*1024),
+		executor.NewPython(sb, 64*1024, 256, 64),
 	)
 	return New(svc, Config{Addr: ":0", Token: token, MaxSourceBytes: 200_000}).Handler()
 }

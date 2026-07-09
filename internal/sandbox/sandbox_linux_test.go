@@ -5,19 +5,19 @@ import (
 	"testing"
 )
 
-// TestSysProcAttr_SetpgidAlways ensures the process-group setup used for timeout
-// kills is present whether or not network isolation is enabled.
-func TestSysProcAttr_SetpgidAlways(t *testing.T) {
-	off := &Sandbox{netns: false}
-	if attr := off.SysProcAttr(); !attr.Setpgid || attr.Cloneflags != 0 {
+// TestNetnsSysProcAttr_SetpgidAlways ensures the process-group setup used for
+// timeout kills is present whether or not network isolation is enabled.
+func TestNetnsSysProcAttr_SetpgidAlways(t *testing.T) {
+	off := &netnsSandbox{netns: false}
+	if attr := off.sysProcAttr(); !attr.Setpgid || attr.Cloneflags != 0 {
 		t.Fatalf("isolation off: want Setpgid and no cloneflags, got %+v", attr)
 	}
 
 	if !probeNetns() {
 		return // cannot assert the enabled path on this platform
 	}
-	on := &Sandbox{netns: true}
-	attr := on.SysProcAttr()
+	on := &netnsSandbox{netns: true}
+	attr := on.sysProcAttr()
 	if !attr.Setpgid {
 		t.Fatal("isolation on: Setpgid must still be set so timeouts can kill the group")
 	}
@@ -26,22 +26,60 @@ func TestSysProcAttr_SetpgidAlways(t *testing.T) {
 	}
 }
 
-// TestConfigure_RejectsUnknownPolicy pins the closed policy vocabulary.
-func TestConfigure_RejectsUnknownPolicy(t *testing.T) {
-	if _, err := Configure("banana"); err == nil {
-		t.Fatal("expected an error for an unknown isolation policy")
+// TestConfigure_RejectsUnknownSandboxPolicy pins the closed RUNNER_SANDBOX vocabulary.
+func TestConfigure_RejectsUnknownSandboxPolicy(t *testing.T) {
+	if _, err := Configure("banana", "auto"); err == nil {
+		t.Fatal("expected an error for an unknown sandbox policy")
 	}
 }
 
-// TestConfigure_OffDisablesIsolation confirms the explicit opt-out.
-func TestConfigure_OffDisablesIsolation(t *testing.T) {
-	sb, err := Configure("off")
+// TestConfigure_OffUsesNetnsBackend confirms RUNNER_SANDBOX=off selects the
+// netns backend, and that a netns policy of off disables egress isolation.
+func TestConfigure_OffUsesNetnsBackend(t *testing.T) {
+	sb, err := Configure("off", "off")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if sb.NetworkIsolated() {
-		t.Fatal("policy=off must disable network isolation")
+	if sb.Backend() != "netns" {
+		t.Fatalf("want netns backend, got %q", sb.Backend())
 	}
+	if sb.NetworkIsolated() {
+		t.Fatal("net policy=off must disable network isolation")
+	}
+}
+
+// TestConfigure_RequireFailsClosedWithoutNsjail proves the fail-closed contract:
+// when nsjail cannot be used and the operator demanded it, boot must error rather
+// than silently downgrade. (nsjail is absent in CI, which is exactly this case.)
+func TestConfigure_RequireFailsClosedWithoutNsjail(t *testing.T) {
+	if _, err := probeNsjailAvailable(); err == nil {
+		t.Skip("nsjail is available here; cannot exercise the fail-closed path")
+	}
+	if _, err := Configure("require", "auto"); err == nil {
+		t.Fatal("RUNNER_SANDBOX=require must fail closed when nsjail is unavailable")
+	}
+}
+
+// TestConfigure_AutoFallsBackToNetns confirms that without nsjail, auto degrades
+// to the netns backend instead of failing.
+func TestConfigure_AutoFallsBackToNetns(t *testing.T) {
+	if _, err := probeNsjailAvailable(); err == nil {
+		t.Skip("nsjail is available here; auto would select it, not the fallback")
+	}
+	sb, err := Configure("auto", "off")
+	if err != nil {
+		t.Fatalf("auto must not fail when nsjail is absent: %v", err)
+	}
+	if sb.Backend() != "netns" {
+		t.Fatalf("want netns fallback, got %q", sb.Backend())
+	}
+}
+
+// probeNsjailAvailable reports whether a working nsjail exists here, so the
+// fail-closed/fallback tests can skip cleanly on a host that has one.
+func probeNsjailAvailable() (*nsjailSandbox, error) {
+	s, _, err := tryNsjail()
+	return s, err
 }
 
 func TestLimitProcesses_LowersSoftLimit(t *testing.T) {

@@ -25,11 +25,13 @@ func requirePython(t *testing.T) {
 // guarantees are exercised in netns_test.go.
 func newPython(t *testing.T) *PythonRuntime {
 	t.Helper()
-	sb, err := sandbox.Configure("off")
+	// netns backend (RUNNER_SANDBOX=off) with network isolation off, so the test
+	// depends on neither nsjail nor the platform permitting namespaces.
+	sb, err := sandbox.Configure("off", "off")
 	if err != nil {
 		t.Fatalf("configure sandbox: %v", err)
 	}
-	return NewPython(sb, 64*1024)
+	return NewPython(sb, 64*1024, 256, 64)
 }
 
 func run(t *testing.T, rt *PythonRuntime, req runnerapi.RunRequest) runnerapi.RunResult {
