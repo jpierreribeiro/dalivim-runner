@@ -158,7 +158,10 @@ var goSpec = compiledLangSpec{
 	// cp -r (not -a): the jail-private uid can't preserve root ownership, and -a
 	// would exit non-zero trying, breaking the && chain. -r copies content with the
 	// files owned by the jail uid and the dirs writable, which is what go build needs.
-	compile:  []string{"/bin/sh", "-c", "cp -r /opt/gocache /tmp/gocache && exec go build -o {out} {src}"},
+	// -trimpath MUST match the multi-file build (compiled_multifile.go) AND the
+	// Dockerfile warm cache: it is part of Go's build-cache key, so a mismatch is a
+	// total cache miss → cold stdlib rebuild → compile timeout.
+	compile:  []string{"/bin/sh", "-c", "cp -r /opt/gocache /tmp/gocache && exec go build -trimpath -o {out} {src}"},
 	run:      []string{"{out}"},
 	binNames: []string{"go"},
 	compileEnv: []string{
