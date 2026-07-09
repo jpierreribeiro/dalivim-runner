@@ -36,8 +36,10 @@ const seccompPolicy = `POLICY dalivim {
 USE dalivim DEFAULT ALLOW`
 
 // jailMount is the path the per-run WorkDir is bind-mounted to inside the jail;
-// Argv referencing files (main.py) is resolved against it via --cwd.
-const jailMount = "/sandbox"
+// Argv referencing files (main.py) is resolved against it via --cwd. It aliases
+// the exported JailMount so runtimes (which build argv with sandbox.JailPath) and
+// the arg builder agree on one path.
+const jailMount = JailMount
 
 // nsjailArgs builds the full nsjail argument vector (excluding the binary path)
 // for one run. It is pure so the exact containment flags are unit-testable
@@ -66,16 +68,31 @@ func nsjailArgs(uid, gid int, spec Spec) []string {
 		// made the boot probe fail closed on `newgidmap: No such file or directory`.
 		"--user", "0:" + strconv.Itoa(uid) + ":1",
 		"--group", "0:" + strconv.Itoa(gid) + ":1",
-		// Whole host rootfs read-only (arch-agnostic: brings the interpreter and
-		// its libs) + a fresh, size-capped writable /tmp (bounds the F-11 host-OOM
-		// vector) + the source dir mounted read-only at a fixed path.
-		"--bindmount_ro", "/",
-		"--tmpfsmount", "/tmp",
-		"--bindmount_ro", spec.WorkDir + ":" + jailMount,
+	}
+
+	// Rootfs. Interpreters and the compiler need the whole host rootfs read-only
+	// (their binary, libs, headers). A statically-linked artifact needs nothing but
+	// itself, so MinimalRootfs omits the host bind entirely — the jail root is then
+	// just a fresh tmpfs + /sandbox + /tmp, with no toolchain to re-invoke (D-4).
+	if !spec.MinimalRootfs {
+		args = append(args, "--bindmount_ro", "/") // arch-agnostic: brings interpreter + libs
+	}
+	// A fresh, size-capped writable /tmp bounds the F-11 host-OOM vector.
+	args = append(args, "--tmpfsmount", "/tmp")
+
+	// The per-run dir at a fixed path. Read-only by default (student code never
+	// writes the rootfs); the compile phase alone gets a read-write bind so the
+	// compiler can drop its artifact there for the host to pick up.
+	workMount := "--bindmount_ro"
+	if spec.Writable {
+		workMount = "--bindmount"
+	}
+	args = append(args,
+		workMount, spec.WorkDir+":"+jailMount,
 		"--cwd", jailMount,
 		"--keep_env", // pass exactly the minimal env the caller set on cmd.Env
 		"--seccomp_string", seccompPolicy,
-	}
+	)
 	// RLIMIT_AS, MB. 0 => leave it unset: V8/Node cannot start under a tight
 	// address-space cap (multi-GB virtual reservation), so those runs bound memory
 	// via an interpreter heap flag + the container/cgroup limit instead.

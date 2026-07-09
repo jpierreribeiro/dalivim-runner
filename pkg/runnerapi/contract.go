@@ -18,6 +18,11 @@ type RunRequest struct {
 	Stdin      string `json:"stdin,omitempty"`
 	TimeoutMs  int    `json:"timeout_ms,omitempty"`
 	MemoryMB   int    `json:"memory_mb,omitempty"`
+
+	// CompileTimeoutMs bounds the compile phase of a compiled language (C/C++),
+	// separate from TimeoutMs which bounds execution. Ignored for interpreted
+	// languages. Falls back to the service default when zero, clamped to a ceiling.
+	CompileTimeoutMs int `json:"compile_timeout_ms,omitempty"`
 }
 
 // RunResult is the response of POST /run.
@@ -30,6 +35,17 @@ type RunResult struct {
 	MemoryKB       int    `json:"memory_kb"`
 	RuntimeName    string `json:"runtime_name"`
 	RuntimeVersion string `json:"runtime_version"`
+
+	// CompileOutput carries the compiler's diagnostics (gcc/g++ stderr) for a
+	// compiled language; it is the body of a compile_error and is otherwise empty.
+	// Interpreted languages never set it.
+	CompileOutput string `json:"compile_output,omitempty"`
+
+	// Signal is the name of the signal that killed the process ("SIGSEGV",
+	// "SIGKILL", …) when it died by one, else empty — it disambiguates a crash
+	// (SIGSEGV) from a clean non-zero exit, and an OOM/seccomp kill (SIGKILL/SIGSYS)
+	// from a normal one. Most relevant for compiled languages.
+	Signal string `json:"signal,omitempty"`
 
 	// PythonVersion is a DEPRECATED alias of RuntimeVersion, populated with the
 	// same value so the current gateway adapter (which reads python_version) keeps
@@ -46,5 +62,6 @@ const (
 	StatusRuntimeError   = "runtime_error"
 	StatusTimeout        = "timeout"
 	StatusMemoryExceeded = "memory_exceeded"
+	StatusCompileError   = "compile_error" // compiled languages: the compile phase failed
 	StatusInternalError  = "internal_error"
 )

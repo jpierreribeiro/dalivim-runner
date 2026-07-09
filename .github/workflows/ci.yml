@@ -136,6 +136,24 @@ jobs:
       - name: JS inherits the jail — host write denied (read-only rootfs)
         run: ./scripts/smoke-run.sh javascript 'try{require("fs").writeFileSync("/usr/pwned","x");console.log("WRITTEN")}catch(e){console.log("denied")}' $'denied\n'
 
+      # F-D: compiled languages compile in one jail and run the STATIC artifact in
+      # a separate, minimal-rootfs jail. Prove the full two-phase path end to end.
+      - name: Real POST /run (C) — compile + run => success / "4\n"
+        run: ./scripts/smoke-run.sh c $'#include <stdio.h>\nint main(void){ printf("4\\n"); return 0; }' $'4\n'
+
+      - name: Real POST /run (C++) — compile + run => success / "4\n"
+        run: ./scripts/smoke-run.sh cpp $'#include <iostream>\nint main(){ std::cout << 2+2 << "\\n"; }' $'4\n'
+
+      # A compile failure must short-circuit to compile_error WITHOUT executing.
+      - name: C compile error => status compile_error (nothing executed)
+        run: ./scripts/smoke-run.sh c 'int main(void){ return }' '' compile_error
+
+      # The compiled run jail is minimal-rootfs: no toolchain is present, so a
+      # submission cannot re-invoke the compiler at runtime (D-4). execv of gcc
+      # must fail — the program reports the failure rather than compiling anything.
+      - name: C run jail has no toolchain (execv gcc fails)
+        run: ./scripts/smoke-run.sh c $'#include <unistd.h>\n#include <stdio.h>\nint main(void){ execl("/usr/bin/gcc","gcc",(char*)0); printf("no-gcc\\n"); return 0; }' $'no-gcc\n'
+
       - name: Escape corpus — every submission must be contained, host survives
         run: ./scripts/smoke-escape.sh
 

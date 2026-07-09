@@ -28,15 +28,19 @@ RUN git clone --depth 1 --branch "${NSJAIL_VERSION}" https://github.com/google/n
 
 # ---- runtime stage: interpreters + nsjail + non-root user ----
 # Bookworm base so the nsjail runtime libs (copied from the build stage above)
-# match ABI. Interpreted runtimes: python3 (in this base) + nodejs (F-C). Compiled
-# toolchains (gcc/g++) land with F-D.
+# match ABI. Interpreted runtimes: python3 (in this base) + nodejs (F-C).
+# Compiled runtimes: gcc/g++ + libc6-dev for STATIC linking (F-D).
 FROM python:3.12-slim-bookworm
-# nsjail's runtime shared libraries (protobuf + libnl-route) and the Node
-# interpreter for the JavaScript runtime. bookworm's `nodejs` (v18) supports
-# --disable-proto=throw; the jail execve's the resolved absolute path.
+# nsjail's runtime shared libraries (protobuf + libnl-route); the Node interpreter
+# for the JavaScript runtime (bookworm's v18 supports --disable-proto=throw); and
+# the C/C++ toolchain. libc6-dev provides libc.a + crt objects so `gcc -static`
+# links a self-contained binary — which lets the run jail drop the whole rootfs
+# (F-D). The toolchain lives in the image but is bound into the COMPILE jail only;
+# the minimal-rootfs run jail never sees it. The jail execve's resolved abs paths.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libprotobuf32 libnl-route-3-200 \
       nodejs \
+      gcc g++ libc6-dev \
  && rm -rf /var/lib/apt/lists/*
 # Non-root, no interactive login shell: the runner never needs a session, and
 # dropping privileges shrinks the blast radius of any escape from a run. nsjail

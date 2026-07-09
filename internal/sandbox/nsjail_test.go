@@ -137,6 +137,70 @@ func TestNsjailArgs_ZeroAddressSpaceOmitsRlimitAS(t *testing.T) {
 	}
 }
 
+// pairAt reports whether args contains flag immediately followed by value.
+func pairAt(args []string, flag, value string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
+// flagBefore returns the token immediately preceding the first occurrence of
+// value, or "" if value is absent / at index 0.
+func flagBefore(args []string, value string) string {
+	for i, a := range args {
+		if a == value && i > 0 {
+			return args[i-1]
+		}
+	}
+	return ""
+}
+
+// TestNsjailArgs_DefaultInterpretedMounts pins the interpreted/compile-jail shape:
+// full host rootfs read-only + the workdir bound READ-ONLY at /sandbox.
+func TestNsjailArgs_DefaultInterpretedMounts(t *testing.T) {
+	args := nsjailArgs(1000, 1000, sampleSpec()) // Writable=false, MinimalRootfs=false
+	if !pairAt(args, "--bindmount_ro", "/") {
+		t.Fatalf("expected the full host rootfs bound read-only, args=%v", args)
+	}
+	if got := flagBefore(args, "/tmp/dalivim-run-abc:/sandbox"); got != "--bindmount_ro" {
+		t.Fatalf("expected the workdir bound read-only, flag before it = %q", got)
+	}
+}
+
+// TestNsjailArgs_CompilePhaseWritable pins the compile jail: full rootfs (the
+// toolchain) but a READ-WRITE workdir so the compiler can drop its artifact.
+func TestNsjailArgs_CompilePhaseWritable(t *testing.T) {
+	spec := sampleSpec()
+	spec.Writable = true
+	args := nsjailArgs(1000, 1000, spec)
+	if !pairAt(args, "--bindmount_ro", "/") {
+		t.Fatal("compile jail must still bring the full rootfs (toolchain)")
+	}
+	if got := flagBefore(args, "/tmp/dalivim-run-abc:/sandbox"); got != "--bindmount" {
+		t.Fatalf("Writable spec must bind the workdir read-write, flag before it = %q", got)
+	}
+}
+
+// TestNsjailArgs_MinimalRootfs pins the run jail for a static artifact: NO host
+// rootfs bind (no toolchain/libs), only the read-only workdir + tmpfs /tmp.
+func TestNsjailArgs_MinimalRootfs(t *testing.T) {
+	spec := sampleSpec()
+	spec.MinimalRootfs = true
+	args := nsjailArgs(1000, 1000, spec)
+	if pairAt(args, "--bindmount_ro", "/") {
+		t.Fatal("MinimalRootfs must NOT bind the host rootfs (no toolchain in the run jail)")
+	}
+	if !pairAt(args, "--tmpfsmount", "/tmp") {
+		t.Fatal("MinimalRootfs still needs a tmpfs /tmp")
+	}
+	if got := flagBefore(args, "/tmp/dalivim-run-abc:/sandbox"); got != "--bindmount_ro" {
+		t.Fatalf("run jail must bind the artifact read-only, flag before it = %q", got)
+	}
+}
+
 func TestCapSeconds(t *testing.T) {
 	if got := cpuCapSeconds(3000); got != 4 {
 		t.Fatalf("cpuCapSeconds(3000) = %d, want 4", got)
