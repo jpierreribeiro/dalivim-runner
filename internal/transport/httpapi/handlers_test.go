@@ -29,10 +29,13 @@ func testServer(t *testing.T, token string) http.Handler {
 		t.Fatalf("configure sandbox: %v", err)
 	}
 	svc := executor.NewService(
-		executor.Limits{DefaultTimeout: 3000, MaxTimeoutMs: 10000, DefaultMemory: 128, MaxMemoryMB: 512},
+		executor.Limits{
+			DefaultTimeout: 3000, MaxTimeoutMs: 10000, DefaultMemory: 128, MaxMemoryMB: 512,
+			Files: executor.FileCaps{MaxFiles: 50, MaxFileBytes: 262_144, MaxFilesBytes: 1_048_576, MaxPathBytes: 180, MaxPathDepth: 8},
+		},
 		executor.NewPython(sb, 64*1024, 256, 64),
 	)
-	return New(svc, Config{Addr: ":0", Token: token, MaxSourceBytes: 200_000, MaxStdinBytes: 1_000_000}).Handler()
+	return New(svc, Config{Addr: ":0", Token: token, MaxSourceBytes: 200_000, MaxStdinBytes: 1_000_000, MaxFilesBytes: 1_048_576}).Handler()
 }
 
 func post(h http.Handler, path, token, body string) *httptest.ResponseRecorder {
@@ -307,6 +310,49 @@ func TestRequestID_Echo(t *testing.T) {
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/run", strings.NewReader(`{"language":"python","source_code":"x"}`)))
 	if rr.Header().Get("X-Request-ID") == "" {
 		t.Fatal("a request id must be minted when absent")
+	}
+}
+
+// TestRun_MultiFileSuccess drives a files[] submission end-to-end through the
+// transport: validation, materialization, and a sibling import, returning 200.
+func TestRun_MultiFileSuccess(t *testing.T) {
+	requirePython(t)
+	h := testServer(t, "")
+	body := `{"language":"python","files":[` +
+		`{"path":"main.py","content":"from helper import v\nprint(v)\n"},` +
+		`{"path":"helper.py","content":"v = 99\n"}],"timeout_ms":8000,"memory_mb":128}`
+	rec := post(h, "/run", "", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var res runnerapi.RunResult
+	if err := json.NewDecoder(rec.Body).Decode(&res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if res.Status != runnerapi.StatusSuccess || strings.TrimSpace(res.Stdout) != "99" {
+		t.Fatalf("multi-file run failed: %+v", res)
+	}
+}
+
+// TestRun_MultiFileRejections pins the 400s the transport must return for a
+// malformed multi-file submission (the executor's ValidationError → 400 mapping).
+func TestRun_MultiFileRejections(t *testing.T) {
+	h := testServer(t, "")
+	cases := map[string]string{
+		"both source and files": `{"language":"python","source_code":"x","files":[{"path":"main.py","content":"x"}]}`,
+		"neither":               `{"language":"python"}`,
+		"path traversal":        `{"language":"python","files":[{"path":"../evil.py","content":"x"}]}`,
+		"absolute path":         `{"language":"python","files":[{"path":"/etc/passwd","content":"x"}]}`,
+		"forbidden file":        `{"language":"python","files":[{"path":"setup.py","content":"x"}]}`,
+		"forbidden extension":   `{"language":"python","files":[{"path":"evil.sh","content":"x"}]}`,
+		"missing entrypoint":    `{"language":"python","entrypoint":"nope.py","files":[{"path":"main.py","content":"x"}]}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			if rec := post(h, "/run", "", body); rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d (%s)", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 

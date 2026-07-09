@@ -25,6 +25,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked
 | F-C | Interpreted polyglot (Node): `languageSpec` registry + JS runtime on the shared jail | [x] done (unit green; JS smoke + jail-inheritance gated in CI) |
 | F-D | Compiled polyglot (C/C++): compile-jail + run-jail, `signal`, `compile_output` | [x] core done (two jails, static, minimal-rootfs run jail; CI smoke). Strict seccomp allowlist = follow-up |
 | F-E / F-F | cgroups accounting, deterministic `memory_exceeded` classification | [x] R6 done (`RUNNER_CGROUP` v2 dial: per-run `memory.max`/`pids.max`, OOM-event classification; VPS-validated). F-F CPU accounting: todo |
+| **G3** | Multi-file submissions (`files[]`) + traversal-resistant materialization | [x] runner side done (contract, `os.Root`/`openat2` writer, C/C++/Java/Go/Python/JS multi-file, adversarial path/symlink/limit suite green, multi-file CI smoke). Backend must send `files[]` — see [G3_MULTIFILE.md](./G3_MULTIFILE.md) |
 
 ---
 

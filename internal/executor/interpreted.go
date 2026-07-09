@@ -61,6 +61,12 @@ func newInterpreted(spec languageSpec, sb sandbox.Sandbox, outputLimit, maxProce
 func (r *interpretedRuntime) Language() string { return r.spec.name }
 func (r *interpretedRuntime) Version() string  { return r.version }
 
+// LimitFloors exposes the spec's per-language limit floors (G6); zero values
+// mean the service's clamped limits are used as-is.
+func (r *interpretedRuntime) LimitFloors() Floors {
+	return Floors{TimeoutMs: r.spec.minTimeoutMs, MemoryMB: r.spec.minMemoryMB}
+}
+
 // Run writes the source to a throwaway directory and executes it under the
 // sandbox: its own process group, an empty network namespace (when available), a
 // wall-clock deadline, a CPU-seconds cap, and an address-space cap. Timeout and
@@ -72,10 +78,14 @@ func (r *interpretedRuntime) Run(ctx context.Context, req runnerapi.RunRequest) 
 	}
 	defer os.RemoveAll(workDir)
 
-	// 0600: only the uid that runs the interpreter needs to read the script.
-	scriptPath := filepath.Join(workDir, r.spec.sourceFile)
-	if err := os.WriteFile(scriptPath, []byte(req.SourceCode), 0o600); err != nil {
-		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "could not write source"}
+	// Materialize the program and build the interpreter argv. Single-file
+	// source_code takes the exact legacy path (one fixed-name file, spec.runArgs);
+	// a files[] request materializes the validated tree under /sandbox/src and uses
+	// the language's multi-file argv. The request was already validated by the
+	// service, so a failure here is our own infrastructure fault (internal_error).
+	runArgsTail, env, err := r.prepare(workDir, req)
+	if err != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: err.Error()}
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(req.TimeoutMs)*time.Millisecond)
@@ -86,8 +96,8 @@ func (r *interpretedRuntime) Run(ctx context.Context, req runnerapi.RunRequest) 
 	ctx, cancelCause := context.WithCancelCause(ctx)
 	defer cancelCause(nil)
 
-	// Build the jail argv: interpreter + any per-run memory flags + the language's
-	// run args (flags and the source FILENAME — never the code, so no shell
+	// Build the jail argv: interpreter + any per-run memory flags + the run-args
+	// tail (flags and the source FILENAME/entrypoint — never the code, so no shell
 	// injection). Memory is enforced one of two ways depending on the runtime:
 	// CPython gets a hard RLIMIT_AS (AddressSpaceMB); V8/Node can't take that cap
 	// (its virtual cage), so it passes 0 and bounds its heap via memoryArgs.
@@ -95,7 +105,7 @@ func (r *interpretedRuntime) Run(ctx context.Context, req runnerapi.RunRequest) 
 	if r.spec.memoryArgs != nil {
 		argv = append(argv, r.spec.memoryArgs(req.MemoryMB)...)
 	}
-	argv = append(argv, r.spec.runArgs...)
+	argv = append(argv, runArgsTail...)
 
 	addressSpaceMB := 0
 	if r.spec.capAddressSpace {
@@ -115,7 +125,7 @@ func (r *interpretedRuntime) Run(ctx context.Context, req runnerapi.RunRequest) 
 		defer acct.Close()
 	}
 	cmd.Stdin = strings.NewReader(req.Stdin)
-	cmd.Env = r.spec.env
+	cmd.Env = env
 
 	// Both streams share one kill signal so a flood on either (stdout OR stderr)
 	// stops the run; the child is SIGKILLed as soon as one crosses the cap.
@@ -160,6 +170,36 @@ func (r *interpretedRuntime) Run(ctx context.Context, req runnerapi.RunRequest) 
 		res.Status = runnerapi.StatusRuntimeError
 	}
 	return res
+}
+
+// prepare materializes the submission into workDir and returns the interpreter
+// run-args tail plus the child environment. The two shapes are kept separate on
+// purpose:
+//   - single-file (source_code): the ORIGINAL path — one fixed-name file at the
+//     workdir root (/sandbox/<sourceFile>), spec.runArgs, spec.env. Byte-for-byte
+//     unchanged from before G3.
+//   - multi-file (files[]): the validated tree under workDir/src (/sandbox/src),
+//     the language's multiFileRunArgs pointed at the entrypoint, and an env with
+//     HOME set to a nonexistent path so no user config (.npmrc, .pythonrc) is read.
+func (r *interpretedRuntime) prepare(workDir string, req runnerapi.RunRequest) (runArgs, env []string, err error) {
+	if len(req.Files) == 0 {
+		// 0600: only the uid that runs the interpreter needs to read the script.
+		scriptPath := filepath.Join(workDir, r.spec.sourceFile)
+		if werr := os.WriteFile(scriptPath, []byte(req.SourceCode), 0o600); werr != nil {
+			return nil, nil, errors.New("could not write source")
+		}
+		return r.spec.runArgs, r.spec.env, nil
+	}
+
+	if r.spec.multiFileRunArgs == nil {
+		return nil, nil, errors.New("language does not support multi-file submissions")
+	}
+	if _, merr := materializeSource(workDir, req); merr != nil {
+		return nil, nil, merr
+	}
+	runArgs = r.spec.multiFileRunArgs(srcRel(req.Entrypoint))
+	env = append(append([]string{}, r.spec.env...), "HOME=/nonexistent")
+	return runArgs, env, nil
 }
 
 // memoryKB prefers the cgroup's authoritative peak (memory.peak) when a delegated

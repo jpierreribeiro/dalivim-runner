@@ -109,8 +109,8 @@ Contenção *dura* por-run vem do `--rlimit_nproc` **dentro do jail** (F-B) + `p
 | `language` | string | ✅ | Identificador do catálogo (`python`). Ausente/desconhecido → **400 Bad Request**. |
 | `source_code` | string | ✅ | Vazio ou > `RUNNER_MAX_SOURCE_BYTES` → **400**. |
 | `stdin` | string | — | Entrada padrão (vazio = sem entrada). |
-| `timeout_ms` | int | — | `≤0` → default (`RUNNER_DEFAULT_TIMEOUT_MS`); clamped ao teto (`MaxTimeoutMs`). |
-| `memory_mb` | int | — | `≤0` → default; clamped a `MaxMemoryMB`. |
+| `timeout_ms` | int | — | `≤0` → default (`RUNNER_DEFAULT_TIMEOUT_MS`); clamped ao teto (`MaxTimeoutMs`). Linguagens podem declarar um piso (G6); o teto global sempre vence. |
+| `memory_mb` | int | — | `≤0` → default; clamped a `MaxMemoryMB`. Piso por linguagem (G6): Java eleva pedidos < 128 MB para 128 (overhead não-heap da JVM); nunca acima do teto. |
 
 **Forward-compatible (F-C/F-D):**
 - `compile_timeout_ms` (int, — ): `0` = interpretada (padrão); > 0 = compilada.

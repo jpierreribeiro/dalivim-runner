@@ -58,18 +58,12 @@ warm-pool bug is a cross-submission isolation bug — high severity).
 
 ---
 
-## Per-language resource tuning
+## ~~Per-language resource tuning~~ → promoted to [G6](G6-per-language-limits.md)
 
-**What**: per-language default/max memory and timeout (e.g. a higher memory floor
-and timeout for the JVM, a lower one for C).
-
-**Why deferred (partly)**: one global policy works for the native languages. It
-becomes real with Java (G2.2), whose startup + baseline heap don't fit a
-Python-sized default.
-
-**Promote when**: G2.2 lands — Java will likely force at least a per-language
-timeout/memory floor. At that point generalise `languageSpec`/`compiledLangSpec`
-to carry optional per-language limit overrides, clamped to the global ceilings.
+**Trigger fired**: G2.2 (Java) landed. The floor part is implemented —
+`minTimeoutMs`/`minMemoryMB` on the specs, raised in the service layer, never
+above the global ceilings; Java sets a 128 MB memory floor. Per-language
+*defaults/ceilings* remain deferred — see G6's scope note for the (new) trigger.
 
 ---
 
