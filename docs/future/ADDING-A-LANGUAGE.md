@@ -9,7 +9,7 @@ one once you know which of the three shapes the language is.
 | Shape | Definition | Examples | Run process | Seccomp | Memory bound |
 |---|---|---|---|---|---|
 | **A. Interpreted** | interpreter reads source directly | Python, JS, Ruby | the interpreter | denylist | RLIMIT_AS *or* a heap flag |
-| **B. Static-compiled** | build a **static** binary, run it | C, C++, Go, Rust | the artifact | denylist **or** tight allowlist | RLIMIT_AS + cgroup |
+| **B. Static-compiled** | build a **static** binary, run it | C, C++, Go, Rust | the artifact | denylist **or** tight allowlist | RLIMIT_AS + cgroup (**Go: cgroup only** — see below) |
 | **C. VM-compiled** | compile to bytecode, run on a VM | Java, C#, Kotlin | the VM (`java`, `dotnet`) | **denylist only** | VM heap flag + cgroup |
 
 The shape decides everything else. If unsure: does a single native executable come
@@ -44,7 +44,7 @@ out of compilation? → B. Does a VM run bytecode? → C. No compile step? → A
 
 ---
 
-## Shape B — static-compiled (reference: `c`, `cpp`; next: `go`, `rust`)
+## Shape B — static-compiled (reference: `c`, `cpp`, `go`; next: `rust`)
 
 1. **Image**: install the toolchain (compile stage or runtime stage). Ensure it
    can emit a **static** binary — this is the invariant that lets the run jail use
@@ -57,22 +57,38 @@ out of compilation? → B. Does a VM run bytecode? → C. No compile step? → A
    - `run`: `["{out}"]`.
    - compile-jail env if the toolchain needs a writable cache (`GOCACHE`,
      `CARGO_HOME` → point at `/tmp/...`; the compile jail is writable with
-     `TMPDIR=/tmp`).
+     `TMPDIR=/tmp`). Set `compileTmpfsMB` if that cache is large — nsjail's default
+     `/tmp` is only a few MB; Go's `GOCACHE` needs ~40 MB+.
+   - **cold-cache trap** (learned from Go): each run gets a **fresh** tmpfs, so the
+     toolchain cache is cold every compile. A cold single-file Go build recompiles
+     the stdlib and takes ~14 s on one CPU — over the compile budget. Fix: pre-warm
+     the cache in the image (`Dockerfile` → `/opt/gocache`, world-readable) and have
+     the compile **seed** its writable `/tmp` cache from it (goSpec runs a `/bin/sh`
+     prelude `cp -r /opt/gocache /tmp/gocache && exec go build …`, with
+     `compileArgv0Absolute` so nsjail execve's the shell). Warm build ≈ 0.3 s.
 3. **Register** in `main.go`.
-4. **Seccomp — tune the allowlist**: a hello-world may pass the C/C++ allowlist
-   (`staticAllowSyscalls`, `nsjail.go:71-81`) as-is, but richer runtimes need
-   more. **Always roll out `RUNNER_STATIC_SECCOMP=complain` first** (DEPLOY §8c),
-   run representative programs, read `sudo dmesg | grep -i seccomp` for
-   `syscall=NNN`, and widen the allowlist for what the runtime genuinely needs.
-   Go's scheduler needs `clone`/`futex`/`epoll_*` — it may need a widened
-   allowlist or fall back to the denylist. Decide and document per language.
-   Then flip to `enforce`.
-5. **Memory**: `capAddressSpace: true` works for native static binaries
-   (RLIMIT_AS) + cgroup is authoritative.
+4. **Seccomp — tune the allowlist, or stay on the denylist**: a hello-world may
+   pass the C/C++ allowlist (`staticAllowSyscalls`, `nsjail.go:71-81`) as-is, but
+   richer runtimes need more. **Roll out `RUNNER_STATIC_SECCOMP=complain` first**
+   (DEPLOY §8c), run representative programs, read `sudo dmesg | grep -i seccomp`
+   for `syscall=NNN`, and widen the allowlist for what the runtime genuinely needs.
+   **Go landed on the denylist**: its scheduler needs `clone`/`futex`/`epoll_*` —
+   wider than the C set — so a language whose spec sets `staticAllowlistOK:false` is
+   pinned to the denylist regardless of `RUNNER_STATIC_SECCOMP`, so enabling the
+   allowlist for C/C++ never SIGSYS-kills it. Still strong: ro-rootfs + empty netns
+   + no_new_privs + cgroup.
+5. **Memory**: `capAddressSpace: true` (RLIMIT_AS + cgroup) works for a glibc
+   static binary (C/C++). **Go is the exception — `capAddressSpace:false`**: the Go
+   runtime reserves a huge virtual arena at startup and dies under *any* RLIMIT_AS
+   ("failed to reserve page summary memory"), even at 512 MB — exactly like V8. So
+   Go (and the compile jail, since `go build` is itself a Go program) skips
+   RLIMIT_AS on **both** phases and is bounded by the cgroup `memory.max` only.
 6. **Test**: `success`; a **denied-syscall program** (e.g. `socket`) → `SIGSYS`
-   under enforce; `memory_exceeded`; `timeout`; egress contained.
+   under enforce (allowlist languages only); `memory_exceeded` (cgroup);
+   `timeout`; egress contained.
 
-**Effort**: M (mostly image + allowlist tuning). See [G2.1 (Go)](G2-language-coverage.md).
+**Effort**: M (mostly image + cache pre-warm + seccomp choice). Go is the landed
+reference — see [G2.1](G2-language-coverage.md).
 
 ---
 

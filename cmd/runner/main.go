@@ -67,6 +67,7 @@ func main() {
 		executor.NewNode(sb, cfg.MaxOutputBytes, cfg.MaxProcesses, cfg.MaxFileSizeMB),
 		executor.NewC(sb, compiledConfig(cfg)),
 		executor.NewCpp(sb, compiledConfig(cfg)),
+		executor.NewGo(sb, compiledConfig(cfg)),
 	)
 
 	srv := httpapi.New(svc, httpapi.Config{

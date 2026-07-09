@@ -221,6 +221,44 @@ jobs:
       - name: G1.4 output under the cap => success, full output
         run: ./scripts/smoke-run.sh python 'print("y" * 1000)' "$(printf 'y%.0s' $(seq 1000))"$'\n'
 
+      # ---- G2.1 Go (static-compiled) on the shipped image ----
+
+      # Ordinary Go: goroutines + channels + a stdlib sort, compiled in the compile
+      # jail (seeding its GOCACHE from the pre-warmed /opt/gocache) and run as a
+      # static artifact in the minimal-rootfs run jail — proving the whole two-jail
+      # Go path end to end.
+      - name: G2.1 Go success (goroutines + channels + sort) => "6\n"
+        run: |
+          src=$'package main\nimport ("fmt"; "sort")\nfunc main(){\n ch := make(chan int, 3)\n for _, v := range []int{3, 1, 2} { go func(x int){ ch <- x }(v) }\n s := []int{}\n for i := 0; i < 3; i++ { s = append(s, <-ch) }\n sort.Ints(s)\n fmt.Println(s[0] + s[1] + s[2])\n}'
+          ./scripts/smoke-run.sh go "$src" $'6\n'
+
+      # Go reads stdin like any other run path (shared execute()).
+      - name: G2.1 Go reads stdin => sum
+        run: |
+          src=$'package main\nimport ("bufio"; "fmt"; "os"; "strconv")\nfunc main(){\n sc := bufio.NewScanner(os.Stdin)\n n := 0\n for sc.Scan() { v, _ := strconv.Atoi(sc.Text()); n += v }\n fmt.Println(n)\n}'
+          SMOKE_STDIN="$(printf '10\n20\n12\n')" ./scripts/smoke-run.sh go "$src" $'42\n'
+
+      # Go inherits the jail's empty netns: any outbound dial fails, so egress is
+      # contained (the program reports "blocked", never "OPEN").
+      - name: G2.1 Go egress contained (empty netns) => "blocked\n"
+        run: |
+          src=$'package main\nimport ("fmt"; "net"; "time")\nfunc main(){\n _, err := net.DialTimeout("tcp", "1.1.1.1:80", 2*time.Second)\n if err != nil { fmt.Println("blocked") } else { fmt.Println("OPEN") }\n}'
+          ./scripts/smoke-run.sh go "$src" $'blocked\n'
+
+      # Go infinite loop is stopped by the wall/CPU limit, reported as timeout.
+      - name: G2.1 Go infinite loop => timeout
+        run: |
+          src=$'package main\nfunc main(){ for {} }'
+          body="$(jq -nc --arg s "$src" '{language:"go",source_code:$s,timeout_ms:2000}')"
+          resp="$(curl -fsS localhost:8090/run -H 'content-type: application/json' -d "$body")"
+          echo "$resp" | jq '{status, duration_ms}'
+          echo "$resp" | jq -e '.status=="timeout"' >/dev/null \
+            || { echo "::error::Go infinite loop not stopped by timeout"; exit 1; }
+
+      # A Go compile error short-circuits to compile_error WITHOUT executing.
+      - name: G2.1 Go compile error => compile_error (nothing executed)
+        run: ./scripts/smoke-run.sh go $'package main\nfunc main(){ undefined() }' '' compile_error
+
       # F-D follow-up: the static run jail can take a tight seccomp ALLOWLIST
       # (DEFAULT KILL) instead of the shared denylist. Prove on a dedicated
       # RUNNER_STATIC_SECCOMP=enforce container that (a) the kafel allowlist

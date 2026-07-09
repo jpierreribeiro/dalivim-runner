@@ -80,6 +80,13 @@ type Spec struct {
 	// size-capped tmpfs /tmp); 0 leaves it unset.
 	MaxFileSizeMB int
 
+	// TmpfsSizeMB sizes the jail's writable /tmp tmpfs (nsjail --tmpfs_size). 0 uses
+	// nsjail's small default — enough for gcc's intermediates. The Go compile jail
+	// needs a larger /tmp because a cold `go build` writes ~30 MB+ of stdlib objects
+	// into GOCACHE (which lives on /tmp). tmpfs is RAM-backed and counts against the
+	// jail's cgroup memory.max, so this is a ceiling, not a reservation.
+	TmpfsSizeMB int
+
 	// Writable binds WorkDir into the jail READ-WRITE at /sandbox instead of the
 	// default read-only. Only the compile phase of a compiled language needs it —
 	// so the compiler can write its artifact into the per-run dir, which the host
