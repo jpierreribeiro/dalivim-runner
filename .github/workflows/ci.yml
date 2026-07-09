@@ -1,0 +1,130 @@
+name: CI
+
+# F-B validation gate. The unit suite proves the arg-builder and the sandbox
+# dial state machine; the runner-smoke job proves the REAL nsjail binary boots
+# and contains untrusted code inside the shipped Docker image. The errno=11
+# incident taught the lesson these jobs encode: green unit tests with mocked
+# containment are not evidence that the binary jails anything on the target.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: vet + race
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: go vet
+        run: go vet ./...
+      - name: go test -race
+        run: go test -race ./...
+
+  runner-smoke:
+    name: nsjail smoke + escape corpus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build runner image (compiles nsjail from source)
+        run: docker build -t runner:smoke .
+
+      # Ubuntu 24.04 (what ubuntu-latest now is) ships
+      # kernel.apparmor_restrict_unprivileged_userns=1, an AppArmor mediation
+      # that strips CAP_SYS_ADMIN inside unprivileged user namespaces created by
+      # unconfined processes — which makes nsjail's own mount setup
+      # (`mount('/','/',MS_REC|MS_PRIVATE)`) fail with EPERM. This sysctl is a
+      # host-kernel global, NOT container-scoped, so --security-opt
+      # apparmor=unconfined on the container cannot lift it; it must be cleared on
+      # the runner host (GitHub-hosted runners allow passwordless sudo). This
+      # relaxes the CI RUNNER HOST, not the inner jail, and is a property of the
+      # runner's OS rather than the production target.
+      - name: Allow unprivileged-userns mounts on the runner host (Ubuntu 24.04)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      # Boot the shipped image under target-like resource limits with
+      # RUNNER_SANDBOX=require, so a failed nsjail boot probe crashes the
+      # container instead of silently downgrading to the netns backend.
+      #
+      # Containment relaxations, and why each is the minimum needed for nsjail to
+      # build its per-run jails — all applied to the OUTER container/host only:
+      #   --security-opt seccomp=unconfined   default profile blocks the
+      #                                        CLONE_NEWUSER unshare nsjail needs
+      #                                        to create its user namespace
+      #   --security-opt apparmor=unconfined  docker-default apparmor denies the
+      #                                        mount ops nsjail performs to build
+      #                                        the read-only rootfs + tmpfs /tmp
+      #   (host sysctl above)                 lifts Ubuntu 24.04's userns mount
+      #                                        restriction
+      # None of these add capabilities, and the container still runs as the
+      # non-root `runner` user. The INNER per-run jail is unaffected: every
+      # submission still gets its own userns/pid/net/mount namespaces, a read-only
+      # rootfs, a size-capped tmpfs /tmp, the seccomp denylist, no_new_privs, and
+      # per-jail rlimits. The escape corpus below is the proof the jail is intact.
+      - name: Boot under target-like limits (RUNNER_SANDBOX=require)
+        run: |
+          docker run -d --name runner \
+            --pids-limit=512 \
+            --cpus=1 --memory=512m \
+            --security-opt seccomp=unconfined \
+            --security-opt apparmor=unconfined \
+            -e RUNNER_ENV=development \
+            -e RUNNER_SANDBOX=require \
+            -e GOMAXPROCS=1 \
+            -p 8090:8090 \
+            runner:smoke
+
+      - name: Wait for /healthz (fail-closed boot proves nsjail probe passed)
+        run: |
+          for i in $(seq 1 40); do
+            if curl -fs localhost:8090/healthz >/dev/null; then
+              echo "healthz up after $((i))/40 tries"; exit 0
+            fi
+            if ! docker ps --filter name=runner --filter status=running -q | grep -q .; then
+              echo "::error::runner container exited during boot — nsjail require probe failed"
+              docker logs runner 2>&1 || true
+              exit 1
+            fi
+            sleep 0.5
+          done
+          echo "::error::/healthz never came up"; docker logs runner 2>&1 || true; exit 1
+
+      # The boot log is the source of truth that the REAL jail engaged. With
+      # RUNNER_SANDBOX=require the daemon cannot reach this state on the netns
+      # fallback, but we assert the log line explicitly so a future silent
+      # downgrade fails the gate loudly.
+      - name: Assert boot log shows nsjail ENABLED
+        run: |
+          docker logs runner 2>&1 | tee /tmp/boot.log
+          if ! grep -q "nsjail ENABLED" /tmp/boot.log; then
+            echo "::error::boot log does not show 'nsjail ENABLED' — sandbox did not engage"
+            exit 1
+          fi
+
+      - name: Real POST /run — print(2+2) => success / "4\n"
+        run: ./scripts/smoke-run.sh python 'print(2+2)' $'4\n'
+
+      - name: Escape corpus — every submission must be contained, host survives
+        run: ./scripts/smoke-escape.sh
+
+      - name: Runner logs (always)
+        if: always()
+        run: docker logs runner 2>&1 || true
+
+      - name: Teardown
+        if: always()
+        run: docker rm -f runner || true

@@ -16,10 +16,16 @@ import "strconv"
 // creation and posix_spawn, so killing it breaks the interpreter itself. Fork
 // bombs are contained by --rlimit_nproc + the concurrency cap, not by blocking
 // the clone family.
+//
+// The unmount syscall is spelled `umount` here, not `umount2`: kafel's amd64
+// table names syscall 166 (the only unmount syscall on x86-64) `umount`, and it
+// rejects the identifier `umount2` at policy-compile time — which, with
+// RUNNER_SANDBOX=require, fails the boot probe closed. Caught by the CI smoke
+// job the first time nsjail actually ran.
 const seccompPolicy = `POLICY dalivim {
 	KILL {
 		ptrace, process_vm_readv, process_vm_writev,
-		mount, umount2, pivot_root, chroot,
+		mount, umount, pivot_root, chroot,
 		kexec_load, init_module, finit_module, delete_module,
 		bpf, setns, unshare,
 		add_key, keyctl, request_key,
@@ -51,10 +57,16 @@ func nsjailArgs(uid, gid int, spec Spec) []string {
 		"--time_limit", strconv.Itoa(wallCapSeconds(spec.TimeoutMs)), // hard wall-clock belt
 		"--rlimit_as", strconv.Itoa(spec.MemoryMB), // RLIMIT_AS, MB
 		"--rlimit_cpu", strconv.Itoa(cpuCapSeconds(spec.TimeoutMs)), // RLIMIT_CPU, s
-		// Map real uid/gid -> root inside the user namespace (single id, size 1);
-		// no newuidmap/setuid needed, so it works in an unprivileged container.
-		"--uid_mapping", "0:" + strconv.Itoa(uid) + ":1",
-		"--gid_mapping", "0:" + strconv.Itoa(gid) + ":1",
+		// Map real uid/gid -> root inside the user namespace (single id, size 1).
+		// --user/--group (NOT --uid_mapping/--gid_mapping) is deliberate: both take
+		// the same inside:outside:count form, but --user/--group set is_newidmap=0
+		// so nsjail writes /proc/PID/{uid,gid}_map DIRECTLY, whereas
+		// --uid_mapping/--gid_mapping set is_newidmap=1 and shell out to the setuid
+		// newuidmap/newgidmap helpers — which the runtime image does not ship (and,
+		// mapping only the caller's own id, does not need). Using the helper flags
+		// made the boot probe fail closed on `newgidmap: No such file or directory`.
+		"--user", "0:" + strconv.Itoa(uid) + ":1",
+		"--group", "0:" + strconv.Itoa(gid) + ":1",
 		// Whole host rootfs read-only (arch-agnostic: brings the interpreter and
 		// its libs) + a fresh, size-capped writable /tmp (bounds the F-11 host-OOM
 		// vector) + the source dir mounted read-only at a fixed path.

@@ -21,7 +21,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked
 | Audit | 8-layer conformance + residual-risk ranking + API contract | [x] done |
 | **F-A** | Kill global `RLIMIT_NPROC`; add concurrency cap + 503 backpressure | [x] done (verified live) |
 | Refactor | Invert Sandbox: `SysProcAttr()` provider → `Command(Spec)` constructor | [x] done |
-| F-B | `nsjailSandbox`: seccomp, tmpfs-capped `/tmp`, `no_new_privs`, per-jail nproc | [x] code done (target validation pending) |
+| F-B | `nsjailSandbox`: seccomp, tmpfs-capped `/tmp`, `no_new_privs`, per-jail nproc | [x] done (validated in CI: image builds nsjail, `RUNNER_SANDBOX=require` boots `nsjail ENABLED`, escape corpus contained) |
 | F-C / F-D | Compiled-language support (compile phase, `signal`, polyglot runtimes) | [ ] todo |
 | F-E / F-F | cgroups accounting, deterministic `memory_exceeded` classification | [ ] todo |
 
@@ -70,10 +70,64 @@ Fixes **R2** (no seccomp), **R3** (`/tmp` OOM), **R4** (no `no_new_privs`).
 - [x] Dockerfile: nsjail built from source (bookworm stage) into the runtime image.
 - [x] `RUNNER_SANDBOX=auto|require|off` dial with a boot probe (runs `/bin/true`
       in a real jail); `require` fails closed, `auto` falls back to netns. Tested.
-- [~] Netns + execution suites pass against the **nsjail** backend — deferred:
-      nsjail can't run in CI (no binary + no userns). Arg construction + the dial
-      state machine are unit-tested; end-to-end jail execution is validated on the
-      target via the boot log and a `RUNNER_SANDBOX=require` verification deploy.
+- [x] End-to-end jail execution **validated GREEN in CI** by the `runner-smoke`
+      job (`.github/workflows/ci.yml`): it builds the shipped image (nsjail
+      compiled from source), boots it under target-like limits with
+      `RUNNER_SANDBOX=require` (fail-closed — a failed probe crashes the
+      container, never a silent netns downgrade), asserts the boot log shows
+      `nsjail ENABLED`, runs a real `POST /run` (`print(2+2)` → `success`/`"4\n"`),
+      and the §4.4 escape corpus (`scripts/smoke-escape.sh`: fork bomb → contained
+      + host survives; `/etc/shadow`/host-env read → denied; dangerous syscall →
+      killed by seccomp; output flood → truncated, no OOM). Arg construction + the
+      dial state machine remain unit-tested for the paths CI's single kernel
+      cannot exercise.
+    - **Bugs the first real jail launch surfaced** (each caught by the fail-closed
+      probe; the errno=11 thesis in action — none were reachable by the mocked
+      unit tests). *Code/target* bugs that would have broken the sandbox on
+      Railway too, now fixed:
+        1. seccomp policy used `umount2`, not a kafel amd64 identifier → policy
+           never compiled; kafel names syscall 166 `umount`.
+        2. `--uid_mapping`/`--gid_mapping` require the setuid `newuidmap`/
+           `newgidmap` helpers (absent, unneeded) → switched to `--user`/`--group`
+           (direct `/proc` self-map, `is_newidmap=false`).
+        3. jail bind-mounts host `/` read-only then binds the workdir onto
+           `/sandbox`, which didn't exist on the RO root → pre-create `/sandbox`
+           in the image.
+        4. runtime passed a bare `python3`; nsjail `execve()`s with no PATH search
+           → resolve the interpreter to an absolute path at startup.
+      Plus one *test* false-positive (LC_CTYPE, injected by CPython's PEP 538, was
+      flagged as a host-env leak) and one *CI-host* relaxation (below).
+    - **CI-host relaxation (containment):** nsjail's userns + mount setup is
+      blocked on a stock `ubuntu-latest` (24.04) by three layers, so the smoke job
+      clears exactly these — all on the **outer** container/host, none touching the
+      inner jail, none adding capabilities, container still runs as non-root
+      `runner`: `--security-opt seccomp=unconfined` (CLONE_NEWUSER unshare),
+      `--security-opt apparmor=unconfined` (mount ops), and host
+      `sysctl kernel.apparmor_restrict_unprivileged_userns=0` (Ubuntu 24.04 userns
+      mount restriction — a kernel global a container flag can't lift). The
+      passing escape corpus is the proof the jail is intact. See README → *Why the
+      smoke container relaxes Docker's own sandbox*.
+
+## CI gates — runner-smoke + escape corpus (plan §4.3 / §4.4 / §4.5)
+
+First CI in the repo. `.github/workflows/ci.yml`:
+
+- [x] **`test`** job — `go vet` + `go test -race ./...` (matches what passes locally).
+- [x] **`runner-smoke`** job (§4.3) — build the image (nsjail from source) → boot
+      under target-like limits with `RUNNER_SANDBOX=require` → wait `/healthz`
+      (container-exit detection makes a failed fail-closed probe a loud job
+      failure) → assert `nsjail ENABLED` in the boot log → real `POST /run`
+      `print(2+2)` ⇒ `success` / `"4\n"`.
+- [x] **Escape corpus** (§4.4) — `scripts/smoke-escape.sh`: fork bomb, secret /
+      host-env read, seccomp-killed syscall, output flood. Each asserted
+      contained; a final host-survival run must still succeed.
+- [x] Helper `scripts/smoke-run.sh` — `POST /run`, exact stdout+status assertion,
+      non-zero exit on mismatch (reused by the corpus).
+- [ ] `runner-security` as a *separate* periodic job, image CVE scan
+      (trivy/grype), and the compiler-bomb / stress-concurrency corpus rows —
+      deferred with F-C/F-D (no compiled runtime yet) and F-A stress tooling.
+
+Signed-off: `claude/dalivim-runner-ci-smoke-3sscm8` — 2026-07-09.
 
 ## F-C / F-D — compiled languages (forward-compat, not blocking)
 
@@ -95,8 +149,8 @@ Fixes **R6** (fragile `memory_exceeded` substring heuristic).
 | ID | Risk | Addressed by |
 |---|---|---|
 | R1 | Global `RLIMIT_NPROC` → auto-DoS (`errno=11`, **confirmed**) | F-A ✅ closed |
-| R2 | No seccomp filter | F-B ✅ code done (kafel denylist; target-validate) |
-| R3 | `/tmp` unbounded → host OOM | F-B ✅ code done (tmpfs `/tmp`; target-validate) |
-| R4 | No `no_new_privs` | F-B ✅ code done (nsjail default; target-validate) |
+| R2 | No seccomp filter | F-B ✅ closed (kafel denylist; CI escape corpus kills `unshare` via seccomp) |
+| R3 | `/tmp` unbounded → host OOM | F-B ✅ closed (tmpfs `/tmp`; CI output-flood truncated, no OOM) |
+| R4 | No `no_new_privs` | F-B ✅ closed (nsjail default; CI `RUNNER_SANDBOX=require` boot asserts jail engaged) |
 | R5 | Runner has no backpressure (never emits 503) | F-A ✅ closed |
 | R6 | `memory_exceeded` from fragile stderr substring | F-E/F-F |

@@ -19,6 +19,7 @@ import (
 // the sandbox owns HOW it is contained.
 type PythonRuntime struct {
 	sandbox       sandbox.Sandbox
+	bin           string // absolute interpreter path (see NewPython)
 	version       string
 	outputLimit   int
 	maxProcesses  int // per-run RLIMIT_NPROC in the jail (fork-bomb cap)
@@ -32,11 +33,26 @@ type PythonRuntime struct {
 func NewPython(sb sandbox.Sandbox, outputLimit, maxProcesses, maxFileSizeMB int) *PythonRuntime {
 	return &PythonRuntime{
 		sandbox:       sb,
+		bin:           pythonPath(),
 		version:       detectPythonVersion(),
 		outputLimit:   outputLimit,
 		maxProcesses:  maxProcesses,
 		maxFileSizeMB: maxFileSizeMB,
 	}
+}
+
+// pythonPath resolves the interpreter to an ABSOLUTE path once at startup. The
+// nsjail backend execve()s argv[0] directly with no PATH search (the netns
+// backend only got away with a bare name because it wraps argv in a shell), so a
+// bare "python3" fails inside the jail with ENOENT. Resolving here keeps the
+// runtime image-agnostic; the path is valid inside the jail because nsjail
+// bind-mounts the same rootfs read-only. Falls back to the bare name if lookup
+// fails (e.g. off-Linux dev with no interpreter) rather than blocking boot.
+func pythonPath() string {
+	if p, err := exec.LookPath("python3"); err == nil {
+		return p
+	}
+	return "python3"
 }
 
 func (p *PythonRuntime) Language() string { return "python" }
@@ -79,7 +95,7 @@ func (p *PythonRuntime) Run(ctx context.Context, req runnerapi.RunRequest) runne
 	// resolved against the sandbox-set working directory; the source lives in that
 	// file, never on the command line, so there is no shell injection.
 	cmd := p.sandbox.Command(ctx, sandbox.Spec{
-		Argv:          []string{"python3", "-I", "main.py"},
+		Argv:          []string{p.bin, "-I", "main.py"},
 		WorkDir:       workDir,
 		TimeoutMs:     req.TimeoutMs,
 		MemoryMB:      req.MemoryMB,

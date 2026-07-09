@@ -79,9 +79,11 @@ func TestNsjailArgs_AppliesEveryLayer(t *testing.T) {
 	if !strings.Contains(argValue(args, "--seccomp_string"), "KILL") {
 		t.Fatal("expected a seccomp kafel policy with a KILL block")
 	}
-	if argValue(args, "--uid_mapping") != "0:1000:1" || argValue(args, "--gid_mapping") != "0:1000:1" {
-		t.Fatalf("expected single-id root mapping, got uid=%q gid=%q",
-			argValue(args, "--uid_mapping"), argValue(args, "--gid_mapping"))
+	// --user/--group (not --uid_mapping/--gid_mapping): direct /proc uid_map write,
+	// no setuid newuidmap/newgidmap helper (see nsjailArgs for why).
+	if argValue(args, "--user") != "0:1000:1" || argValue(args, "--group") != "0:1000:1" {
+		t.Fatalf("expected single-id root mapping via --user/--group, got user=%q group=%q",
+			argValue(args, "--user"), argValue(args, "--group"))
 	}
 	if !hasArg(args, "--iface_no_lo") || !hasArg(args, "--disable_proc") || !hasArg(args, "--keep_env") {
 		t.Fatalf("expected --iface_no_lo, --disable_proc and --keep_env, args=%v", args)
