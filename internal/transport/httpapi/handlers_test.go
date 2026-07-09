@@ -45,6 +45,16 @@ func post(h http.Handler, path, token, body string) *httptest.ResponseRecorder {
 	return rec
 }
 
+func get(h http.Handler, path, token string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	if token != "" {
+		req.Header.Set("X-Runner-Token", token)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
 func TestRun_RejectsEmptySource(t *testing.T) {
 	h := testServer(t, "")
 	rec := post(h, "/run", "", `{"language":"python","source_code":""}`)
@@ -215,6 +225,88 @@ func TestRun_StudentOutcomesStay200(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status %q must stay 200, got %d", status, rec.Code)
 		}
+	}
+}
+
+// TestReadyz_ReflectsPosture pins G4.3: /readyz is 503 when nsjail is required but
+// not the active backend, and 200 when the requirement is relaxed — reporting the
+// resolved posture either way.
+func TestReadyz_ReflectsPosture(t *testing.T) {
+	svc := executor.NewService(executor.Limits{}, fixedRuntime{})
+
+	// Requires nsjail, but backend is "netns" => not ready (503).
+	degraded := New(svc, Config{Backend: "netns", ReadyRequiresNsjail: true}).Handler()
+	rec := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rr := httptest.NewRecorder()
+	degraded.ServeHTTP(rr, rec)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("degraded posture must be 503, got %d", rr.Code)
+	}
+	var body map[string]any
+	_ = json.NewDecoder(rr.Body).Decode(&body)
+	if body["ready"] != false || body["backend"] != "netns" {
+		t.Fatalf("readyz body should report posture, got %v", body)
+	}
+
+	// nsjail active => ready (200).
+	ok := New(svc, Config{Backend: "nsjail", ReadyRequiresNsjail: true}).Handler()
+	rr = httptest.NewRecorder()
+	ok.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("nsjail posture must be 200, got %d", rr.Code)
+	}
+
+	// Requirement relaxed => ready even on netns.
+	relaxed := New(svc, Config{Backend: "netns", ReadyRequiresNsjail: false}).Handler()
+	rr = httptest.NewRecorder()
+	relaxed.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("relaxed requirement must be 200, got %d", rr.Code)
+	}
+}
+
+// TestMetrics_GatedAndRecords pins G4.1: /metrics needs the token and, after a
+// run, exposes the series.
+func TestMetrics_GatedAndRecords(t *testing.T) {
+	svc := executor.NewService(
+		executor.Limits{DefaultTimeout: 3000, MaxTimeoutMs: 10000, DefaultMemory: 128, MaxMemoryMB: 512},
+		fixedRuntime{res: runnerapi.RunResult{Status: runnerapi.StatusSuccess, DurationMs: 42}},
+	)
+	h := New(svc, Config{Token: "sekret", MaxSourceBytes: 200_000}).Handler()
+
+	// Unauthenticated /metrics is rejected.
+	if rec := get(h, "/metrics", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("/metrics without token must be 401, got %d", rec.Code)
+	}
+	// Drive one run, then scrape.
+	post(h, "/run", "sekret", `{"language":"python","source_code":"x"}`)
+	rec := get(h, "/metrics", "sekret")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/metrics with token must be 200, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `runner_runs_total{language="python",status="success"} 1`) {
+		t.Fatalf("metrics did not record the run:\n%s", rec.Body.String())
+	}
+}
+
+// TestRequestID_Echo pins G4.2's trace stitch: an inbound X-Request-ID is echoed;
+// when absent one is minted.
+func TestRequestID_Echo(t *testing.T) {
+	svc := executor.NewService(executor.Limits{}, fixedRuntime{res: runnerapi.RunResult{Status: runnerapi.StatusSuccess}})
+	h := New(svc, Config{MaxSourceBytes: 200_000}).Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/run", strings.NewReader(`{"language":"python","source_code":"x"}`))
+	req.Header.Set("X-Request-ID", "trace-abc")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if got := rr.Header().Get("X-Request-ID"); got != "trace-abc" {
+		t.Fatalf("inbound request id must be echoed, got %q", got)
+	}
+
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/run", strings.NewReader(`{"language":"python","source_code":"x"}`)))
+	if rr.Header().Get("X-Request-ID") == "" {
+		t.Fatal("a request id must be minted when absent")
 	}
 }
 

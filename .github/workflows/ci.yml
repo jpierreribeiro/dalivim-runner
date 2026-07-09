@@ -296,6 +296,40 @@ jobs:
       - name: G2.2 Java compile error => compile_error (nothing executed)
         run: ./scripts/smoke-run.sh java $'public class Main { public static void main(String[] a){ undefined(); } }' '' compile_error
 
+      # ---- G4 observability on the shipped image ----
+
+      # G4.3: /readyz is 200 because nsjail is the active backend (RUNNER_SANDBOX=
+      # require); it reports the resolved posture. Distinct from /healthz (liveness).
+      - name: G4.3 /readyz reports nsjail posture => 200
+        run: |
+          code="$(curl -s -o /tmp/ready.json -w '%{http_code}' localhost:8090/readyz)"
+          cat /tmp/ready.json; echo
+          [ "$code" = "200" ] || { echo "::error::/readyz not 200 with nsjail active (got $code)"; exit 1; }
+          jq -e '.ready == true and .backend == "nsjail"' /tmp/ready.json >/dev/null \
+            || { echo "::error::/readyz body did not report nsjail posture"; exit 1; }
+
+      # G4.2: an inbound X-Request-ID is echoed on the response, stitching the
+      # backend's trace to the runner's per-run log line.
+      - name: G4.2 X-Request-ID is echoed
+        run: |
+          echoed="$(curl -fsS -D - -o /dev/null -H 'X-Request-ID: smoke-trace-42' \
+            -H 'content-type: application/json' -d '{"language":"python","source_code":"print(1)"}' \
+            localhost:8090/run | tr -d '\r' | awk -F': ' 'tolower($1)=="x-request-id"{print $2}')"
+          echo "echoed=[$echoed]"
+          [ "$echoed" = "smoke-trace-42" ] || { echo "::error::X-Request-ID not echoed"; exit 1; }
+
+      # G4.1: /metrics exposes the recorded series after the runs above. The smoke
+      # runner boots RUNNER_ENV=development with no token, so the gate is a dev
+      # pass-through here; production gates it behind the service/metrics token.
+      - name: G4.1 /metrics exposes recorded series
+        run: |
+          body="$(curl -fsS localhost:8090/metrics)"
+          echo "$body" | grep -E '^runner_runs_total\{' | head
+          echo "$body" | grep -q '^runner_runs_total{language="python",status="success"}' \
+            || { echo "::error::/metrics missing runner_runs_total series"; exit 1; }
+          echo "$body" | grep -q '^runner_run_duration_seconds_bucket{' \
+            || { echo "::error::/metrics missing run-duration histogram"; exit 1; }
+
       # F-D follow-up: the static run jail can take a tight seccomp ALLOWLIST
       # (DEFAULT KILL) instead of the shared denylist. Prove on a dedicated
       # RUNNER_STATIC_SECCOMP=enforce container that (a) the kafel allowlist
@@ -335,6 +369,14 @@ jobs:
           }
           seccomp_run c $'#include <stdio.h>\nint main(void){ printf("4\\n"); return 0; }' $'4\n'
           seccomp_run cpp $'#include <iostream>\nint main(){ std::cout << 2+2 << "\\n"; }' $'4\n'
+          # G4.4: a program calling a DENIED syscall under the allowlist (socket is
+          # not in the static set) must be killed (SIGSYS), NOT run to success — the
+          # allowlist's teeth, asserted on every build.
+          resp="$(curl -fsS http://localhost:8092/run -H 'content-type: application/json' \
+            -d "$(jq -nc '{language:"c",source_code:"#include <sys/socket.h>\nint main(void){ socket(AF_INET,SOCK_STREAM,0); return 0; }"}')")"
+          echo "$resp" | jq '{status, signal}'
+          echo "$resp" | jq -e '.status != "success" and (.signal=="SIGSYS" or .status=="runtime_error")' >/dev/null \
+            || { echo "::error::denied syscall (socket) was not killed under the enforce allowlist"; exit 1; }
           docker rm -f runner-seccomp
 
       - name: Escape corpus — every submission must be contained, host survives

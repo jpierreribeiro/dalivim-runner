@@ -326,10 +326,16 @@ func (r *compiledRuntime) Run(ctx context.Context, req runnerapi.RunRequest) run
 		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "could not write source"}
 	}
 
-	if res, ok := r.compile(ctx, req, workDir); !ok {
+	compileStart := time.Now()
+	res, ok := r.compile(ctx, req, workDir)
+	compileMs := int(time.Since(compileStart).Milliseconds())
+	if !ok {
+		res.CompileMs = compileMs
 		return res // compile_error or internal_error — nothing was executed
 	}
-	return r.execute(ctx, req, workDir)
+	out := r.execute(ctx, req, workDir)
+	out.CompileMs = compileMs
+	return out
 }
 
 // compile runs the compile jail. It returns (result, false) to short-circuit on

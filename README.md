@@ -100,7 +100,33 @@ backend keeps working with only an env change. Prefer `POST /run`.
 
 ### `GET /healthz`
 
-Unauthenticated liveness probe → `200 ok`.
+Unauthenticated liveness probe → `200 ok` (is the process up).
+
+### `GET /readyz`
+
+Readiness probe → `200` only when containment is actually engaged (nsjail is the
+active backend), else `503`, so an instance silently degraded to the netns
+fallback under `RUNNER_SANDBOX=auto` is taken out of rotation. The JSON body
+reports the resolved posture (`{"ready","backend","network_isolated"}`) — no
+secrets, so it may be public. Relax the requirement with
+`RUNNER_READY_REQUIRES=none` when running the netns backend intentionally.
+
+### `GET /metrics`
+
+Prometheus exposition (`runner_runs_total{language,status}`, run/compile duration
+histograms, `runner_inflight`, `runner_overload_total`, `runner_oom_total`,
+`runner_timeout_total`, `runner_output_limit_exceeded_total`). **Gated** — it
+leaks submission volume/patterns — behind `RUNNER_METRICS_TOKEN` (or the service
+token when unset), sent as `X-Runner-Token`. Labels are only the closed
+language/status sets; source code, stdin, and output never appear.
+
+### Observability
+
+Every run emits one payload-free structured log line
+(`request_id, language, status, duration_ms, compile_ms, memory_kb, exit_code,
+signal, truncated`) — **never** source, stdin, or output. Send `X-Request-ID`
+from the gateway to stitch its logs to the runner's; the runner echoes it (and
+mints one when absent) on the response.
 
 ## Security
 
@@ -187,6 +213,8 @@ deploy with `RUNNER_SANDBOX=require` is how you prove it engaged.
 |---|---|---|
 | `RUNNER_SERVICE_TOKEN` | — | Shared secret; callers send `X-Runner-Token`. **Required** unless `RUNNER_ENV=development`. |
 | `RUNNER_ENV` | (unset → strict) | `development` allows booting without a token. Leave unset in production. |
+| `RUNNER_METRICS_TOKEN` | (service token) | Gates `GET /metrics` (sent as `X-Runner-Token`). Unset → the service token gates it; `/metrics` is never public in production. |
+| `RUNNER_READY_REQUIRES` | `nsjail` | `/readyz` threshold: default requires the nsjail backend active (else `503`). `none` relaxes it (ready whenever the process is up) for intentional netns-only runs. |
 | `RUNNER_SANDBOX` | `auto` | Selects the containment backend. `auto`: use nsjail when its boot probe passes, else fall back to netns. `require`: nsjail only — **fail closed at boot** if unavailable. `off`: netns backend only. |
 | `RUNNER_NETWORK_ISOLATION` | `auto` | Governs the **netns** backend's egress guarantee (ignored when nsjail is active, which always isolates the network). `auto`: empty netns when permitted, else warn + fall back. `require`: fail closed at boot. `off`: disable. |
 | `RUNNER_CGROUP` | `auto` | Per-run **cgroup v2** memory/pids accounting under the nsjail backend (F-E/R6). `auto`: use the delegated subtree when usable, else fall back to `RLIMIT_AS`/heap-flag bounds. `require`: **fail closed at boot** if no usable cgroup. `off`: rlimit-only. When on, `memory.max`/`pids.max` bound each run and `memory_exceeded` is read from the kernel OOM event, not stderr. |

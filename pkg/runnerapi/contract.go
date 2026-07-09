@@ -32,6 +32,7 @@ type RunResult struct {
 	Stderr         string `json:"stderr"`
 	ExitCode       int    `json:"exit_code"`
 	DurationMs     int    `json:"duration_ms"`
+	CompileMs      int    `json:"compile_ms,omitempty"` // compile-phase wall time (compiled languages); 0/omitted otherwise
 	MemoryKB       int    `json:"memory_kb"`
 	RuntimeName    string `json:"runtime_name"`
 	RuntimeVersion string `json:"runtime_version"`
