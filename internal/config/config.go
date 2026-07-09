@@ -18,6 +18,8 @@ type Config struct {
 	Development   bool   // RUNNER_ENV=development relaxes the token requirement
 	SandboxPolicy string // RUNNER_SANDBOX: auto|require|off (empty => auto) — nsjail selection
 	NetworkPolicy string // RUNNER_NETWORK_ISOLATION: auto|require|off (empty => auto) — netns backend
+	CgroupPolicy  string // RUNNER_CGROUP: auto|require|off (empty => auto) — per-run cgroup v2 accounting
+	CgroupMount   string // RUNNER_CGROUP_MOUNT: delegated writable cgroup v2 subtree for per-run leaves
 	MaxProcesses  int    // per-run RLIMIT_NPROC applied by the nsjail backend (fork-bomb cap)
 	MaxFileSizeMB int    // per-run RLIMIT_FSIZE applied by the nsjail backend
 
@@ -40,6 +42,8 @@ func Load() (Config, error) {
 		Development:       strings.EqualFold(strings.TrimSpace(os.Getenv("RUNNER_ENV")), "development"),
 		SandboxPolicy:     os.Getenv("RUNNER_SANDBOX"),
 		NetworkPolicy:     os.Getenv("RUNNER_NETWORK_ISOLATION"),
+		CgroupPolicy:      os.Getenv("RUNNER_CGROUP"),
+		CgroupMount:       cgroupMount(),
 		MaxProcesses:      envInt("RUNNER_MAX_PROCESSES", 256),
 		MaxFileSizeMB:     envInt("RUNNER_MAX_FILE_SIZE_MB", 64),
 		MaxConcurrentRuns: envInt("RUNNER_MAX_CONCURRENT_RUNS", 8),
@@ -54,6 +58,17 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("RUNNER_SERVICE_TOKEN is required outside development; set it (and send X-Runner-Token from the gateway) or set RUNNER_ENV=development for local use")
 	}
 	return cfg, nil
+}
+
+// cgroupMount resolves the delegated cgroup v2 subtree for per-run accounting,
+// defaulting to /sys/fs/cgroup/dalivim. It is only consulted by the nsjail
+// backend under RUNNER_CGROUP=auto|require; when the path is absent or not
+// delegated, "auto" simply falls back to rlimit bounds (see resolveCgroup).
+func cgroupMount() string {
+	if m := strings.TrimSpace(os.Getenv("RUNNER_CGROUP_MOUNT")); m != "" {
+		return m
+	}
+	return "/sys/fs/cgroup/dalivim"
 }
 
 // port resolves the listen port: RUNNER_PORT, else the platform-injected PORT

@@ -18,7 +18,7 @@ func isolatedPython(t *testing.T) *interpretedRuntime {
 	// Force the netns backend (RUNNER_SANDBOX=off) with network isolation resolved
 	// from the platform, so this drives the F-03 egress guarantee specifically —
 	// independent of whether nsjail happens to be installed.
-	sb, err := sandbox.Configure("off", "auto")
+	sb, err := sandbox.Configure("off", "auto", "off", "")
 	if err != nil {
 		t.Fatalf("configure sandbox: %v", err)
 	}

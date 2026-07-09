@@ -28,7 +28,7 @@ func TestNetnsSysProcAttr_SetpgidAlways(t *testing.T) {
 
 // TestConfigure_RejectsUnknownSandboxPolicy pins the closed RUNNER_SANDBOX vocabulary.
 func TestConfigure_RejectsUnknownSandboxPolicy(t *testing.T) {
-	if _, err := Configure("banana", "auto"); err == nil {
+	if _, err := Configure("banana", "auto", "off", ""); err == nil {
 		t.Fatal("expected an error for an unknown sandbox policy")
 	}
 }
@@ -36,7 +36,7 @@ func TestConfigure_RejectsUnknownSandboxPolicy(t *testing.T) {
 // TestConfigure_OffUsesNetnsBackend confirms RUNNER_SANDBOX=off selects the
 // netns backend, and that a netns policy of off disables egress isolation.
 func TestConfigure_OffUsesNetnsBackend(t *testing.T) {
-	sb, err := Configure("off", "off")
+	sb, err := Configure("off", "off", "off", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestConfigure_RequireFailsClosedWithoutNsjail(t *testing.T) {
 	if _, err := probeNsjailAvailable(); err == nil {
 		t.Skip("nsjail is available here; cannot exercise the fail-closed path")
 	}
-	if _, err := Configure("require", "auto"); err == nil {
+	if _, err := Configure("require", "auto", "off", ""); err == nil {
 		t.Fatal("RUNNER_SANDBOX=require must fail closed when nsjail is unavailable")
 	}
 }
@@ -66,7 +66,7 @@ func TestConfigure_AutoFallsBackToNetns(t *testing.T) {
 	if _, err := probeNsjailAvailable(); err == nil {
 		t.Skip("nsjail is available here; auto would select it, not the fallback")
 	}
-	sb, err := Configure("auto", "off")
+	sb, err := Configure("auto", "off", "off", "")
 	if err != nil {
 		t.Fatalf("auto must not fail when nsjail is absent: %v", err)
 	}

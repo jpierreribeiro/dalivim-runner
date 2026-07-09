@@ -15,9 +15,9 @@ import (
 // deadline. Never deploy the runner off Linux.
 type stubSandbox struct{}
 
-// Configure ignores both dials off Linux and warns loudly that no in-process
+// Configure ignores every dial off Linux and warns loudly that no in-process
 // containment is available.
-func Configure(_, _ string) (Sandbox, error) {
+func Configure(_, _, _, _ string) (Sandbox, error) {
 	slog.Warn("containment UNAVAILABLE: this OS is not Linux; the runner provides NO in-process isolation — local development only")
 	return &stubSandbox{}, nil
 }
@@ -26,12 +26,13 @@ func (s *stubSandbox) NetworkIsolated() bool { return false }
 func (s *stubSandbox) Backend() string       { return "none" }
 
 // Command runs the argv directly with no containment (no shell wrapper: ulimit
-// semantics are Linux-specific). It still honours the context deadline.
-func (s *stubSandbox) Command(ctx context.Context, spec Spec) *exec.Cmd {
+// semantics are Linux-specific). It still honours the context deadline. There is
+// no cgroup accounting off Linux, so RunAccounting is always nil.
+func (s *stubSandbox) Command(ctx context.Context, spec Spec) (*exec.Cmd, RunAccounting) {
 	//nolint:gosec // G204: local-development-only stub; real containment is Linux-only.
 	cmd := exec.CommandContext(ctx, spec.Argv[0], spec.Argv[1:]...)
 	cmd.Dir = spec.WorkDir
-	return cmd
+	return cmd, nil
 }
 
 // CancelCmd falls back to killing just the direct child process.

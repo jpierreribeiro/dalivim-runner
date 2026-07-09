@@ -105,8 +105,9 @@ deploy with `RUNNER_SANDBOX=require` is how you prove it engaged.
   `keyctl`, `reboot`/`swapon`, `*_handle_at`, `perf_event_open`.
 - **CPU/wall:** wall-clock deadline (Go context + nsjail `--time_limit`) plus an
   `RLIMIT_CPU` cap just above it; the whole process group is SIGKILLed on timeout.
-- **Memory:** best-effort address-space cap (`RLIMIT_AS`). Authoritative per-run
-  accounting via cgroups is future work (see the hardening plan's F-E/F-F).
+- **Memory:** an address-space cap (`RLIMIT_AS`) plus, where a cgroup v2 subtree
+  is delegated (`RUNNER_CGROUP`, F-E/R6), a per-run `memory.max` — authoritative
+  RSS accounting that also classifies `memory_exceeded` from the kernel OOM event.
 - **Overload:** a bounded number of executions run at once
   (`RUNNER_MAX_CONCURRENT_RUNS`); excess requests are shed immediately with `503`
   + `Retry-After` so the caller can fall back instead of the container being
@@ -128,8 +129,11 @@ deploy with `RUNNER_SANDBOX=require` is how you prove it engaged.
 - **Memory:** CPython runs under a hard `RLIMIT_AS` (a memory bomb → deterministic
   `memory_exceeded`). Node cannot — V8 reserves a multi-GB virtual cage at startup
   that a tight `RLIMIT_AS` refuses — so Node skips the address-space cap and bounds
-  its heap with `--max-old-space-size`, with the container/cgroup memory limit as
-  the RSS backstop (per-jail cgroup `memory.max` is future work, F-E/F-F).
+  its heap with `--max-old-space-size`. When a cgroup is delegated (`RUNNER_CGROUP`,
+  F-E/R6) both runtimes additionally get a per-run `memory.max` — a true RSS
+  ceiling that finally bounds Node hard, and `memory_exceeded` is then read from
+  the cgroup OOM event rather than a stderr substring. Without a delegated cgroup
+  the runner falls back to the rlimit/heap bound exactly as before.
 
 > Linux-only by design: the isolation guarantees depend on Linux namespaces and
 > rlimits. `sandbox_other.go` lets the service build/run on other OSes for local
@@ -143,6 +147,8 @@ deploy with `RUNNER_SANDBOX=require` is how you prove it engaged.
 | `RUNNER_ENV` | (unset → strict) | `development` allows booting without a token. Leave unset in production. |
 | `RUNNER_SANDBOX` | `auto` | Selects the containment backend. `auto`: use nsjail when its boot probe passes, else fall back to netns. `require`: nsjail only — **fail closed at boot** if unavailable. `off`: netns backend only. |
 | `RUNNER_NETWORK_ISOLATION` | `auto` | Governs the **netns** backend's egress guarantee (ignored when nsjail is active, which always isolates the network). `auto`: empty netns when permitted, else warn + fall back. `require`: fail closed at boot. `off`: disable. |
+| `RUNNER_CGROUP` | `auto` | Per-run **cgroup v2** memory/pids accounting under the nsjail backend (F-E/R6). `auto`: use the delegated subtree when usable, else fall back to `RLIMIT_AS`/heap-flag bounds. `require`: **fail closed at boot** if no usable cgroup. `off`: rlimit-only. When on, `memory.max`/`pids.max` bound each run and `memory_exceeded` is read from the kernel OOM event, not stderr. |
+| `RUNNER_CGROUP_MOUNT` | `/sys/fs/cgroup/dalivim` | Delegated, writable cgroup v2 subtree the runner creates per-run leaves under (see `docs/DEPLOY.md` → cgroup delegation). Only consulted under `RUNNER_CGROUP=auto\|require`. |
 | `RUNNER_MAX_CONCURRENT_RUNS` | `8` | Max simultaneous executions; excess requests get `503` + `Retry-After`. `0` disables the limit. |
 | `RUNNER_MAX_PROCESSES` | `256` | Per-run process cap (`RLIMIT_NPROC`) applied by the nsjail backend against a jail-private uid; never applied process-wide (see Security → Fork bombs). |
 | `RUNNER_MAX_FILE_SIZE_MB` | `64` | Per-run file-size cap (`RLIMIT_FSIZE`) applied by the nsjail backend. |

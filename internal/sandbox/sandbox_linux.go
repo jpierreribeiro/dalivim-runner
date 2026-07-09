@@ -34,7 +34,13 @@ const isolationCloneflags = syscall.CLONE_NEWUSER | syscall.CLONE_NEWNET
 // netPolicy (RUNNER_NETWORK_ISOLATION) governs the netns backend's egress
 // guarantee and is consulted only when nsjail is not the active backend (nsjail
 // always runs each command in its own empty network namespace).
-func Configure(sandboxPolicy, netPolicy string) (Sandbox, error) {
+//
+// cgroupPolicy (RUNNER_CGROUP) is auto|require|off and applies only to the nsjail
+// backend: it governs whether each run gets a cgroup v2 leaf (memory.max/pids.max
+// + OOM-based accounting) from the delegated subtree at cgroupMount
+// (RUNNER_CGROUP_MOUNT). "require" fails closed if that subtree is unusable;
+// "auto" falls back to rlimit-only bounds with a warning; "off" disables it.
+func Configure(sandboxPolicy, netPolicy, cgroupPolicy, cgroupMount string) (Sandbox, error) {
 	switch policy := normalizePolicy(sandboxPolicy); policy {
 	case "off":
 		slog.Info("nsjail DISABLED (RUNNER_SANDBOX=off); using netns-only backend (F-03)")
@@ -42,8 +48,13 @@ func Configure(sandboxPolicy, netPolicy string) (Sandbox, error) {
 	case "auto", "require":
 		nj, detail, err := tryNsjail()
 		if err == nil {
+			cg, cgErr := resolveCgroup(cgroupPolicy, cgroupMount)
+			if cgErr != nil {
+				return nil, cgErr // RUNNER_CGROUP=require but the subtree is unusable
+			}
+			nj.cg = cg
 			slog.Info("nsjail ENABLED: each run is contained by a read-only rootfs, mount/pid/ipc/user/net namespaces, a size-capped tmpfs /tmp, a seccomp denylist, no_new_privs, and per-jail rlimits",
-				"bin", nj.bin)
+				"bin", nj.bin, "memory_accounting", cgroupLabel(cg))
 			return nj, nil
 		}
 		if policy == "require" {
@@ -55,6 +66,42 @@ func Configure(sandboxPolicy, netPolicy string) (Sandbox, error) {
 	default:
 		return nil, fmt.Errorf("RUNNER_SANDBOX must be auto, require, or off (got %q)", policy)
 	}
+}
+
+// resolveCgroup applies the RUNNER_CGROUP dial for the nsjail backend. off =>
+// nil (rlimit-only, today's behaviour). auto => probe the delegated subtree; use
+// it when usable, else fall back to rlimit-only with a loud warning. require =>
+// probe and FAIL CLOSED when the subtree is unusable. A nil manager (any
+// non-require failure) is always safe: runs keep their RLIMIT_AS/heap bound.
+func resolveCgroup(policy, mount string) (*cgroupManager, error) {
+	switch p := normalizePolicy(policy); p {
+	case "off":
+		slog.Info("cgroup memory accounting DISABLED (RUNNER_CGROUP=off); per-run memory bound by RLIMIT_AS / interpreter heap flag only")
+		return nil, nil
+	case "auto", "require":
+		cg, detail, ok := probeCgroup(mount)
+		if ok {
+			slog.Info("cgroup memory accounting ENABLED: each run gets a cgroup v2 leaf with memory.max/pids.max; memory_exceeded is classified from the kernel OOM event",
+				"mount", mount)
+			return cg, nil
+		}
+		if p == "require" {
+			return nil, fmt.Errorf("RUNNER_CGROUP=require but no usable delegated cgroup: %s", detail)
+		}
+		slog.Warn("cgroup memory accounting UNAVAILABLE; falling back to RLIMIT_AS / heap-flag bounds — delegate a writable cgroup v2 subtree and set RUNNER_CGROUP_MOUNT, or RUNNER_CGROUP=require to fail closed",
+			"detail", detail)
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("RUNNER_CGROUP must be auto, require, or off (got %q)", p)
+	}
+}
+
+// cgroupLabel is the boot-log value for the active memory-accounting mode.
+func cgroupLabel(cg *cgroupManager) string {
+	if cg == nil {
+		return "rlimit-only"
+	}
+	return "cgroup-v2:" + cg.parent
 }
 
 // normalizePolicy lower-cases/trims a policy value, defaulting empty to "auto".
@@ -87,7 +134,7 @@ func (s *netnsSandbox) Backend() string       { return "netns" }
 // (address space) and -t (CPU seconds) are applied: the container's /bin/sh is
 // dash, which lacks `ulimit -u`, so the process cap is a per-jail (nsjail)
 // concern. The source is written to a file in WorkDir, never the command line.
-func (s *netnsSandbox) Command(ctx context.Context, spec Spec) *exec.Cmd {
+func (s *netnsSandbox) Command(ctx context.Context, spec Spec) (*exec.Cmd, RunAccounting) {
 	// Address-space cap is optional: AddressSpaceMB==0 leaves RLIMIT_AS unset (the
 	// V8/Node path, which a tight cap would break). CPU seconds are always applied.
 	var prefix string
@@ -103,7 +150,8 @@ func (s *netnsSandbox) Command(ctx context.Context, spec Spec) *exec.Cmd {
 	cmd.Dir = spec.WorkDir
 	cmd.SysProcAttr = s.sysProcAttr()
 	cmd.Cancel = CancelCmd(cmd)
-	return cmd
+	// The netns backend has no cgroup accounting; memory stays rlimit-bound.
+	return cmd, nil
 }
 
 // sysProcAttr builds the per-run attributes: always its own process group (so the
@@ -177,6 +225,7 @@ type nsjailSandbox struct {
 	bin string
 	uid int
 	gid int
+	cg  *cgroupManager // nil => rlimit-only memory bound (no delegated cgroup)
 }
 
 // NetworkIsolated is always true: nsjail clones a fresh, empty network namespace
@@ -188,11 +237,31 @@ func (s *nsjailSandbox) Backend() string       { return "nsjail" }
 // namespaces, and rlimits; we still put nsjail itself in its own process group so
 // a timeout SIGKILLs nsjail and every descendant together. The caller's cmd.Env
 // flows to the child unchanged via --keep_env.
-func (s *nsjailSandbox) Command(ctx context.Context, spec Spec) *exec.Cmd {
+//
+// When a delegated cgroup is present (F-E/R6), the run also gets a cgroup v2 leaf
+// with memory.max/pids.max, and nsjail is cloned straight into it (CLONE_INTO_
+// CGROUP via UseCgroupFD) so the whole jailed tree is accounted and OOM-bounded
+// there. The returned RunAccounting exposes the OOM verdict + peak; it is nil
+// when no cgroup was attached (no delegation, or begin failed — which degrades to
+// the rlimit bound rather than failing the run).
+func (s *nsjailSandbox) Command(ctx context.Context, spec Spec) (*exec.Cmd, RunAccounting) {
 	cmd := exec.CommandContext(ctx, s.bin, nsjailArgs(s.uid, s.gid, spec)...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	attr := &syscall.SysProcAttr{Setpgid: true}
+
+	var acct RunAccounting
+	if s.cg != nil {
+		if rc, err := s.cg.begin(spec.MemoryMB, spec.MaxProcesses); err != nil {
+			slog.Warn("per-run cgroup unavailable for this run; falling back to rlimit bound", "err", err)
+		} else {
+			attr.UseCgroupFD = true
+			attr.CgroupFD = rc.fd()
+			acct = rc
+		}
+	}
+
+	cmd.SysProcAttr = attr
 	cmd.Cancel = CancelCmd(cmd)
-	return cmd
+	return cmd, acct
 }
 
 // tryNsjail locates the nsjail binary and proves it actually works in this
@@ -225,7 +294,10 @@ func probeNsjail(s *nsjailSandbox) (string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	cmd := s.Command(ctx, Spec{
+	// Probe the jail itself, never the cgroup (s.cg is nil here — the probe runs
+	// before Configure attaches one), so a cgroup misconfig can't fail the nsjail
+	// boot probe; resolveCgroup handles the cgroup dial separately.
+	cmd, _ := s.Command(ctx, Spec{
 		Argv:           []string{"/bin/true"},
 		WorkDir:        dir,
 		TimeoutMs:      2000,
