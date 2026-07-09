@@ -129,6 +129,10 @@ type netnsSandbox struct {
 func (s *netnsSandbox) NetworkIsolated() bool { return s.netns }
 func (s *netnsSandbox) Backend() string       { return "netns" }
 
+// MemoryAccounting: the netns backend has no per-run cgroup, so memory is
+// bounded by RLIMIT_AS / the interpreter heap flag only.
+func (s *netnsSandbox) MemoryAccounting() string { return cgroupLabel(nil) }
+
 // Command wraps the argv in a shell that sets the per-run rlimits, then execs it
 // (exec so the shell does not linger as an extra process in the group). Only -v
 // (address space) and -t (CPU seconds) are applied: the container's /bin/sh is
@@ -232,6 +236,13 @@ type nsjailSandbox struct {
 // for every run (loopback stays down via --iface_no_lo).
 func (s *nsjailSandbox) NetworkIsolated() bool { return true }
 func (s *nsjailSandbox) Backend() string       { return "nsjail" }
+
+// MemoryAccounting reports the resolved per-run memory bound: "cgroup-v2:<parent>"
+// when a delegated cgroup gives each run an authoritative memory.max, else
+// "rlimit-only". This is the same label logged at boot (cgroupLabel), surfaced at
+// runtime so a caller can tell whether the RLIMIT_AS-incompatible runtimes are
+// contained on a memory bomb here.
+func (s *nsjailSandbox) MemoryAccounting() string { return cgroupLabel(s.cg) }
 
 // Command builds the nsjail invocation for one run. nsjail owns the child's cwd,
 // namespaces, and rlimits; we still put nsjail itself in its own process group so

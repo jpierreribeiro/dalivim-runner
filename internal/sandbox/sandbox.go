@@ -171,4 +171,13 @@ type Sandbox interface {
 	// Backend names the active containment backend ("nsjail", "netns", "none")
 	// for boot logs and diagnostics.
 	Backend() string
+
+	// MemoryAccounting names the active per-run memory-bound mechanism:
+	// "cgroup-v2:<parent>" when a delegated cgroup v2 subtree gives every run an
+	// authoritative memory.max (and classifies memory_exceeded from the kernel OOM
+	// event), or "rlimit-only" when memory is bounded solely by RLIMIT_AS / the
+	// interpreter heap flag. It is the runtime-observable posture the escape corpus
+	// probes (via /readyz) to decide whether the RLIMIT_AS-incompatible runtimes
+	// (Go/JS/Java) are actually contained on a memory bomb here, or only on-target.
+	MemoryAccounting() string
 }

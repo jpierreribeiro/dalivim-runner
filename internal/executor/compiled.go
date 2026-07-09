@@ -219,9 +219,17 @@ var javaSpec = compiledLangSpec{
 	// memory.max, but JVM non-heap overhead (metaspace, code cache, GC structs,
 	// thread stacks) sits on top of the heap — a python-sized budget (say 64 MB)
 	// dies at startup or spuriously OOMs regardless of the program. Floor at the
-	// global default (128 MB); no timeout floor — measured JVM cold start is well
-	// under a second, comfortably inside the 3 s default.
+	// global default (128 MB).
 	minMemoryMB: 128,
+	// Timeout floor for the JVM's cold start. Ordinary programs finish well inside
+	// the 3 s default, but a MEMORY BOMB must reach its OutOfMemoryError / cgroup
+	// OOM to be classified memory_exceeded — and the JVM spends its first ~1 s
+	// starting up before the submitted code allocates anything. A tight requested
+	// timeout (e.g. 500 ms) would otherwise trip the wall-clock deadline first and
+	// misclassify the bomb as `timeout`. Floor at 2 s so cold-start + the allocation
+	// that trips -Xmx/memory.max both fit, independent of the requested timeout.
+	// (Still under the 3 s default, so ordinary runs are unaffected.)
+	minTimeoutMs: 2000,
 }
 
 // parseGoVersion pulls the bare version out of `go version` output

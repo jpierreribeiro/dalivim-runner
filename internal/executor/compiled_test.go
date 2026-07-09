@@ -142,6 +142,13 @@ func TestJavaSpec(t *testing.T) {
 	if javaSpec.minMemoryMB != 128 {
 		t.Fatalf("java needs a memory floor (G6): JVM non-heap overhead sits on top of -Xmx, got %d", javaSpec.minMemoryMB)
 	}
+	// A memory bomb must reach its OutOfMemoryError / cgroup OOM to classify as
+	// memory_exceeded; the JVM's ~1 s cold start means a tight requested timeout
+	// would trip the wall-clock deadline first and misclassify the bomb as timeout.
+	// The floor guarantees cold-start + the allocation both fit.
+	if javaSpec.minTimeoutMs < 2000 {
+		t.Fatalf("java needs a timeout floor for JVM cold start so a memory bomb OOMs (not times out) before classification, got %d", javaSpec.minTimeoutMs)
+	}
 	joinedRun := strings.Join(javaSpec.run, " ")
 	for _, want := range []string{"-Xmx{mem}m", "-cp {dir}", "Main"} {
 		if !strings.Contains(joinedRun, want) {

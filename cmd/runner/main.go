@@ -95,6 +95,7 @@ func main() {
 		ShutdownGrace:       time.Duration(cfg.ShutdownGraceMs) * time.Millisecond,
 		Backend:             sb.Backend(),
 		NetworkIsolated:     sb.NetworkIsolated(),
+		MemoryAccounting:    sb.MemoryAccounting(),
 		ReadyRequiresNsjail: cfg.ReadyRequiresNsjail,
 	})
 

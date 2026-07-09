@@ -349,7 +349,23 @@ CI (`.github/workflows/ci.yml`) has two jobs:
   syscall, output flood, egress + cloud-metadata, CPU spin, memory bomb, host
   write — each must be contained and the runner must survive. A **backpressure**
   check (`scripts/smoke-stress.sh`, a `RUNNER_MAX_CONCURRENT_RUNS=1` container)
-  then proves saturation is shed with `503` + `Retry-After`.
+  then proves saturation is shed with `503` + `Retry-After`. This job runs
+  **`cgroup=auto`** (rlimit-only), so the corpus asserts the memory bomb only for
+  the RLIMIT_AS runtimes (`python`/`c`/`cpp`) and **explicitly prints a skip** for
+  `go`/`js`/`java` (no silent gap — see the next job).
+- **`runner-smoke-cgroup`** — the memory-containment proof for the
+  RLIMIT_AS-**incompatible** runtimes (`go`, `js`, `java`). They opt out of
+  `RLIMIT_AS` (they reserve a huge virtual cage a tight `RLIMIT_AS` refuses), so
+  their bound is the delegated **cgroup `memory.max`**, not rlimits. This job
+  engages a **real delegated cgroup** with the same mechanism the prod R6 VPS uses
+  (`RUNNER_CGROUP=require` + `--cgroup-parent=/dalivim`, cgroupfs driver — see
+  [docs/DEPLOY.md §8b](docs/DEPLOY.md)), asserts the boot log shows *cgroup memory
+  accounting ENABLED* and `/readyz` reports `memory_accounting=cgroup-v2`, then
+  bombs `go`/`js`/`java` and requires **`memory_exceeded`** (classified from the
+  kernel OOM event) while the container survives. It is **fail-closed**: if
+  delegation cannot engage, the container refuses to boot and the job reds — it can
+  never report a false green. The same guarantee is re-proven **on-target** by
+  `deploy/deploy.sh verify` on the VPS.
 
 ### Why the smoke container relaxes Docker's own sandbox
 
