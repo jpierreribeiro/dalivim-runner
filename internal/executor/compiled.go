@@ -618,8 +618,8 @@ func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest,
 	duration := int(time.Since(start).Milliseconds())
 
 	res := runnerapi.RunResult{
-		Stdout:     stdout.String(),
-		Stderr:     stderr.String(),
+		Stdout:     encodeStream(req.Encoding, stdout.String()),
+		Stderr:     encodeStream(req.Encoding, stderr.String()),
 		DurationMs: duration,
 		MemoryKB:   memoryKB(acct, cmd),
 		Signal:     signalName(cmd),

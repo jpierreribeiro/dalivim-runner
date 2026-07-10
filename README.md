@@ -143,6 +143,17 @@ still carry the captured first `RUNNER_MAX_OUTPUT_BYTES` (with the truncation
 marker) and `duration_ms` is well under the timeout. It is additive — a caller
 that does not special-case it sees an unsuccessful run with partial output.
 
+#### Binary-safe I/O (`encoding`)
+
+By default `stdin`/`stdout`/`stderr` are UTF-8 text; a program emitting invalid
+UTF-8 has those bytes replaced (`U+FFFD`) at the JSON boundary. Set
+`"encoding": "base64"` to make the data streams binary-safe: `stdin` (and each
+`stdins` element) is base64-**decoded** before it reaches the program, and the
+response `stdout`/`stderr` are base64-**encoded** from the raw process bytes, so
+arbitrary/binary output round-trips without loss. `source_code`/`files` stay text;
+`compile_output` (compiler diagnostics) is always text. Malformed base64 input or
+an unknown encoding → `400`.
+
 **Languages:** `python`, `javascript` (interpreted), `c`, `cpp`, `go` (static
 compiled), `java` (VM compiled). C is linked against libm, so ordinary `<math.h>`
 (`sqrt`, `pow`, …) works. `go` compiles a single `main.go` with `CGO_ENABLED=0`
