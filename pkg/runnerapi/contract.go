@@ -76,11 +76,20 @@ type RunRequest struct {
 
 // RunResult is the response of POST /run.
 type RunResult struct {
-	Status         string `json:"status"`
-	Stdout         string `json:"stdout"`
-	Stderr         string `json:"stderr"`
-	ExitCode       int    `json:"exit_code"`
-	DurationMs     int    `json:"duration_ms"`
+	Status string `json:"status"`
+	Stdout string `json:"stdout"`
+	Stderr string `json:"stderr"`
+
+	// StdoutTruncated / StderrTruncated report that the stream hit the output cap
+	// and was cut: the captured Stdout/Stderr hold only the first cap bytes. This
+	// is the AUTHORITATIVE truncation signal — a caller (e.g. the grader deciding
+	// output_limit) must read this flag, never infer truncation from output length
+	// or from the legacy "\n[output truncated]" marker still appended to the text.
+	StdoutTruncated bool `json:"stdout_truncated"`
+	StderrTruncated bool `json:"stderr_truncated"`
+
+	ExitCode   int `json:"exit_code"`
+	DurationMs int `json:"duration_ms"`
 	CompileMs      int    `json:"compile_ms,omitempty"` // compile-phase wall time (compiled languages); 0/omitted otherwise
 	MemoryKB       int    `json:"memory_kb"`
 	RuntimeName    string `json:"runtime_name"`

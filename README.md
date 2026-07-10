@@ -52,6 +52,8 @@ Response:
   "status": "success",
   "stdout": "hello\n",
   "stderr": "",
+  "stdout_truncated": false,
+  "stderr_truncated": false,
   "exit_code": 0,
   "duration_ms": 41,
   "memory_kb": 18400,
@@ -62,7 +64,10 @@ Response:
 ```
 
 `status` ∈ `success | runtime_error | timeout | memory_exceeded | compile_error |
-output_limit_exceeded | internal_error`. `language` is always required, plus
+output_limit_exceeded | internal_error`. `stdout_truncated` / `stderr_truncated`
+are the authoritative signal that a stream hit the output cap and was cut (the
+captured text holds only the first cap bytes plus a `\n[output truncated]`
+marker); read the boolean rather than scanning for the marker. `language` is always required, plus
 **exactly one** of `source_code` (single-file) or `files` (multi-file, below);
 each limit falls back to the service default and is clamped to the hard ceiling.
 A language may declare a *floor* on a limit (Java floors `memory_mb` at 128 — the
