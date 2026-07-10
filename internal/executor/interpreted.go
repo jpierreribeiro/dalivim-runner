@@ -181,10 +181,12 @@ func (r *interpretedRuntime) execute(ctx context.Context, req runnerapi.RunReque
 	duration := int(time.Since(start).Milliseconds())
 
 	res := runnerapi.RunResult{
-		Stdout:     encodeStream(req.Encoding, stdout.String()),
-		Stderr:     encodeStream(req.Encoding, stderr.String()),
-		DurationMs: duration,
-		MemoryKB:   memoryKB(acct, cmd),
+		Stdout:          encodeStream(req.Encoding, stdout.String()),
+		Stderr:          encodeStream(req.Encoding, stderr.String()),
+		StdoutTruncated: stdout.truncated,
+		StderrTruncated: stderr.truncated,
+		DurationMs:      duration,
+		MemoryKB:        memoryKB(acct, cmd),
 	}
 	if cmd.ProcessState != nil {
 		res.ExitCode = cmd.ProcessState.ExitCode()

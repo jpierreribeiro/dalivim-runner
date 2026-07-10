@@ -109,6 +109,11 @@ func TestPython_OutputFloodKilled(t *testing.T) {
 	if !strings.HasSuffix(res.Stdout, "[output truncated]") {
 		t.Fatalf("expected truncation marker, stdout tail=%q", tail(res.Stdout, 40))
 	}
+	// The authoritative signal: the serialized bool, not the text marker. A caller
+	// (the grader) reads this to decide output_limit without scanning the stream.
+	if !res.StdoutTruncated {
+		t.Fatal("StdoutTruncated must be true on a truncated stream")
+	}
 	if max := 64*1024 + len("\n[output truncated]"); len(res.Stdout) > max {
 		t.Fatalf("stdout %d bytes exceeds cap %d", len(res.Stdout), max)
 	}
