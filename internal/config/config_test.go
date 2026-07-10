@@ -37,20 +37,41 @@ func TestTokenSet_MergesDedupsAndCaps(t *testing.T) {
 // raise it, never drop it below the floor.
 func TestShutdownGrace_RespectsInvariant(t *testing.T) {
 	const compile, run = 20_000, 10_000
+	// A small batch budget keeps the single run (compile+run) the worst case.
+	const smallBatch = 5_000
 	floor := compile + run + shutdownGraceSlackMs
 
-	if got := shutdownGraceMs(compile, run); got != floor {
+	if got := shutdownGraceMs(compile, run, smallBatch); got != floor {
 		t.Fatalf("derived grace = %d, want floor %d", got, floor)
 	}
 
 	t.Setenv("RUNNER_SHUTDOWN_GRACE_MS", "1000") // below the floor
-	if got := shutdownGraceMs(compile, run); got != floor {
+	if got := shutdownGraceMs(compile, run, smallBatch); got != floor {
 		t.Fatalf("an override below the floor must be ignored: got %d, want %d", got, floor)
 	}
 
 	t.Setenv("RUNNER_SHUTDOWN_GRACE_MS", "99000") // above the floor
-	if got := shutdownGraceMs(compile, run); got != 99_000 {
+	if got := shutdownGraceMs(compile, run, smallBatch); got != 99_000 {
 		t.Fatalf("an override above the floor must win: got %d, want 99000", got)
+	}
+}
+
+// TestShutdownGrace_CoversBatchBudget pins the batch half of the G8.3 invariant:
+// when the batch-wide wall budget (plus one per-run timeout of between-runs
+// overshoot) exceeds a single compile+run, the floor tracks the BATCH so a deploy
+// cannot kill an in-flight batch before its own budget elapses.
+func TestShutdownGrace_CoversBatchBudget(t *testing.T) {
+	const compile, run = 20_000, 10_000
+	const bigBatch = 60_000 // the default; larger than compile+run (30_000)
+
+	batchFloor := bigBatch + run + shutdownGraceSlackMs
+	if got := shutdownGraceMs(compile, run, bigBatch); got != batchFloor {
+		t.Fatalf("grace must cover the batch budget: got %d, want %d", got, batchFloor)
+	}
+	// Sanity: the batch floor is strictly larger than the single-run floor it
+	// would otherwise have used — i.e. the fix actually raised the guarantee.
+	if singleFloor := compile + run + shutdownGraceSlackMs; batchFloor <= singleFloor {
+		t.Fatalf("batch floor %d must exceed single-run floor %d", batchFloor, singleFloor)
 	}
 }
 
