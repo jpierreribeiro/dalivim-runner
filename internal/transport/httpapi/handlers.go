@@ -206,7 +206,12 @@ func (h *handler) execute(ctx context.Context, w http.ResponseWriter, req runner
 		"memory_kb", res.MemoryKB,
 		"exit_code", res.ExitCode,
 		"signal", res.Signal,
-		"truncated", strings.Contains(res.Stdout, outputTruncatedMarker) || strings.Contains(res.Stderr, outputTruncatedMarker),
+		// Read the authoritative truncation flags, not a substring of Stdout/Stderr:
+		// under encoding=base64 the streams are base64-encoded, so the plaintext
+		// "[output truncated]" marker is not present and a substring scan would report
+		// truncated=false even when a stream was cut. The flags are set by the executor
+		// regardless of encoding.
+		"truncated", res.StdoutTruncated || res.StderrTruncated,
 	)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -287,10 +292,6 @@ func (h *handler) executeBatch(ctx context.Context, w http.ResponseWriter, req r
 	}
 	_ = json.NewEncoder(w).Encode(res)
 }
-
-// outputTruncatedMarker is the suffix limitedBuffer appends when a stream was
-// truncated (kept in sync with the executor's marker).
-const outputTruncatedMarker = "[output truncated]"
 
 // health is the unauthenticated liveness probe: is the process up.
 func (h *handler) health(w http.ResponseWriter, _ *http.Request) {
