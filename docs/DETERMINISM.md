@@ -32,6 +32,7 @@ The per-language envs, in full:
 |---|---|
 | python | pin + `PATH`, `PYTHONUNBUFFERED=1` (multi-file adds `HOME=/nonexistent`) |
 | javascript | pin + `PATH` (multi-file adds `HOME=/nonexistent`) |
+| lua | pin + `PATH` (multi-file adds `HOME=/nonexistent`) |
 | c / cpp | pin + `GLIBC_TUNABLES=glibc.pthread.rseq=0` |
 | go | pin + `GOMAXPROCS=1` |
 | java | pin only |

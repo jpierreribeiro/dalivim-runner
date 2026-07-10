@@ -20,7 +20,7 @@ internal/
                        nsjail and netns backends + the RUNNER_SANDBOX dial/probe.
                        sandbox_linux.go = real; sandbox_other.go = dev stub
   executor/            language-agnostic core: dispatch, limit clamping, runtimes
-                       languages.go = closed languageSpec registry (python, js);
+                       languages.go = closed languageSpec registry (python, js, lua);
                        interpreted.go = one spec-driven runtime both share
   transport/httpapi/   HTTP server, routing, PSK middleware, handlers
 pkg/runnerapi/         public wire contract (importable by the gateway)

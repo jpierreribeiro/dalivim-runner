@@ -131,4 +131,11 @@ func TestInterpretedMultiFileArgs(t *testing.T) {
 	if strings.Join(js, " ") != "--disable-proto=throw -- src/main.js" {
 		t.Fatalf("node multi-file args = %v", js)
 	}
+	lua := luaSpec.multiFileRunArgs("src/main.lua")
+	if len(lua) != 4 || lua[0] != "-E" || lua[1] != "-e" || lua[3] != "src/main.lua" {
+		t.Fatalf("lua multi-file flags = %v", lua)
+	}
+	if !strings.Contains(lua[2], `package.path="src/?.lua;`) || !strings.Contains(lua[2], `..package.path`) {
+		t.Fatalf("lua package.path wrapper wrong: %s", lua[2])
+	}
 }

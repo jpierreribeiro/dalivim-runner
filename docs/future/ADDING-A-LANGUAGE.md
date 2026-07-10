@@ -8,7 +8,7 @@ one once you know which of the three shapes the language is.
 
 | Shape | Definition | Examples | Run process | Seccomp | Memory bound |
 |---|---|---|---|---|---|
-| **A. Interpreted** | interpreter reads source directly | Python, JS, Ruby | the interpreter | denylist | RLIMIT_AS *or* a heap flag |
+| **A. Interpreted** | interpreter reads source directly | Python, JS, Lua, Ruby | the interpreter | denylist | RLIMIT_AS *or* a heap flag |
 | **B. Static-compiled** | build a **static** binary, run it | C, C++, Go, Rust | the artifact | denylist **or** tight allowlist | RLIMIT_AS + cgroup (**Go: cgroup only** — see below) |
 | **C. VM-compiled** | compile to bytecode, run on a VM | Java, C#, Kotlin | the VM (`java`, `dotnet`) | **denylist only** | VM heap flag + cgroup |
 
@@ -17,7 +17,7 @@ out of compilation? → B. Does a VM run bytecode? → C. No compile step? → A
 
 ---
 
-## Shape A — interpreted (reference: `python`, `javascript`)
+## Shape A — interpreted (reference: `python`, `javascript`, `lua`)
 
 1. **Image**: install the interpreter in the runtime stage (`Dockerfile`). Pin the
    version.

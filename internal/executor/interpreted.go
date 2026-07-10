@@ -42,6 +42,13 @@ func NewNode(sb sandbox.Sandbox, outputLimit, maxProcesses, maxFileSizeMB int) *
 	return newInterpreted(javascriptSpec, sb, outputLimit, maxProcesses, maxFileSizeMB)
 }
 
+// NewLua builds the Lua (PUC-Lua 5.4) runtime. Like Node it reuses the identical
+// interpreted jail; only luaSpec (interpreter argv, source filename, version
+// parsing) differs — the whole point of the seam.
+func NewLua(sb sandbox.Sandbox, outputLimit, maxProcesses, maxFileSizeMB int) *interpretedRuntime {
+	return newInterpreted(luaSpec, sb, outputLimit, maxProcesses, maxFileSizeMB)
+}
+
 // newInterpreted resolves the interpreter and detects its version once at
 // construction so every result carries real provenance rather than a
 // hand-configured value.

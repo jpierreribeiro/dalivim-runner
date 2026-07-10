@@ -76,6 +76,7 @@ func main() {
 		},
 		executor.NewPython(sb, cfg.MaxOutputBytes, cfg.MaxProcesses, cfg.MaxFileSizeMB),
 		executor.NewNode(sb, cfg.MaxOutputBytes, cfg.MaxProcesses, cfg.MaxFileSizeMB),
+		executor.NewLua(sb, cfg.MaxOutputBytes, cfg.MaxProcesses, cfg.MaxFileSizeMB),
 		executor.NewC(sb, compiledConfig(cfg)),
 		executor.NewCpp(sb, compiledConfig(cfg)),
 		executor.NewGo(sb, compiledConfig(cfg)),
