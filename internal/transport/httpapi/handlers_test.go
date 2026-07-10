@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -63,6 +64,57 @@ func TestRun_RejectsEmptySource(t *testing.T) {
 	rec := post(h, "/run", "", `{"language":"python","source_code":""}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for empty source, got %d", rec.Code)
+	}
+}
+
+// TestRun_Base64BinaryRoundTrip is the headline for the base64 I/O mode: a program
+// emitting invalid UTF-8 bytes survives the JSON boundary intact with
+// encoding=base64, and is corrupted (U+FFFD) in the default text path — proving the
+// mode fixes the exact loss it exists for.
+func TestRun_Base64BinaryRoundTrip(t *testing.T) {
+	requirePython(t)
+	h := testServer(t, "")
+	src := "import sys; sys.stdout.buffer.write(bytes([0,255,254,65,10]))"
+	want := string([]byte{0x00, 0xff, 0xfe, 0x41, 0x0a})
+
+	b64body, _ := json.Marshal(map[string]string{"language": "python", "encoding": "base64", "source_code": src})
+	rec := post(h, "/run", "", string(b64body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("base64 run: expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var res runnerapi.RunResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	got, err := base64.StdEncoding.DecodeString(res.Stdout)
+	if err != nil || string(got) != want {
+		t.Fatalf("base64 stdout did not round-trip: stdout=%q decoded=% x err=%v", res.Stdout, got, err)
+	}
+
+	txtbody, _ := json.Marshal(map[string]string{"language": "python", "source_code": src})
+	rec2 := post(h, "/run", "", string(txtbody))
+	var res2 runnerapi.RunResult
+	_ = json.Unmarshal(rec2.Body.Bytes(), &res2)
+	if res2.Stdout == want {
+		t.Fatalf("expected the default text path to corrupt binary output, but it round-tripped exactly")
+	}
+}
+
+func TestRun_Base64InvalidStdin(t *testing.T) {
+	h := testServer(t, "")
+	body, _ := json.Marshal(map[string]string{"language": "python", "encoding": "base64", "source_code": "print(1)", "stdin": "!!! not base64 !!!"})
+	rec := post(h, "/run", "", string(body))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid base64 stdin, got %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRun_UnsupportedEncoding(t *testing.T) {
+	h := testServer(t, "")
+	body, _ := json.Marshal(map[string]string{"language": "python", "encoding": "rot13", "source_code": "print(1)"})
+	rec := post(h, "/run", "", string(body))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unsupported encoding, got %d", rec.Code)
 	}
 }
 

@@ -61,6 +61,17 @@ type RunRequest struct {
 	// separate from TimeoutMs which bounds execution. Ignored for interpreted
 	// languages. Falls back to the service default when zero, clamped to a ceiling.
 	CompileTimeoutMs int `json:"compile_timeout_ms,omitempty"`
+
+	// Encoding selects the wire encoding of the binary data streams. "" or "utf8"
+	// (default) treats Stdin/Stdins and the response Stdout/Stderr as UTF-8 text —
+	// the original behaviour, in which a program emitting invalid UTF-8 has those
+	// bytes replaced at the JSON boundary. "base64" makes the I/O binary-safe:
+	// Stdin (and each Stdins element) is base64-DECODED before it reaches the
+	// program, and the response Stdout/Stderr are base64-ENCODED from the raw
+	// process bytes, so arbitrary/binary output round-trips without loss.
+	// SourceCode/Files stay text (a program is source text); CompileOutput
+	// (compiler diagnostics) is always text.
+	Encoding string `json:"encoding,omitempty"`
 }
 
 // RunResult is the response of POST /run.

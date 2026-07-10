@@ -181,8 +181,8 @@ func (r *interpretedRuntime) execute(ctx context.Context, req runnerapi.RunReque
 	duration := int(time.Since(start).Milliseconds())
 
 	res := runnerapi.RunResult{
-		Stdout:     stdout.String(),
-		Stderr:     stderr.String(),
+		Stdout:     encodeStream(req.Encoding, stdout.String()),
+		Stderr:     encodeStream(req.Encoding, stderr.String()),
 		DurationMs: duration,
 		MemoryKB:   memoryKB(acct, cmd),
 	}

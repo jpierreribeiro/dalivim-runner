@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -105,6 +106,32 @@ func (h *handler) decode(w http.ResponseWriter, r *http.Request) (runnerapi.RunR
 	var req runnerapi.RunRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
+		return runnerapi.RunRequest{}, false
+	}
+	// Binary-safe I/O (opt-in, Judge0-style): base64-DECODE the input streams up
+	// front so the size checks below and the executor both see raw bytes; the
+	// executor base64-ENCODES the output symmetrically. Default (utf8/"") is the
+	// unchanged text passthrough. Applies to the data streams only, never source.
+	switch strings.ToLower(strings.TrimSpace(req.Encoding)) {
+	case "", "utf8":
+		// text passthrough (default)
+	case "base64":
+		dec, derr := base64.StdEncoding.DecodeString(req.Stdin)
+		if derr != nil {
+			http.Error(w, "invalid base64 in stdin", http.StatusBadRequest)
+			return runnerapi.RunRequest{}, false
+		}
+		req.Stdin = string(dec)
+		for i, in := range req.Stdins {
+			d, ierr := base64.StdEncoding.DecodeString(in)
+			if ierr != nil {
+				http.Error(w, "invalid base64 in stdins", http.StatusBadRequest)
+				return runnerapi.RunRequest{}, false
+			}
+			req.Stdins[i] = string(d)
+		}
+	default:
+		http.Error(w, `unsupported encoding (use "utf8" or "base64")`, http.StatusBadRequest)
 		return runnerapi.RunRequest{}, false
 	}
 	if len(req.SourceCode) > h.maxSourceBytes {
