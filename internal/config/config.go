@@ -71,11 +71,13 @@ type Config struct {
 
 	// ShutdownGraceMs is how long the server drains in-flight runs on SIGTERM
 	// before forcing them down (G8.3). It MUST be ≥ the longest a single request
-	// can legitimately occupy the server (a compile phase up to MaxCompileTimeoutMs
-	// followed by a run up to MaxTimeoutMs) plus slack, or a deploy would kill a
-	// long run mid-flight and surface a spurious failure to the student. Derived
-	// from those ceilings; RUNNER_SHUTDOWN_GRACE_MS may RAISE it but never lower it
-	// below the invariant.
+	// can legitimately occupy the server — the greater of a single run (a compile
+	// phase up to MaxCompileTimeoutMs followed by a run up to MaxTimeoutMs) and a
+	// batch (the MaxBatchTotalMs wall budget plus one per-run timeout of
+	// between-runs overshoot) — plus slack, or a deploy would kill a long run
+	// mid-flight and surface a spurious failure to the student. Derived from those
+	// ceilings; RUNNER_SHUTDOWN_GRACE_MS may RAISE it but never lower it below the
+	// invariant.
 	ShutdownGraceMs int
 
 	// StaticSeccomp: off|enforce|complain (empty => off) — the seccomp profile for
@@ -137,11 +139,12 @@ func Load() (Config, error) {
 		MaxArtifactBytes:    envInt("RUNNER_MAX_ARTIFACT_MB", 32) * 1024 * 1024,
 		StaticSeccomp:       os.Getenv("RUNNER_STATIC_SECCOMP"),
 	}
-	// G8.3 invariant: the drain grace must outlast the worst-case single request
-	// (full compile budget + full run budget) plus slack, so a deploy never kills a
-	// run that is still inside its own deadline. RUNNER_SHUTDOWN_GRACE_MS can only
-	// raise it above this floor.
-	cfg.ShutdownGraceMs = shutdownGraceMs(cfg.MaxCompileTimeoutMs, cfg.MaxTimeoutMs)
+	// G8.3 invariant: the drain grace must outlast the worst-case in-flight request
+	// — the greater of a single run (full compile + full run budget) and a batch
+	// (the whole MaxBatchTotalMs wall budget) — plus slack, so a deploy never kills
+	// a request that is still inside its own deadline. RUNNER_SHUTDOWN_GRACE_MS can
+	// only raise it above this floor.
+	cfg.ShutdownGraceMs = shutdownGraceMs(cfg.MaxCompileTimeoutMs, cfg.MaxTimeoutMs, cfg.MaxBatchTotalMs)
 	if len(cfg.ServiceTokens) == 0 && !cfg.Development {
 		return Config{}, fmt.Errorf("RUNNER_SERVICE_TOKEN(S) is required outside development; set RUNNER_SERVICE_TOKEN (or a comma/space-separated RUNNER_SERVICE_TOKENS for zero-downtime rotation), and send X-Runner-Token from the gateway, or set RUNNER_ENV=development for local use")
 	}
@@ -203,12 +206,26 @@ func readyRequiresNsjail() bool {
 // response to flush before the drain deadline fires.
 const shutdownGraceSlackMs = 5000
 
-// shutdownGraceMs computes the drain grace as the invariant floor (worst-case
-// compile + run + slack), then lets RUNNER_SHUTDOWN_GRACE_MS raise it — never
-// lower it below the floor, so the G8.3 guarantee holds regardless of the
-// override.
-func shutdownGraceMs(maxCompileMs, maxRunMs int) int {
-	floor := maxCompileMs + maxRunMs + shutdownGraceSlackMs
+// shutdownGraceMs computes the drain grace as the invariant floor, then lets
+// RUNNER_SHUTDOWN_GRACE_MS raise it — never lower it below the floor, so the
+// G8.3 guarantee holds regardless of the override.
+//
+// The floor must outlast the LONGEST a single request can legitimately hold a
+// concurrency slot, so a deploy SIGTERM never kills a request inside its own
+// deadline. Two shapes compete for "longest":
+//   - a single run: full compile budget + full run budget;
+//   - a batch (stdins[]): the batch-wide wall budget, which batchLoop may
+//     overshoot by at most one per-run timeout (the budget is checked BETWEEN
+//     runs, never mid-run). A batch holds one slot for its whole duration, so
+//     with a large MaxBatchTotalMs it — not the single run — is the worst case.
+//
+// The floor is the max of the two, plus slack.
+func shutdownGraceMs(maxCompileMs, maxRunMs, maxBatchTotalMs int) int {
+	worst := maxCompileMs + maxRunMs
+	if batchWorst := maxBatchTotalMs + maxRunMs; batchWorst > worst {
+		worst = batchWorst
+	}
+	floor := worst + shutdownGraceSlackMs
 	if v := envInt("RUNNER_SHUTDOWN_GRACE_MS", floor); v > floor {
 		return v
 	}
