@@ -138,16 +138,15 @@ var testCommands = map[string]testCommand{
 }
 
 // compiledTestCommand is the CLOSED test-mode recipe for a COMPILED language
-// (G9). Unlike an interpreted test run — and unlike run mode — it does NOT use the
-// two-jail compile→run model: a toolchain's own `test` subcommand compiles AND
-// runs in ONE jail (`go test`), so the recipe is a single full argv (a /bin/sh
-// prelude that seeds the build cache, cds into the module, and execs the test
-// command) plus the jail knobs that single toolchain jail needs. It is edited
-// deliberately here, never request-driven.
+// (G9). It runs the whole compile+test in ONE jail via a /bin/sh prelude, so it
+// avoids run mode's two-jail split: a toolchain's own `test` subcommand does both
+// (`go test`), and a `javac && java-junit` prelude does both for Java. It is
+// edited deliberately here, never request-driven.
 type compiledTestCommand struct {
 	// argv is the full jail argv — a /bin/sh -c prelude (argv[0] absolute, execve'd
-	// directly) that seeds GOCACHE, cds into the in-jail source root, and execs
-	// `go test`. No student token appears in it.
+	// directly) that compiles then runs the tests. No student token appears in it. It
+	// may carry a {mem} placeholder that executeTest substitutes with the run's
+	// memory budget (Java's -Xmx heap flag; go has none).
 	argv []string
 
 	// env is the toolchain environment: the determinism pin plus the offline module
@@ -181,8 +180,28 @@ type compiledTestCommand struct {
 
 	// sourceFile is the filename a single source_code test submission is written to
 	// under the source root. For go it MUST end in _test.go (main_test.go) so
-	// `go test` discovers it; a files[] submission ignores this.
+	// `go test` discovers it; for java the public test class must match it
+	// (MainTest.java); a files[] submission ignores this.
 	sourceFile string
+
+	// reportFile is the workdir-relative path the framework writes its machine-
+	// readable report to, read back from the writable /sandbox bind. "" means the
+	// report is on the process STDOUT (go test -json) and is read from the captured
+	// stream instead. Java writes JUnit XML to a file, so it sets this; go leaves it "".
+	reportFile string
+
+	// writable binds /sandbox READ-WRITE so the framework can hand back files the
+	// host must read (Java: the compiled classes and the JUnit XML report). go leaves
+	// it false — `go test`'s report is on stdout and its build output goes to the
+	// private /tmp tmpfs, so /sandbox stays read-only.
+	writable bool
+
+	// compileFailExit, when non-zero, is the exit code the prelude uses to signal a
+	// COMPILE failure (Java's `javac … || exit 42`) — a code the test launcher never
+	// returns — so the runner routes it to compile_error, distinct from a genuine
+	// test failure. go leaves it 0 and uses buildFailMarker (its build failure shares
+	// exit 1 with a test failure, so it needs the structured report marker instead).
+	compileFailExit int
 }
 
 // compiledTestCommands is the closed compiled-language test registry (G9), keyed
@@ -191,7 +210,46 @@ type compiledTestCommand struct {
 // interpreted path. supportsTestMode unions the two.
 var compiledTestCommands = map[string]*compiledTestCommand{}
 
-func init() { compiledTestCommands["go"] = goTestCommand() }
+func init() {
+	compiledTestCommands["go"] = goTestCommand()
+	compiledTestCommands["java"] = javaTestCommand()
+}
+
+// junitConsoleJar is the in-image path of the bundled JUnit Platform Console
+// Standalone jar (launcher + Jupiter/Vintage engines) — pinned in the Dockerfile.
+const junitConsoleJar = "/opt/junit/junit-console.jar"
+
+// javaTestCommand builds Java's test recipe (G9). Java is VM-compiled, so a single
+// /bin/sh prelude does BOTH phases in one jail: javac compiles {student + hidden
+// test} .java (find handles nested packages) against the JUnit console jar into
+// /sandbox/classes, then the JVM runs the console launcher, which DISCOVERS @Test
+// methods on the classpath and writes JUnit XML into /sandbox/reports. /sandbox is
+// WRITABLE so the classes and the report are host-visible for the hand-back (the
+// jail /tmp is a private tmpfs); the host rootfs stays read-only.
+//
+// `|| exit 42` is the compile-failure SENTINEL: a javac failure short-circuits the
+// chain with a code the JVM launcher never returns, so the runner routes it to
+// compile_error (java's run-mode status), kept distinct from a genuine test failure
+// (exit 1 + a produced report). The JVM opts out of RLIMIT_AS (executeTest sets it
+// 0) and is bounded by -Xmx{mem} + the cgroup, exactly like the Java run jail; the
+// determinism flags mirror run mode (SerialGC, no perf-data, one processor).
+func javaTestCommand() *compiledTestCommand {
+	sh := "mkdir -p /sandbox/classes /sandbox/reports && " +
+		"javac -encoding UTF-8 -cp " + junitConsoleJar + " -d /sandbox/classes $(find /sandbox/src -name '*.java') || exit 42; " +
+		"exec java -Xmx{mem}m -XX:+UseSerialGC -XX:-UsePerfData -XX:ActiveProcessorCount=1 " +
+		"-jar " + junitConsoleJar + " execute --class-path /sandbox/classes --scan-class-path " +
+		"--reports-dir=/sandbox/reports --disable-banner --details=none"
+	return &compiledTestCommand{
+		argv:            []string{"/bin/sh", "-c", sh},
+		env:             determinismEnv("PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/nonexistent"),
+		reportFormat:    "junit-xml",
+		reportFile:      "reports/TEST-junit-jupiter.xml", // the JUnit 5 engine's legacy XML
+		testsFailedExit: 1,
+		compileFailExit: 42,
+		writable:        true,            // classes + report hand-back on /sandbox
+		sourceFile:      "MainTest.java", // source_code: public test class must be MainTest
+	}
+}
 
 // goTestCommand builds Go's test recipe. `go test` compiles AND runs in one jail,
 // so — unlike run mode's split compile/run jails — this is a single full-rootfs,

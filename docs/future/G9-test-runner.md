@@ -1,5 +1,27 @@
 # G9 — Test-runner grading mode (pytest / go test / node --test / JUnit)
 
+> **Status — ✅ COMPLETE: phase 4 + Java (JUnit) (2026-07-11).** All four planned
+> languages support `mode:"test"`: **python** (pytest), **go** (`go test`),
+> **javascript** (`node --test`), and now **java** (JUnit Platform). Java is
+> VM-compiled, so — like `go test` — a single `/bin/sh` jail does BOTH phases:
+> `javac` compiles `{student + hidden test}` `.java` (a `find` handles nested
+> packages) against the bundled JUnit console jar into `/sandbox/classes`, then the
+> JVM runs the console launcher (`java -jar … execute --scan-class-path`), which
+> DISCOVERS `@Test` methods and writes JUnit XML into `/sandbox/reports`. `/sandbox`
+> is **writable** for that classes+report hand-back (the jail `/tmp` is a private
+> tmpfs); the host rootfs stays read-only, denylist, empty netns — the containment is
+> unchanged. **The compile-vs-test-fail distinction** uses a sentinel exit: `javac …
+> || exit 42`, a code the launcher never returns, routes a compile failure to
+> `compile_error` (java's run-mode status), kept apart from a genuine test failure
+> (exit 1 + a produced report → `tests_failed`) and a JVM crash (no report →
+> `runtime_error`). The console jar is bundled in the image pinned by version **and**
+> `sha256` (`ADD --checksum`), reproducible like every other pin. New
+> `compiledTestCommand` fields (`reportFile`, `writable`, `compileFailExit`, `{mem}`
+> subst) generalize the go single-jail path to the two shapes without a two-jail
+> rewrite. Spec/policy unit tests + on-target smoke (pass / fail / compile-error /
+> read-only-rootfs+egress containment); recipe verified end to end against a real JDK
+> + JUnit console during implementation. **G9 is done.** Prior banners follow.
+>
 > **Status — 🟡 phase 3 implemented: + JavaScript (`node --test`) (2026-07-11).**
 > `mode:"test"` is now live for **javascript** via node's built-in `--test` runner
 > (Node ≥18.17, **zero `node_modules`** — kept out of the image on purpose): a

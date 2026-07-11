@@ -202,6 +202,16 @@ var testFilePolicies = map[string]FilePolicy{
 		ForbiddenNames:      names("package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml"),
 		ForbiddenComponents: names("node_modules"),
 	},
+	"java": {
+		Language:    "java",
+		AllowedExts: exts(".java"),
+		// A test submission is .java files (student classes + hidden *Test.java),
+		// possibly in nested packages (com/acme/…). At least one .java is required
+		// (CompileExts). Java has no package manifest in the run policy, so there is
+		// nothing extra to admit or ban here — just the entrypoint dropped (JUnit
+		// DISCOVERS @Test methods on the classpath).
+		CompileExts: exts(".java"),
+	},
 }
 
 // policyFor returns the per-language FilePolicy with the configured numeric caps

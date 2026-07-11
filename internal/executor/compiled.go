@@ -714,19 +714,25 @@ func (r *compiledRuntime) executeTest(ctx context.Context, req runnerapi.RunRequ
 	defer cancelCause(nil)
 
 	cmd, acct := r.sandbox.Command(ctx, sandbox.Spec{
-		Argv:      tc.argv,
+		// {mem} => the run's memory budget (Java's -Xmx heap flag); go's argv has no
+		// placeholder, so subst is a no-op there.
+		Argv:      subst(tc.argv, "{mem}", strconv.Itoa(req.MemoryMB)),
 		WorkDir:   workDir,
 		TimeoutMs: req.TimeoutMs,
-		// Go opts out of RLIMIT_AS (it reserves a huge virtual arena); the cgroup
-		// memory.max is the authoritative bound — same posture as the Go run jail.
+		// The Go runtime and the JVM both reserve a huge virtual arena and die under a
+		// tight RLIMIT_AS, so both opt out; the cgroup memory.max (+ -Xmx for Java) is
+		// the authoritative bound — same posture as their run jails.
 		AddressSpaceMB: 0,
 		MemoryMB:       req.MemoryMB,
 		MaxProcesses:   r.maxProcesses,
 		MaxFileSizeMB:  r.maxFileSizeMB,
 		TmpfsSizeMB:    tc.tmpfsMB, // roomy /tmp for the seeded GOCACHE + build output
-		Writable:       false,      // /sandbox read-only: the toolchain writes to /tmp
-		MinimalRootfs:  false,      // the toolchain must be present to compile+run
-		Seccomp:        sandbox.SeccompDenylist,
+		// go: /sandbox read-only (its build output goes to /tmp, report on stdout).
+		// java: /sandbox WRITABLE so javac's classes and the JUnit XML report are
+		// host-visible for the hand-back (the jail /tmp is a private tmpfs).
+		Writable:      tc.writable,
+		MinimalRootfs: false, // the toolchain must be present to compile+run
+		Seccomp:       sandbox.SeccompDenylist,
 	})
 	if acct != nil {
 		defer acct.Close()
@@ -764,10 +770,11 @@ func (r *compiledRuntime) executeTest(ctx context.Context, req runnerapi.RunRequ
 		res.ExitCode = cmd.ProcessState.ExitCode()
 	}
 
-	report, produced, reportTrunc := readTestReport(workDir, "", stdout.raw(), r.maxReportBytes)
+	// go: the report IS the stdout stream (reportFile ""). java: it is a JUnit XML
+	// file handed back over the writable /sandbox bind (reportFile set).
+	report, produced, reportTrunc := readTestReport(workDir, tc.reportFile, stdout.raw(), r.maxReportBytes)
 	res.TestReport = report
-	// The report is the stdout stream, so its truncation is the stdout buffer's.
-	res.TestReportTruncated = reportTrunc || stdout.truncated
+	res.TestReportTruncated = reportTrunc || (tc.reportFile == "" && stdout.truncated)
 
 	switch {
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
@@ -776,6 +783,11 @@ func (r *compiledRuntime) executeTest(ctx context.Context, req runnerapi.RunRequ
 		res.Status = runnerapi.StatusMemoryExceeded
 	case errors.Is(context.Cause(ctx), errOutputLimit):
 		res.Status = runnerapi.StatusOutputLimitExceeded
+	case tc.compileFailExit != 0 && res.ExitCode == tc.compileFailExit:
+		// The prelude's compile step failed and short-circuited with its sentinel
+		// exit code (Java: javac `|| exit 42`), which the test launcher never returns
+		// — so this is a compile_error, not a test failure or a runtime crash.
+		res.Status = runnerapi.StatusCompileError
 	case tc.buildFailMarker != "" && strings.Contains(report, tc.buildFailMarker):
 		// The toolchain failed to COMPILE the submission (go test -json emits
 		// "Action":"build-fail" and exits 1, same as a test failure). Route it to
