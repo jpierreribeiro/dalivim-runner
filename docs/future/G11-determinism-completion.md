@@ -1,5 +1,17 @@
 # G11 — Determinism completion (hash seed, PRNG, per-language nondeterminism)
 
+> **Status — ✅ implemented (2026-07-11).** `PYTHONHASHSEED=0` is pinned on the
+> Python run env (`internal/executor/languages.go`), and the interpreter now
+> launches with `-s -P` instead of `-I` — **discovered in implementation**: `-I`
+> (isolated mode) implies `-E`, which makes CPython ignore every `PYTHON*` var,
+> silently defeating the seed pin; `-s -P` preserves the user-site / safe-`sys.path`
+> hardening while letting the seed take effect (the run env is fully controlled, so
+> dropping `-E` costs no isolation). The other languages were audited — Go map order
+> is randomized by design and not seedable, JS/Java/Lua expose no equivalent knob —
+> and `docs/DETERMINISM.md` now carries the per-language guarantees + non-guarantees.
+> A behavioral test proves Python set-iteration output is byte-identical across two
+> runs. Planning notes kept below.
+
 A small, high-value follow-up to [G7](G7-execution-determinism.md). G7 pinned the
 *environment* (`LANG`/`LC_ALL`/`TZ`); G11 closes the remaining **language-level**
 sources of run-to-run nondeterminism that G7 explicitly left to the student/backend

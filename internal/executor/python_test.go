@@ -171,3 +171,41 @@ func TestPython_StderrCleanOfUlimitErrors(t *testing.T) {
 		t.Fatalf("stderr should be exactly the program's output, got %q", res.Stderr)
 	}
 }
+
+// TestPythonSpec_PinsHashSeed pins G11: PYTHONHASHSEED=0 must be in the Python run
+// env so set/dict iteration order is stable run-to-run. A spec-level check (no
+// interpreter needed) so the pin can't be dropped silently.
+func TestPythonSpec_PinsHashSeed(t *testing.T) {
+	found := false
+	for _, e := range pythonSpec.env {
+		if e == "PYTHONHASHSEED=0" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("pythonSpec.env must pin PYTHONHASHSEED=0 (G11), got %v", pythonSpec.env)
+	}
+}
+
+// TestPython_HashOrderDeterministic pins G11 behaviorally: the SAME program that
+// prints a set of strings — whose iteration order depends on the hash seed —
+// produces BYTE-IDENTICAL output across two independent runs (each a fresh
+// interpreter process). Without PYTHONHASHSEED=0 the two processes would draw
+// different random seeds and the order could differ; with it pinned they match.
+func TestPython_HashOrderDeterministic(t *testing.T) {
+	requirePython(t)
+	rt := newPython(t)
+	// A 50-element string set: with random seeding the printed order almost always
+	// differs between two processes; pinned, it is identical.
+	src := "print(list({'k' + str(i) for i in range(50)}))"
+	req := runnerapi.RunRequest{SourceCode: src, TimeoutMs: 3000, MemoryMB: 128}
+	a := run(t, rt, req)
+	b := run(t, rt, req)
+	if a.Status != runnerapi.StatusSuccess || b.Status != runnerapi.StatusSuccess {
+		t.Fatalf("expected success, got %q / %q", a.Status, b.Status)
+	}
+	if a.Stdout != b.Stdout {
+		t.Fatalf("set iteration order not deterministic across runs:\n  run1=%s  run2=%s", a.Stdout, b.Stdout)
+	}
+}

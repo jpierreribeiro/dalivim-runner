@@ -30,7 +30,7 @@ The per-language envs, in full:
 
 | Language | Run environment |
 |---|---|
-| python | pin + `PATH`, `PYTHONUNBUFFERED=1` (multi-file adds `HOME=/nonexistent`) |
+| python | pin + `PATH`, `PYTHONUNBUFFERED=1`, `PYTHONHASHSEED=0` (multi-file adds `HOME=/nonexistent`) |
 | javascript | pin + `PATH` (multi-file adds `HOME=/nonexistent`) |
 | lua | pin + `PATH` (multi-file adds `HOME=/nonexistent`) |
 | c / cpp | pin + `GLIBC_TUNABLES=glibc.pthread.rseq=0` |
@@ -40,6 +40,15 @@ The per-language envs, in full:
 Other pinned properties that contribute to run-to-run stability:
 
 - **`GOMAXPROCS=1`** for Go runs (single OS thread for the scheduler).
+- **`PYTHONHASHSEED=0`** for Python runs (G11) — disables CPython's per-process
+  hash randomization, so `set`/`dict` **iteration order** is stable run-to-run
+  instead of a coin flip. Note the interpreter is launched with `-s -P` (user-site
+  and safe-`sys.path` hardening), **not** `-I`: `-I` implies `-E`, which makes
+  CPython ignore all `PYTHON*` vars — including this seed — so it would silently
+  defeat the pin. The run env is fully controlled already, so dropping `-E` costs
+  no isolation. (The seed randomization exists to blunt hash-flooding DoS on dict
+  construction; that is a non-issue here — a run is CPU/wall/memory-bounded and
+  single-shot, so a worst-case-collision input hits the timeout, not a hang.)
 - **Fixed minimal env** — the set above is exhaustive; a host env var can never
   leak into a run and change behaviour.
 - The Dockerfile also sets `ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC` as
@@ -53,7 +62,9 @@ The runner guarantees a stable *environment*, not stable *programs*.
 Language-level nondeterminism remains the submission's (or the backend's)
 concern:
 
-- Go map-iteration order; hash ordering in any language.
+- Go map-iteration order (randomized by the runtime by design, not seedable);
+  `HashMap`/table iteration order in Java/Lua. **Python is the exception** — its
+  `set`/`dict` iteration order **is** pinned via `PYTHONHASHSEED=0` (G11).
 - `time.Now()` / `Date.now()` / wall-clock reads (the *timezone* is pinned; the
   clock still advances).
 - Unseeded PRNGs (`math/rand`, `Math.random()`, `random` without a seed).

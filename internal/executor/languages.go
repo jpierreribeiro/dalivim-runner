@@ -100,23 +100,37 @@ var pythonSpec = languageSpec{
 	name:       "python",
 	sourceFile: "main.py",
 	binNames:   []string{"python3"},
-	// -I: isolated mode — ignore env vars and the user site, and keep the cwd off
-	// sys.path, so a submission cannot import planted modules.
-	runArgs: []string{"-I", "main.py"},
+	// -s -P: the isolation that matters for the jail, WITHOUT -E. -s drops the user
+	// site; -P keeps the script's directory and cwd OFF sys.path[0], so a submission
+	// cannot import planted modules. We deliberately do NOT use -I (isolated mode):
+	// -I implies -E, which makes CPython IGNORE every PYTHON* env var — including
+	// PYTHONHASHSEED, which would silently defeat the G11 determinism pin below. The
+	// run env is already fully controlled (an explicit minimal cmd.Env), so -E adds
+	// nothing here, while -s -P preserves the sys.path / user-site hardening AND lets
+	// PYTHONHASHSEED take effect. (-P needs CPython ≥3.11; the image ships 3.12.)
+	runArgs: []string{"-s", "-P", "main.py"},
 	// Pinned locale/TZ (G7): with LANG/LC_ALL set explicitly, CPython no longer
 	// needs its PEP 538 coercion — the locale is policy, not a runtime guess.
-	env:          determinismEnv("PATH=/usr/local/bin:/usr/bin:/bin", "PYTHONUNBUFFERED=1"),
+	// PYTHONHASHSEED=0 (G11) disables per-process hash randomization, so
+	// set/dict ITERATION ORDER is stable run-to-run instead of a coin flip —
+	// otherwise a program printing a set of strings can emit different byte order
+	// on each run. It is a pure environment switch (no program change), the same
+	// class as the locale pin. The seed randomization exists to blunt hash-flooding
+	// DoS on dict construction, which is a non-issue here: the run is already
+	// CPU/wall/memory-bounded and single-shot, so a worst-case-collision input hits
+	// the timeout, not an unbounded hang — do not "fix" this pin back.
+	env:          determinismEnv("PATH=/usr/local/bin:/usr/bin:/bin", "PYTHONUNBUFFERED=1", "PYTHONHASHSEED=0"),
 	versionArgs:  []string{"--version"}, // "Python 3.12.3"
 	parseVersion: secondField,           // -> "3.12.3"
 	memErrSubstr: "MemoryError",
 	// CPython runs fine under a hard RLIMIT_AS; keep the deterministic virtual cap.
 	capAddressSpace: true,
-	// Multi-file: a controlled runpy wrapper. `-I main.py` is isolated mode, which
-	// removes the SCRIPT'S directory from sys.path — so a sibling `import helper`
-	// would fail. Instead of relaxing isolation (which would re-open the user-site
-	// and env-var import surface `-I` closes), keep `-I`/`-B` and inject exactly one
-	// hardcoded in-jail path (/sandbox/src) with runpy. The inserted path is fixed
-	// here, never caller-controlled, so a submission cannot point imports elsewhere.
+	// Multi-file: a controlled runpy wrapper. `-P` keeps the script dir and cwd off
+	// sys.path (isolated-mode's key property), so a sibling `import helper` would
+	// fail — so we inject exactly one hardcoded in-jail path (/sandbox/src) with
+	// runpy. The inserted path is fixed here, never caller-controlled, so a
+	// submission cannot point imports elsewhere. Same -s -P (not -I) reasoning as
+	// runArgs: -I's implied -E would ignore PYTHONHASHSEED and break the G11 pin.
 	multiFileRunArgs: pythonRunpyArgs,
 }
 
@@ -173,15 +187,16 @@ var luaSpec = languageSpec{
 	multiFileRunArgs: luaRunArgs,
 }
 
-// pythonRunpyArgs builds the CPython multi-file argv tail: isolated + no-bytecode
-// mode, then a runpy wrapper that runs the entrypoint as __main__ with exactly
-// the source root on sys.path. entryRel is the entrypoint relative to cwd
-// ("src/main.py"); the sys.path entry is the hardcoded source-root name, never
-// the caller's path, so imports are confined to the submitted tree.
+// pythonRunpyArgs builds the CPython multi-file argv tail: -s -P (user-site +
+// safe-sys.path hardening, but NOT -I — see the spec comment; -I's implied -E would
+// ignore PYTHONHASHSEED) + no-bytecode, then a runpy wrapper that runs the
+// entrypoint as __main__ with exactly the source root on sys.path. entryRel is the
+// entrypoint relative to cwd ("src/main.py"); the sys.path entry is the hardcoded
+// source-root name, never the caller's path, so imports are confined to the tree.
 func pythonRunpyArgs(entryRel string) []string {
 	wrapper := "import runpy, sys; sys.path.insert(0, " + strconv.Quote(srcRootName) +
 		"); runpy.run_path(" + strconv.Quote(entryRel) + ", run_name=\"__main__\")"
-	return []string{"-I", "-B", "-c", wrapper}
+	return []string{"-s", "-P", "-B", "-c", wrapper}
 }
 
 // nodeRunArgs builds the Node multi-file argv tail: the __proto__ hardening flag,
