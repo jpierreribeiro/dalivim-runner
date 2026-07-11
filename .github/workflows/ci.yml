@@ -857,3 +857,121 @@ jobs:
             --no-progress \
             --format table \
             runner:scan
+
+  # S3 — supply-chain provenance. An ISOLATED publish job (kept separate from the
+  # functional/scan lanes for the same reason security-scan is, ci.yml above) that,
+  # for a push to main, publishes the image to GHCR and produces ATTESTABLE
+  # PROVENANCE: a signed image, a signed SBOM, and a SLSA build-provenance
+  # attestation binding the digest to THIS workflow + commit. So a deploy can prove
+  # it runs the exact artifact CI built, and an auditor can enumerate every component
+  # from a signed document.
+  #
+  # KEYLESS by design (Sigstore/Fulcio via the job's OIDC token) — no long-lived
+  # signing key to store, preserving the runner's minimal-secret-footprint stance.
+  #
+  # It is PUBLISH-TIME ONLY: it never runs on pull_request or the weekly schedule, so
+  # a Sigstore/Fulcio outage can never red the PR lane (mirrors keeping the CVE scan
+  # separate) — and fork PRs cannot mint an OIDC token anyway. Its first LIVE proof is
+  # therefore the post-merge run on main, validated on-target by `deploy.sh
+  # verify-image` before the signed image is trusted (docs/DEPLOY.md).
+  publish:
+    name: publish + sign + SBOM (GHCR)
+    # Only on a push to main (the branch prod deploys from — see deploy/README.md) or
+    # a manual dispatch. Gated behind the correctness + containment lanes so a failed
+    # unit/fuzz/smoke build is never published or signed.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: [test, fuzz, runner-smoke]
+    runs-on: ubuntu-latest
+    # Narrowly scoped OIDC + registry writes, job-level ONLY — the workflow's
+    # top-level `contents: read` stays intact for every other job.
+    permissions:
+      contents: read       # checkout
+      packages: write      # push the image + attestations to GHCR
+      id-token: write      # keyless cosign + provenance (Fulcio OIDC)
+      attestations: write  # actions/attest-build-provenance
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build once and push by digest. provenance:false keeps a single, plain image
+      # manifest (not a buildkit attestation index) so the digest we sign is exactly
+      # the image a deploy pulls — our own SLSA attestation below is the signed
+      # provenance, not buildkit's unsigned one.
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          provenance: false
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      # Sign the immutable digest keyless. This is the signature `cosign verify`
+      # checks on deploy (docs/DEPLOY.md / deploy.sh verify-image).
+      - name: Sign the image (keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "ghcr.io/${{ github.repository }}@${DIGEST}"
+
+      - name: Install trivy (SBOM generator)
+        # Same installer + auth + retry rationale as the security-scan job above.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for i in 1 2 3 4 5; do
+            if curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+                 | sh -s -- -b /usr/local/bin && trivy --version; then
+              exit 0
+            fi
+            echo "trivy install attempt $i failed; retrying in $((i*5))s..."; sleep $((i*5))
+          done
+          echo "::error::trivy install failed after 5 attempts"; exit 1
+
+      # A standard SPDX-json Bill of Materials of the SHIPPED image (bases + every
+      # pinned toolchain: python/node/gcc/go/openjdk/nsjail libs). trivy authenticates
+      # to GHCR via the docker login above to pull the just-pushed digest.
+      - name: Generate SBOM (SPDX-json)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: trivy image --quiet --format spdx-json --output sbom.spdx.json "ghcr.io/${{ github.repository }}@${DIGEST}"
+
+      - name: Upload SBOM as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-spdx-json
+          path: sbom.spdx.json
+
+      # Attach the SBOM to the digest as a keyless-signed attestation, so the
+      # inventory travels WITH the image and is itself verifiable.
+      - name: Attest the SBOM (keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign attest --yes --type spdxjson --predicate sbom.spdx.json "ghcr.io/${{ github.repository }}@${DIGEST}"
+
+      # SLSA build-provenance bound to the digest, workflow, and commit — GitHub's
+      # canonical generator (hand-rolling the predicate is the error-prone part),
+      # pushed to the registry alongside the image and verifiable with
+      # `gh attestation verify` / cosign.
+      - name: Attach SLSA build-provenance attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true

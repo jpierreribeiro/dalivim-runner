@@ -362,6 +362,43 @@ mode is for catching whatever your specific workload needs beyond that before yo
 flip it on. Interpreted languages and the compile jail are unaffected (they keep
 the denylist).
 
+## 8d. (Optional) Verify the published image's provenance — S3
+
+The default deploy (§6) **builds the image from pinned source on the box**, so you
+already run exactly what the Dockerfile pins describe. Independently, every push to
+`main` also **publishes a signed image** to GHCR with attestable provenance, so an
+auditor (or a pull-based deploy) can prove the artifact and enumerate its components:
+
+- **Signed image** — `cosign sign` (keyless, Sigstore/Fulcio; no stored key).
+- **Signed SBOM** — an SPDX-json Bill of Materials attached as a cosign attestation
+  (and uploaded as a workflow build artifact).
+- **SLSA build-provenance** — binds the digest to the workflow + commit, pushed to
+  the registry and verifiable with `gh attestation verify`.
+
+If you deploy by **pulling** the published image instead of building on the box,
+gate it on a signature check that fails **closed** — verifying the signer *identity*
+(this repo's publish workflow), not merely that *something* signed it:
+
+```sh
+# 0) Pull the published image (or a specific @sha256 digest).
+docker pull ghcr.io/jpierreribeiro/dalivim-runner:latest
+
+# 1) PROVE it was signed by THIS repo's publish workflow, or refuse to deploy.
+#    Requires cosign on the box. Fails closed on unsigned/tampered/wrong-signer.
+cd deploy
+./deploy.sh verify-image ghcr.io/jpierreribeiro/dalivim-runner:latest
+
+# 2) Only then bring it up (point IMAGE at the pulled ref in runner.env first).
+./deploy.sh up && ./deploy.sh verify
+```
+
+`verify-image` pins the trusted signer to
+`https://github.com/jpierreribeiro/dalivim-runner/.github/workflows/ci.yml@refs/heads/main`
+via `COSIGN_IDENTITY`/`COSIGN_ISSUER` (override in `runner.env` only if the workflow
+path changes). This mirrors the `RUNNER_SANDBOX=require` discipline: a failed check
+is a hard stop, never a warning. Building on the box (§6) needs none of this — it is
+purely for the pull-based flow.
+
 ## 9. Expose over HTTPS (Caddy) + firewall
 
 The backend (Railway) reaches the runner over the public internet, so it must be

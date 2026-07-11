@@ -1,5 +1,28 @@
 # S3 — Supply-chain: SBOM + image signing / provenance (cosign)
 
+> **Status — ✅ implemented (2026-07-11), CI-only per the roadmap framing.** An
+> isolated `publish` job (`.github/workflows/ci.yml`) runs on push to `main` /
+> `workflow_dispatch` — never on PR or the weekly schedule, so signing-infra
+> availability never gates functional CI, and gated behind `test`/`fuzz`/`runner-smoke`
+> so a failed build is never signed. It pushes the image to
+> `ghcr.io/jpierreribeiro/dalivim-runner`, then **keyless** (Fulcio OIDC, no stored
+> key): `cosign sign` the digest, generate an SPDX-json **SBOM** with trivy and attach
+> it via `cosign attest` (also uploaded as a build artifact), and attach a **SLSA
+> build-provenance** attestation (`actions/attest-build-provenance`) binding the digest
+> to the workflow + commit. OIDC/registry writes are scoped to the job only; the
+> workflow keeps top-level `contents: read`.
+>
+> **Deploy scope was kept CI-only** (matching the roadmap's "S3 = CI-only, no runtime
+> change"): the default deploy still **builds from pinned source on the box** — for a
+> "dumb, contained executor," inspectable source is not obviously weaker than trusting
+> a registry, and pull-and-verify adds new failure modes (registry outage, cosign on
+> the box). The spec's fail-closed verify ships as an **opt-in** `deploy.sh
+> verify-image` (`cosign verify` with the signer identity **pinned** to this repo's
+> workflow), documented in `docs/DEPLOY.md §8d`, so flipping to a full pull-and-verify
+> deploy later is a config change, not a rewrite. **Note:** the job's first LIVE run is
+> post-merge on `main` (OIDC + GHCR push don't run on PR branches). Planning notes kept
+> below.
+
 The image is already **reproducibly pinned** (bases by digest, every apt toolchain by
 exact version) and **CVE-scanned** (trivy, fixable HIGH/CRITICAL gate). The next
 maturity degree is **attestable provenance**: produce a Software Bill of Materials,

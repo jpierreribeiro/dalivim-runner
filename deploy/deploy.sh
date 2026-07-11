@@ -3,11 +3,12 @@
 # Reproducible deploy for dalivim-runner. One command instead of a hand-pasted
 # `docker run` with a dozen flags. See deploy/README.md.
 #
-#   ./deploy.sh setup     one-time host prep for R6 (cgroup delegation + reboot-safe unit)
-#   ./deploy.sh up         (re)create the runner container from deploy/runner.env
-#   ./deploy.sh verify     run the acceptance checks from INSIDE the container
-#   ./deploy.sh logs       tail the runner logs
-#   ./deploy.sh token      print the current service token
+#   ./deploy.sh setup         one-time host prep for R6 (cgroup delegation + reboot-safe unit)
+#   ./deploy.sh up             (re)create the runner container from deploy/runner.env
+#   ./deploy.sh verify         run the acceptance checks from INSIDE the container
+#   ./deploy.sh verify-image   (opt-in, S3) cosign-verify a pulled GHCR image's signature + signer
+#   ./deploy.sh logs           tail the runner logs
+#   ./deploy.sh token          print the current service token
 #
 # The service token is never committed: `up` reuses the running container's token
 # (safe cutover of a live runner), else the saved deploy/.runner-token, else a
@@ -35,6 +36,17 @@ NPROC=512
 RUNNER_DEFAULT_MEMORY_MB=""                 # empty => the image's built-in default
 RUNNER_MAX_MEMORY_MB=""
 
+# --- S3 supply-chain verify (opt-in) -----------------------------------------
+# Only used by `verify-image`, for the flow where you deploy by PULLING the signed
+# GHCR image instead of building on target. The default deploy still builds from
+# pinned source on the box (deploy/README.md), so these are inert unless you call
+# `verify-image`. The signer identity is PINNED to this repo's publish workflow, so
+# a signature from any other Fulcio identity is rejected — provenance must prove
+# "built by us", not merely "signed by someone".
+REGISTRY_IMAGE="${REGISTRY_IMAGE:-ghcr.io/jpierreribeiro/dalivim-runner}"
+COSIGN_IDENTITY="${COSIGN_IDENTITY:-https://github.com/jpierreribeiro/dalivim-runner/.github/workflows/ci.yml@refs/heads/main}"
+COSIGN_ISSUER="${COSIGN_ISSUER:-https://token.actions.githubusercontent.com}"
+
 # shellcheck source=/dev/null
 [ -f "$ENV_FILE" ] && . "$ENV_FILE"
 
@@ -56,6 +68,24 @@ resolve_token() {
 
 cmd_token() { [ -s "$TOKEN_FILE" ] && cat "$TOKEN_FILE" && echo || die "no token yet — run './deploy.sh up' first"; }
 cmd_logs()  { docker logs -f "$CONTAINER"; }
+
+# S3 supply-chain gate (opt-in). Prove a GHCR image digest was signed by THIS repo's
+# publish workflow BEFORE trusting it — keyless, verifying the signer IDENTITY (not
+# just "signed"), failing CLOSED on any mismatch, the same discipline as
+# RUNNER_SANDBOX=require. For the pull-based deploy flow; run it before './deploy.sh
+# up' against the pulled image. Usage: ./deploy.sh verify-image [ref] (default
+# $REGISTRY_IMAGE:latest). cosign resolves the ref to a digest and checks the sig on it.
+cmd_verify_image() {
+  need cosign
+  local ref="${1:-$REGISTRY_IMAGE:latest}"
+  log "verifying signature + signer identity for $ref"
+  cosign verify \
+    --certificate-identity="$COSIGN_IDENTITY" \
+    --certificate-oidc-issuer="$COSIGN_ISSUER" \
+    "$ref" >/dev/null \
+    || die "cosign verify FAILED for $ref — refusing to trust it (unsigned, tampered, or wrong signer). NOT deploying."
+  ok "signature verified: $ref was signed by this repo's publish workflow ($COSIGN_IDENTITY)"
+}
 
 cmd_setup() {
   need docker
@@ -186,10 +216,11 @@ PY
 }
 
 case "${1:-}" in
-  setup)  cmd_setup ;;
-  up)     cmd_up ;;
-  verify) cmd_verify ;;
-  logs)   cmd_logs ;;
-  token)  cmd_token ;;
-  *) printf 'usage: %s {setup|up|verify|logs|token}\n' "${0##*/}"; exit 2 ;;
+  setup)        cmd_setup ;;
+  up)           cmd_up ;;
+  verify)       cmd_verify ;;
+  verify-image) shift; cmd_verify_image "$@" ;;
+  logs)         cmd_logs ;;
+  token)        cmd_token ;;
+  *) printf 'usage: %s {setup|up|verify|verify-image|logs|token}\n' "${0##*/}"; exit 2 ;;
 esac
