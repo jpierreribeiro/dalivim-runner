@@ -92,6 +92,12 @@ type languageSpec struct {
 	// mirrors compiledLangSpec, where the JVM's baseline overhead does.
 	minTimeoutMs int
 	minMemoryMB  int
+
+	// resultFormat labels Stdout as a STRUCTURED result rather than free text (G10):
+	// "json-rows" for sql, so the backend knows Stdout is a JSON row array. Empty
+	// for the ordinary program languages (their Stdout is plain process output). It
+	// is stamped onto RunResult.ResultFormat by execute().
+	resultFormat string
 }
 
 // pythonSpec runs CPython in isolated mode. Behaviour-identical to the original
@@ -187,6 +193,56 @@ var luaSpec = languageSpec{
 	multiFileRunArgs: luaRunArgs,
 }
 
+// sqliteSpec runs a SQL script against a fresh IN-MEMORY SQLite (G10). The engine
+// (sqlite3) is an implementation detail behind the wire id "sql"; mechanically it
+// is Shape A — an interpreter reading a source file — so it reuses the identical
+// interpreted jail. The one genuinely new thing is a PINNED, deterministic result
+// format (the SQL analogue of G7's locale pin): every run emits the same bytes for
+// the same script.
+//
+// The argv is fixed here, never caller-influenced:
+//
+//	-batch          non-interactive (no prompts, never blocks on a tty)
+//	-init /dev/null no ~/.sqliterc is read
+//	-bail           STOP at the first SQL error (deterministic: a failed statement
+//	                halts with exit 1 instead of running on to emit partial rows)
+//	-json           output mode: a JSON array of row objects per SELECT — the
+//	                backend parses rows without scraping text (result_format below)
+//	the .output/.dbconfig/.output sandwich DISABLES run-time extension loading
+//	(the CLI enables load_extension() by DEFAULT). .dbconfig echoes its new setting
+//	to stdout, which would corrupt the JSON, so it is wrapped in .output /dev/null
+//	… .output to swallow that one line — verified empirically.
+//	:memory:        a throwaway in-process DB: no data dir, no socket, no persistence
+//	.read main.sql  execute the submitted script (cwd-relative, like every Shape-A
+//	                language's source filename)
+//
+// Containment note: SQLite's readfile()/writefile() and ATTACH are NOT disabled in
+// code — the jail contains them (read-only rootfs with no secrets, size-capped
+// /tmp, empty netns), exactly as the plan intends; extension loading IS disabled
+// (defense in depth) since it is the one primitive that could pull in new code.
+var sqliteSpec = languageSpec{
+	name:       "sql",
+	sourceFile: "main.sql",
+	binNames:   []string{"sqlite3"},
+	runArgs: []string{
+		"-batch", "-init", "/dev/null", "-bail", "-json",
+		"-cmd", ".output /dev/null",
+		"-cmd", ".dbconfig load_extension off",
+		"-cmd", ".output",
+		":memory:", ".read main.sql",
+	},
+	env:             determinismEnv("PATH=/usr/local/bin:/usr/bin:/bin"),
+	versionArgs:     []string{"-version"}, // "3.45.1 2024-01-30 ..."
+	parseVersion:    firstField,           // -> "3.45.1"
+	memErrSubstr:    "out of memory",      // SQLite's OOM marker (no-cgroup fallback)
+	capAddressSpace: true,                 // sqlite's allocator is bounded by RLIMIT_AS
+	resultFormat:    "json-rows",
+	// No multiFileRunArgs: SQL is source_code-only in phase 1 (a single script). A
+	// files[] sql request is rejected at normalization (no sql file policy), because
+	// SQLite `.read` is cwd-relative and multi-file composition is a documented
+	// follow-up, not a silent half-feature.
+}
+
 // pythonRunpyArgs builds the CPython multi-file argv tail: -s -P (user-site +
 // safe-sys.path hardening, but NOT -I — see the spec comment; -I's implied -E would
 // ignore PYTHONHASHSEED) + no-bytecode, then a runpy wrapper that runs the
@@ -230,6 +286,16 @@ func secondField(out string) string {
 	f := strings.Fields(out)
 	if len(f) >= 2 {
 		return f[1]
+	}
+	return ""
+}
+
+// firstField returns the first whitespace-separated token, e.g.
+// "3.45.1 2024-01-30 ..." -> "3.45.1" (sqlite3 -version). Empty when blank.
+func firstField(out string) string {
+	f := strings.Fields(out)
+	if len(f) >= 1 {
+		return f[0]
 	}
 	return ""
 }

@@ -1,5 +1,26 @@
 # G10 — SQL execution (SQLite first, PostgreSQL as a later shape)
 
+> **Status — 🟡 phase 1 implemented: SQLite (2026-07-11).** `language:"sql"` runs a
+> script against an in-memory SQLite (`sqlite3 :memory:`) and returns the result set
+> as a **pinned, deterministic JSON row array** on stdout (`result_format:
+> "json-rows"`, a new additive result field). SQLite is Shape A — an interpreter
+> over `main.sql` — so it reuses the identical interpreted jail
+> (`internal/executor/languages.go: sqliteSpec` + `NewSQL`); the only new thing is
+> the pinned result format. The argv is fixed: `-batch -init /dev/null -bail -json`,
+> `:memory:`, `.read main.sql`. **Discovered in implementation (verified against
+> sqlite 3.45):** (1) the CLI enables `load_extension()` by **default**, so it is
+> turned off with `.dbconfig load_extension off` — and that command **echoes its
+> setting to stdout**, which would corrupt the JSON, so it is wrapped in
+> `.output /dev/null … .output` to swallow the one line; (2) `-bail` makes a SQL
+> error fail-fast (exit 1 → `runtime_error`) instead of running on to emit partial
+> rows. **Scope:** source_code-only — a `files[]` sql request is a clean 400 (no sql
+> file policy), because SQLite `.read` is cwd-relative and multi-file composition is
+> deferred rather than shipped half-formed. Containment reuses the shared jail (no
+> new surface, per this spec); the SQL-specific pieces (pinned format, error
+> classification, extension-load disabled, timeout bound) get on-target smokes in
+> `ci.yml`. Image: `sqlite3` pinned. Usage guide: `docs/SQL.md`. **Deferred:** phase
+> 2 PostgreSQL (socket-orchestrated) and multi-file SQL.
+
 SQL is one of the most-taught practical skills and a natural fit for an execution
 judge — *given a schema + seed + query, run it and return the result set*. It stays
 on the **executor** side: the runner runs the SQL against an **ephemeral, throwaway**
