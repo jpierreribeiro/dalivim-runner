@@ -8,9 +8,13 @@
 > `ghcr.io/jpierreribeiro/dalivim-runner`, then **keyless** (Fulcio OIDC, no stored
 > key): `cosign sign` the digest, generate an SPDX-json **SBOM** with trivy and attach
 > it via `cosign attest` (also uploaded as a build artifact), and attach a **SLSA
-> build-provenance** attestation (`actions/attest-build-provenance`) binding the digest
-> to the workflow + commit. OIDC/registry writes are scoped to the job only; the
-> workflow keeps top-level `contents: read`.
+> build-provenance** predicate via `cosign attest --type slsaprovenance` binding the
+> digest to the workflow + commit. All three (signature, SBOM, provenance) are written
+> to GHCR by cosign — **not** GitHub's `actions/attest-build-provenance`, whose
+> attestation API returns "Feature not available for user-owned private repositories";
+> the cosign path is registry-stored, verifiable the same way, and unaffected. OIDC +
+> `packages: write` are scoped to the job only; the workflow keeps top-level
+> `contents: read` (no `attestations: write` needed).
 >
 > **Deploy scope was kept CI-only** (matching the roadmap's "S3 = CI-only, no runtime
 > change"): the default deploy still **builds from pinned source on the box** — for a
