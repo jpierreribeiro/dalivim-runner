@@ -279,6 +279,7 @@ type compiledRuntime struct {
 	compileMemoryMB  int                    // RLIMIT_AS/cgroup for the compile phase
 	maxArtifactBytes int                    // reject artifacts larger than this (compile bombs)
 	runSeccomp       sandbox.SeccompProfile // seccomp profile for the run jail
+	maxReportBytes   int                    // cap on the returned test report (mode=test, G9)
 }
 
 // CompiledConfig carries the compile-phase knobs (execution knobs are shared with
@@ -292,6 +293,7 @@ type CompiledConfig struct {
 	CompileMemoryMB  int
 	MaxArtifactBytes int
 	RunSeccomp       sandbox.SeccompProfile
+	MaxReportBytes   int // cap on the returned test report (mode=test, G9)
 }
 
 // NewC / NewCpp build the C and C++ runtimes on the shared sandbox.
@@ -332,6 +334,7 @@ func newCompiled(spec compiledLangSpec, sb sandbox.Sandbox, cfg CompiledConfig) 
 		compileMemoryMB:  cfg.CompileMemoryMB,
 		maxArtifactBytes: cfg.MaxArtifactBytes,
 		runSeccomp:       runSeccomp,
+		maxReportBytes:   cfg.MaxReportBytes,
 	}
 }
 
@@ -360,6 +363,11 @@ func (r *compiledRuntime) LimitFloors() Floors {
 // short-circuits to compile_error WITHOUT executing anything; only a validated
 // artifact reaches the run jail.
 func (r *compiledRuntime) Run(ctx context.Context, req runnerapi.RunRequest) runnerapi.RunResult {
+	if req.Mode == modeTest {
+		// mode=test (G9) is a single-toolchain-jail shape (compile+run in one jail),
+		// wholly separate from the two-jail compile→run below, which stays unchanged.
+		return r.runTest(ctx, req)
+	}
 	workDir, err := os.MkdirTemp("", "dalivim-build-*")
 	if err != nil {
 		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "could not create build dir"}
@@ -644,6 +652,142 @@ func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest,
 		res.Status = runnerapi.StatusOutputLimitExceeded
 	default:
 		res.Status = runnerapi.StatusRuntimeError
+	}
+	return res
+}
+
+// runTest is the compiled-language mode=test entry point (G9). Unlike run mode's
+// two jails, a toolchain's `test` subcommand compiles AND runs in ONE jail, so
+// this materializes the submission, synthesizes the module file, and launches the
+// test command in a single full-rootfs, toolchain-present, writable-/tmp jail.
+func (r *compiledRuntime) runTest(ctx context.Context, req runnerapi.RunRequest) runnerapi.RunResult {
+	tc, ok := compiledTestCommands[r.spec.name]
+	if !ok {
+		// Defensive: the service only routes a test-supported language here.
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "test mode not supported for this language"}
+	}
+	workDir, err := os.MkdirTemp("", "dalivim-test-*")
+	if err != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "could not create sandbox dir"}
+	}
+	defer os.RemoveAll(workDir)
+
+	if err := r.prepareTest(workDir, req, tc); err != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: err.Error()}
+	}
+	return r.executeTest(ctx, req, workDir, tc)
+}
+
+// prepareTest materializes the submission under the source root (/sandbox/src, the
+// module root) and runs the toolchain's module-file prep (synthesize go.mod). A
+// files[] tree is materialized against the TEST policy (materializeSource is
+// mode-aware); a single source_code test is written to the toolchain's test
+// filename (go: main_test.go, so `go test` discovers it).
+func (r *compiledRuntime) prepareTest(workDir string, req runnerapi.RunRequest, tc *compiledTestCommand) error {
+	if len(req.Files) == 0 {
+		srcDir := filepath.Join(workDir, srcRootName)
+		if err := os.MkdirAll(srcDir, 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(srcDir, tc.sourceFile), []byte(req.SourceCode), 0o600); err != nil {
+			return errors.New("could not write source")
+		}
+	} else if _, err := materializeSource(workDir, req); err != nil {
+		return err
+	}
+	if tc.prep != nil {
+		return tc.prep(workDir)
+	}
+	return nil
+}
+
+// executeTest launches the single-jail test command and classifies the outcome
+// (G9). The report is on stdout (go test -json), so the stdout buffer is sized to
+// the report cap; /sandbox stays READ-ONLY (the toolchain writes to the writable
+// /tmp), the toolchain rootfs is present, and the run stays on the denylist —
+// never the static allowlist — because the toolchain touches a wide syscall
+// surface.
+func (r *compiledRuntime) executeTest(ctx context.Context, req runnerapi.RunRequest, workDir string, tc *compiledTestCommand) runnerapi.RunResult {
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(req.TimeoutMs)*time.Millisecond)
+	defer cancel()
+	ctx, cancelCause := context.WithCancelCause(ctx)
+	defer cancelCause(nil)
+
+	cmd, acct := r.sandbox.Command(ctx, sandbox.Spec{
+		Argv:      tc.argv,
+		WorkDir:   workDir,
+		TimeoutMs: req.TimeoutMs,
+		// Go opts out of RLIMIT_AS (it reserves a huge virtual arena); the cgroup
+		// memory.max is the authoritative bound — same posture as the Go run jail.
+		AddressSpaceMB: 0,
+		MemoryMB:       req.MemoryMB,
+		MaxProcesses:   r.maxProcesses,
+		MaxFileSizeMB:  r.maxFileSizeMB,
+		TmpfsSizeMB:    tc.tmpfsMB, // roomy /tmp for the seeded GOCACHE + build output
+		Writable:       false,      // /sandbox read-only: the toolchain writes to /tmp
+		MinimalRootfs:  false,      // the toolchain must be present to compile+run
+		Seccomp:        sandbox.SeccompDenylist,
+	})
+	if acct != nil {
+		defer acct.Close()
+	}
+	cmd.Stdin = strings.NewReader("") // test mode ignores stdin
+	cmd.Env = tc.env
+
+	onFlood := func() { cancelCause(errOutputLimit) }
+	// The report rides stdout (go test -json), so size that buffer to the report
+	// cap, not the smaller stdout cap; stderr keeps the ordinary output cap.
+	reportLimit := r.maxReportBytes
+	if reportLimit <= 0 {
+		reportLimit = r.outputLimit
+	}
+	stdout := &limitedBuffer{limit: reportLimit, onLimit: onFlood}
+	stderr := &limitedBuffer{limit: r.outputLimit, onLimit: onFlood}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+
+	start := time.Now()
+	_ = cmd.Run()
+	duration := int(time.Since(start).Milliseconds())
+
+	res := runnerapi.RunResult{
+		Stdout:          encodeStream(req.Encoding, stdout.String()),
+		Stderr:          encodeStream(req.Encoding, stderr.String()),
+		StdoutTruncated: stdout.truncated,
+		StderrTruncated: stderr.truncated,
+		DurationMs:      duration,
+		MemoryKB:        memoryKB(acct, cmd),
+		Signal:          signalName(cmd),
+		ReportFormat:    tc.reportFormat,
+	}
+	if cmd.ProcessState != nil {
+		res.ExitCode = cmd.ProcessState.ExitCode()
+	}
+
+	report, produced, reportTrunc := readTestReport(workDir, "", stdout.raw(), r.maxReportBytes)
+	res.TestReport = report
+	// The report is the stdout stream, so its truncation is the stdout buffer's.
+	res.TestReportTruncated = reportTrunc || stdout.truncated
+
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		res.Status = runnerapi.StatusTimeout
+	case acct != nil && acct.OOMKilled():
+		res.Status = runnerapi.StatusMemoryExceeded
+	case errors.Is(context.Cause(ctx), errOutputLimit):
+		res.Status = runnerapi.StatusOutputLimitExceeded
+	case tc.buildFailMarker != "" && strings.Contains(report, tc.buildFailMarker):
+		// The toolchain failed to COMPILE the submission (go test -json emits
+		// "Action":"build-fail" and exits 1, same as a test failure). Route it to
+		// compile_error — go's run-mode status for a build failure — rather than
+		// tests_failed, using the structured marker, not a stderr guess.
+		res.Status = runnerapi.StatusCompileError
+	default:
+		if st := classifyTestExit(res.ExitCode, tc.testsFailedExit, produced); st != "" {
+			res.Status = st
+		} else {
+			res.Status = runnerapi.StatusRuntimeError
+		}
 	}
 	return res
 }

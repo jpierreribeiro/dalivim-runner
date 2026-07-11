@@ -114,7 +114,7 @@ ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC
 # mismatch makes this warm cache useless → cold stdlib rebuild → compile timeout.
 RUN set -eux; \
     mkdir -p /opt/gowarm; \
-    printf 'package main\nimport (\n_ "bufio"\n_ "bytes"\n_ "container/heap"\n_ "container/list"\n_ "encoding/json"\n_ "errors"\n_ "fmt"\n_ "math"\n_ "math/rand"\n_ "net"\n_ "os"\n_ "regexp"\n_ "sort"\n_ "strconv"\n_ "strings"\n_ "sync"\n_ "time"\n)\nfunc main(){}\n' > /opt/gowarm/warm.go; \
+    printf 'package main\nimport (\n_ "bufio"\n_ "bytes"\n_ "container/heap"\n_ "container/list"\n_ "encoding/json"\n_ "errors"\n_ "fmt"\n_ "math"\n_ "math/rand"\n_ "net"\n_ "os"\n_ "regexp"\n_ "sort"\n_ "strconv"\n_ "strings"\n_ "sync"\n_ "testing"\n_ "testing/quick"\n_ "time"\n)\nfunc main(){}\n' > /opt/gowarm/warm.go; \
     cd /opt/gowarm; \
     CGO_ENABLED=0 GOCACHE=/opt/gocache GOPATH=/opt/gopath GOTOOLCHAIN=local GOENV=off go build -trimpath -o /dev/null warm.go; \
     chmod -R a+rX /opt/gocache; \

@@ -62,3 +62,10 @@ func (l *limitedBuffer) String() string {
 	}
 	return s
 }
+
+// raw returns the captured bytes WITHOUT the "[output truncated]" marker String()
+// appends. A stdout-reporting test framework (go test -json, TAP) carries its
+// machine-readable report on stdout, so the report must be the raw stream — the
+// marker would corrupt its trailing bytes. Truncation is signalled by the
+// truncated flag instead.
+func (l *limitedBuffer) raw() string { return l.buf.String() }

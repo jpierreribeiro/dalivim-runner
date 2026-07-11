@@ -179,6 +179,17 @@ var testFilePolicies = map[string]FilePolicy{
 		ForbiddenNames:      names("setup.py", "pyproject.toml"),
 		ForbiddenComponents: names("__pycache__"),
 	},
+	"go": {
+		Language:    "go",
+		AllowedExts: exts(".go"),
+		// A test submission is .go files (student + *_test.go). At least one .go is
+		// required (CompileExts). go.mod is FORBIDDEN — the runner synthesizes the
+		// module itself (a caller-supplied module file is never processed); vendor is
+		// forbidden like run mode. Same bans as the run policy, minus the entrypoint.
+		CompileExts:         exts(".go"),
+		ForbiddenNames:      names("go.mod", "go.sum", "go.work", "go.work.sum"),
+		ForbiddenComponents: names("vendor"),
+	},
 }
 
 // policyFor returns the per-language FilePolicy with the configured numeric caps

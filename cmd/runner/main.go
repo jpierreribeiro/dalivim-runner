@@ -119,6 +119,7 @@ func compiledConfig(cfg config.Config) executor.CompiledConfig {
 		CompileMemoryMB:  cfg.CompileMemoryMB,
 		MaxArtifactBytes: cfg.MaxArtifactBytes,
 		RunSeccomp:       staticSeccompProfile(cfg.StaticSeccomp),
+		MaxReportBytes:   cfg.MaxTestReportBytes,
 	}
 }
 

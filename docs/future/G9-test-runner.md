@@ -1,6 +1,23 @@
 # G9 — Test-runner grading mode (pytest / go test / node --test / JUnit)
 
-> **Status — 🟡 phase 1 implemented: Python (pytest) (2026-07-11).** `mode:"test"`
+> **Status — 🟡 phase 2 implemented: Python (pytest) + Go (`go test`) (2026-07-11).**
+> Go update: `mode:"test"` runs `go test -json -p 1 -count=1 ./...` in a **single
+> toolchain jail** (compile+run in one — NOT the two-jail run-mode model), seeding
+> the pre-warmed `/opt/gocache`, offline (`GOPROXY=off`, `-mod=readonly`), with the
+> **go-test-json** report on stdout and `/sandbox` **read-only** (the toolchain
+> writes only to the `/tmp` tmpfs). **Discovered in implementation:** `go test -json`
+> reports a build failure as an `"Action":"build-fail"` event and exits **1** — the
+> same code as a test failure — so exit code alone can't tell them apart; the runner
+> routes a build failure to **`compile_error`** via that structured marker (go's
+> run-mode status), keeping `tests_failed` for genuine failures. (`go test` also runs
+> `go vet`, so a vet error is a `compile_error`.) The compiled test path lives on
+> `compiledRuntime` (`compiled.go`) with a closed `compiledTestCommands` registry
+> (`testmode.go`); `supportsTestMode` now unions the interpreted + compiled
+> registries. Go on-target smoke added to `ci.yml` (pass, fail, build-error,
+> read-only-rootfs/egress containment). **Remaining:** js (`node --test`, TAP), java
+> (JUnit console). Original phase-1 (Python) banner follows.
+>
+> **Phase 1 — Python (pytest).** `mode:"test"`
 > is live for **python**: a request runs `python3 -s -P -m pytest` over `files[]`
 > (or `source_code`) and returns the JUnit XML report **raw** in `test_report`
 > (`report_format:"junit-xml"`) plus `success`/`tests_failed`. The runner writes no
