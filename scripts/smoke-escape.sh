@@ -578,12 +578,13 @@ jqtrue "$resp" '.status != "success"'                 || fail forkbomb "fork bom
 echo "-- fork bomb contained (status=$(echo "$resp" | jq -r .status))"
 
 # Host-env leak -> the child sees ONLY the minimal explicit env. With the G7
-# determinism pin the runtime sets PATH + PYTHONUNBUFFERED + LANG/LC_ALL/TZ;
-# anything OUTSIDE this set would be a genuine host-env leak. (LC_ALL is now set,
-# so CPython no longer PEP-538-coerces LC_CTYPE — it is not expected here.)
+# determinism pin the runtime sets PATH + PYTHONUNBUFFERED + LANG/LC_ALL/TZ, and
+# with G11 it also pins PYTHONHASHSEED; anything OUTSIDE this set would be a
+# genuine host-env leak. (LC_ALL is now set, so CPython no longer PEP-538-coerces
+# LC_CTYPE — it is not expected here.)
 read -r -d '' SECRET <<'PY' || true
 import os
-allowed = {"PATH", "PYTHONUNBUFFERED", "LANG", "LC_ALL", "TZ"}
+allowed = {"PATH", "PYTHONUNBUFFERED", "LANG", "LC_ALL", "TZ", "PYTHONHASHSEED"}
 leaked = sorted(k for k in os.environ if k not in allowed)
 print("leaked=" + (",".join(leaked) or "none"))
 print("tz=" + os.environ.get("TZ", "<unset>"))
