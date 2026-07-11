@@ -14,7 +14,7 @@ The runner's live containment posture (already in prod) is catalogued in
 | # | Theme | Value | Size | Breaks contract? | Risk if skipped |
 |---|---|---|---|---|---|
 | **[S1](S1-fuzzing-validators.md)** ✅ | Fuzz the request validators (path grammar, JSON decode) | 🔴 high | **S** | no | a parser edge case reaches materialization |
-| **[S2](S2-seccomp-allowlist-interpreters.md)** | Tighten interpreters toward a seccomp allowlist (nsjail/kafel bump) | 🟠 medium | M/L | no | wider kernel attack surface than necessary |
+| **[S2](S2-seccomp-allowlist-interpreters.md)** ✅ | Tighten interpreters toward a seccomp allowlist (nsjail/kafel bump) | 🟠 medium | M/L | no | wider kernel attack surface than necessary |
 | **[S3](S3-supply-chain-sbom-signing.md)** ✅ | SBOM + image signing / provenance (cosign) | 🟢 medium | S/M | no | no attestable provenance of the shipped image |
 
 ## How each spec is written
@@ -33,9 +33,11 @@ isolated GHCR publish job: keyless cosign signature + SPDX SBOM attestation + SL
 provenance; deploy kept build-on-target with an opt-in `verify-image` gate. **S2 last**
 — it changes the live seccomp policy and **must** be validated on-target (a wrong
 allowlist fails the nsjail boot probe closed under `RUNNER_SANDBOX=require`), so it
-carries real rollout risk and should ride behind the `complain`-mode tooling that
-already exists. **Still blocked on the nsjail/kafel bump** (kafel on 3.4 cannot name
-`io_uring_*`/`userfaultfd`); do step 1 of the S2 spec first.
+carries real rollout risk. ✅ **done (2026-07-11)** — the gating nsjail 3.4→3.6 bump
+(its kafel now NAMES `io_uring_*`/`userfaultfd`) landed first, then the denylist grew
+to KILL `io_uring_setup/enter/register` + `userfaultfd`; proven on-target by new smoke
+assertions that each dies with SIGSYS under the denylist, with every language's happy
+path + the escape corpus still green.
 
 ## The one absolute
 

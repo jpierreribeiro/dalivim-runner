@@ -1,5 +1,21 @@
 # S2 — Tighten interpreters toward a seccomp allowlist (nsjail/kafel bump)
 
+> **Status — ✅ implemented (2026-07-11).** Steps 1 and 2 are done. **Step 1 (the
+> gate):** nsjail bumped `3.4 → 3.6` (`Dockerfile`), whose bundled kafel (submodule
+> commit `76d0f41`) NAMES `io_uring_setup/enter/register` (425-427) and `userfaultfd`
+> (323); build deps unchanged (3.6's pasta embedding is opt-in via `EMBED_PASTA`,
+> unset). Verified before touching the runner's policy by compiling the exact extended
+> denylist with that kafel — it produced a valid BPF program, and, installed as a live
+> seccomp filter, killed all four syscalls with SIGSYS while benign syscalls survived.
+> **Step 2:** `seccompPolicy` (`internal/sandbox/nsjail.go`) now KILLs those four;
+> `clone`/`clone3` stay ALLOWED. **Validation:** the boot probe compiles the extended
+> policy for every posture under `RUNNER_SANDBOX=require`, and new on-target smoke
+> steps (`.github/workflows/ci.yml`) assert an `io_uring_setup` and a `userfaultfd`
+> program each die with `SIGSYS` under the denylist, with all seven languages' happy
+> paths + the escape corpus still green. **Step 3** (re-open the C/C++ allowlist's
+> `statx`/`rseq` workarounds now that kafel can name them) is left as a documented,
+> independently-validated follow-on — see the note in `nsjail.go` and §3 below.
+
 The interpreted and VM runtimes run on a seccomp **denylist** (`DEFAULT ALLOW`, kill
 the dangerous few); the static C/C++ run jail already runs on a tight **allowlist**
 (`DEFAULT KILL`). This spec is the disciplined path to narrow the denylist —

@@ -35,8 +35,17 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /runner ./cm
 # nsjail is not a reliable apt package on Debian, so we compile it from a pinned
 # tag and copy only the binary + its runtime libs into the final image. Pinning
 # the build to bookworm keeps the libprotobuf / libnl ABI matching the runtime.
+#
+# Pinned at 3.6 (was 3.4): 3.6's bundled kafel (submodule commit 76d0f41) is the
+# first pin whose amd64 syscall table NAMES io_uring_setup/enter/register (425-427)
+# and userfaultfd (323) — the escape-only syscalls the S2 denylist now KILLs. 3.4's
+# kafel predated those names, so adding them by name failed the policy compile and,
+# under RUNNER_SANDBOX=require, the boot probe closed (see internal/sandbox/nsjail.go
+# and docs/future/security/S2-…). Build deps are unchanged: 3.6 needs the same
+# autoconf/bison/flex/protobuf/libnl set (its pasta embedding is opt-in via
+# EMBED_PASTA, which we do not set), and `make` still inits the kafel submodule.
 FROM debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df AS nsjail-build
-ARG NSJAIL_VERSION=3.4
+ARG NSJAIL_VERSION=3.6
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates=20230311+deb12u1 git=1:2.39.5-0+deb12u3 autoconf=2.71-3 bison=2:3.8.2+dfsg-1+b1 flex=2.6.4-8.2 gcc=4:12.2.0-3 g++=4:12.2.0-3 libtool=2.4.7-7~deb12u1 make=4.3-4.1 pkg-config=1.8.1-1 \
       libprotobuf-dev=3.21.12-3 libnl-route-3-dev=3.7.0-0.2+b1 protobuf-compiler=3.21.12-3 \
