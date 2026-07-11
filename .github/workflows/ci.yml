@@ -42,6 +42,32 @@ jobs:
       - name: go test -race
         run: go test -race ./...
 
+  # S1 — fuzz the pre-jail request validators (path grammar, JSON decode, base64
+  # round-trip, entrypoint resolution). These targets assert CONTAINMENT
+  # INVARIANTS over pure functions, so a crasher is a security finding (a parser
+  # edge case the example tables never sampled), not a flake. `go test -race` in
+  # the job above already REPLAYS the committed testdata/fuzz seeds on every run,
+  # so a found-and-committed crasher stays red until it is fixed fail-closed; this
+  # job does the active SEARCH.
+  #
+  # Budget: a short per-target run on PRs/pushes catches regressions fast; the
+  # weekly schedule (same cadence as the escape corpus) runs a much longer search.
+  # This lane is distinct from runner-smoke — it proves the validators, never the
+  # sandbox (that is the on-target escape corpus).
+  fuzz:
+    name: fuzz validators
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: Fuzz the request validators (bounded)
+        env:
+          FUZZTIME: ${{ github.event_name == 'schedule' && '15m' || '60s' }}
+        run: ./scripts/fuzz.sh
+
   runner-smoke:
     name: nsjail smoke + escape corpus
     runs-on: ubuntu-latest
