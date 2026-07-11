@@ -674,6 +674,48 @@ jobs:
           done
           echo "SMOKE OK   [G9] test-mode guards rejected with 400"
 
+      # ---- G10 SQL (in-memory SQLite, language id `sql`) ----
+      # A `sql` submission runs a script against a throwaway :memory: DB and returns
+      # the result set as a PINNED, deterministic JSON row array (result_format:
+      # json-rows). SQLite is Shape A — an interpreter over a .sql file — so it reuses
+      # the IDENTICAL interpreted jail as python/js/lua: the egress / host-write /
+      # secret-read containment is the SAME jail smoke-escape.sh already proves for
+      # those languages, and SQL adds no new jail surface. These cases prove the
+      # SQL-specific pieces: the pinned result format, error classification, that
+      # extension loading (the one code-injection primitive) is DISABLED, and that a
+      # pathological query is bounded by the wall/CPU timeout.
+
+      - name: G10 sql — DDL+DML+SELECT => deterministic json-rows
+        run: |
+          ./scripts/smoke-run.sh sql $'CREATE TABLE t(id INTEGER, name TEXT);\nINSERT INTO t VALUES (1,\'a\'),(2,\'b\');\nSELECT * FROM t ORDER BY id;' $'[{"id":1,"name":"a"},\n{"id":2,"name":"b"}]\n'
+
+      - name: G10 sql — aggregate query => pinned json
+        run: ./scripts/smoke-run.sh sql 'SELECT 1 AS a, 2 AS b;' $'[{"a":1,"b":2}]\n'
+
+      - name: G10 sql — SQL error => runtime_error (fail-fast, -bail)
+        run: ./scripts/smoke-run.sh sql 'SELECT * FROM nope;' '' runtime_error
+
+      # Extension loading is enabled by DEFAULT in the sqlite3 CLI; the run must have
+      # it disabled so a submission cannot pull in native code. load_extension() must
+      # be refused (=> the query errors => runtime_error), not attempt a dlopen.
+      - name: G10 sql — extension loading disabled
+        run: ./scripts/smoke-run.sh sql "SELECT load_extension('/tmp/evil.so');" '' runtime_error
+
+      # The "infinite loop" of SQL (a recursive CTE / cartesian blow-up) is bounded by
+      # the same wall/CPU timeout as any run — no SQL-specific control needed.
+      - name: G10 sql — runaway recursive CTE => timeout
+        run: ./scripts/smoke-run.sh sql 'WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r) SELECT max(n) FROM r;' '' timeout
+
+      - name: G10 sql — result_format advertised + files[] rejected (source_code-only)
+        run: |
+          resp="$(curl -fsS localhost:8090/run -H 'content-type: application/json' -d '{"language":"sql","source_code":"SELECT 1 AS a;"}')"
+          echo "$resp" | jq -e '.result_format == "json-rows" and .status == "success"' >/dev/null \
+            || { echo "::error::sql must report result_format json-rows"; echo "$resp"; exit 1; }
+          code="$(curl -s -o /dev/null -w '%{http_code}' localhost:8090/run \
+            -H 'content-type: application/json' -d '{"language":"sql","files":[{"path":"q.sql","content":"SELECT 1;"}]}')"
+          [ "$code" = "400" ] || { echo "::error::files[] sql must be 400 (source_code-only phase 1), got $code"; exit 1; }
+          echo "SMOKE OK   [G10] result_format + multi-file guard"
+
       # G7: execution determinism. LANG/LC_ALL/TZ are pinned identically in every
       # language's run env, so a fixed epoch formatted as LOCAL time (TZ=UTC) and
       # the reported LANG are IDENTICAL across all six runtimes. Each snippet must

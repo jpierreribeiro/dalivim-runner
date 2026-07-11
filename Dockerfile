@@ -56,9 +56,10 @@ RUN git clone --depth 1 --branch "${NSJAIL_VERSION}" https://github.com/google/n
 
 # ---- runtime stage: interpreters + nsjail + non-root user ----
 # Bookworm base so the nsjail runtime libs (copied from the build stage above)
-# match ABI. Interpreted runtimes: python3 (in this base) + nodejs (F-C) + lua5.4.
-# Compiled runtimes: gcc/g++ + libc6-dev for STATIC linking (F-D); Go (G2.1) via
-# the toolchain copied from the build stage.
+# match ABI. Interpreted runtimes: python3 (in this base) + nodejs (F-C) + lua5.4
+# + sqlite3 (G10, the `sql` in-memory engine — Shape A, an interpreter over a
+# .sql file). Compiled runtimes: gcc/g++ + libc6-dev for STATIC linking (F-D);
+# Go (G2.1) via the toolchain copied from the build stage.
 FROM python:3.12-slim-bookworm@sha256:8a7e7cc04fd3e2bd787f7f24e22d5d119aa590d429b50c95dfe12b3abe52f48b
 # nsjail's runtime shared libraries (protobuf + libnl-route); the Node interpreter
 # for the JavaScript runtime (bookworm's v18 supports --disable-proto=throw); the
@@ -73,6 +74,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libprotobuf32=3.21.12-3 libnl-route-3-200=3.7.0-0.2+b1 \
       nodejs=18.20.4+dfsg-1~deb12u2 \
       lua5.4=5.4.4-3+deb12u1 \
+      sqlite3=3.40.1-2+deb12u1 \
       gcc=4:12.2.0-3 g++=4:12.2.0-3 libc6-dev=2.36-9+deb12u14 \
       openjdk-17-jdk-headless=17.0.19+10-1~deb12u2 \
  && rm -rf /var/lib/apt/lists/*

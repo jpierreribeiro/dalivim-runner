@@ -138,6 +138,13 @@ type RunResult struct {
 	// same discipline as StdoutTruncated. A backend parsing the report must read
 	// this before trusting the report is complete.
 	TestReportTruncated bool `json:"test_report_truncated,omitempty"`
+
+	// ResultFormat names the shape of Stdout for a language whose output is a
+	// structured result rather than free text (G10): "json-rows" for sql (SQLite
+	// emits a JSON array of row objects per SELECT). It lets the backend parse the
+	// rows without knowing the engine. Empty for the ordinary program languages,
+	// whose Stdout is just the process output.
+	ResultFormat string `json:"result_format,omitempty"`
 }
 
 // BatchResult is the response of POST /run when the request carries stdins[]

@@ -50,6 +50,14 @@ func NewLua(sb sandbox.Sandbox, outputLimit, maxProcesses, maxFileSizeMB, maxRep
 	return newInterpreted(luaSpec, sb, outputLimit, maxProcesses, maxFileSizeMB, maxReportBytes)
 }
 
+// NewSQL builds the SQL (in-memory SQLite) runtime (G10). It reuses the identical
+// interpreted jail — SQLite is Shape A, an interpreter reading a source file — and
+// differs only in sqliteSpec (the fixed sqlite3 argv, the pinned JSON result
+// format, version parsing). maxReportBytes is unused (no test mode for sql).
+func NewSQL(sb sandbox.Sandbox, outputLimit, maxProcesses, maxFileSizeMB, maxReportBytes int) *interpretedRuntime {
+	return newInterpreted(sqliteSpec, sb, outputLimit, maxProcesses, maxFileSizeMB, maxReportBytes)
+}
+
 // newInterpreted resolves the interpreter and detects its version once at
 // construction so every result carries real provenance rather than a
 // hand-configured value.
@@ -195,6 +203,9 @@ func (r *interpretedRuntime) execute(ctx context.Context, req runnerapi.RunReque
 		StderrTruncated: stderr.truncated,
 		DurationMs:      duration,
 		MemoryKB:        memoryKB(acct, cmd),
+		// Structured-output languages (sql: json-rows, G10) label their Stdout so the
+		// backend can parse it; empty for the ordinary program languages.
+		ResultFormat: r.spec.resultFormat,
 	}
 	if cmd.ProcessState != nil {
 		res.ExitCode = cmd.ProcessState.ExitCode()
