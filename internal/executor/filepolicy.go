@@ -158,10 +158,46 @@ var filePolicies = map[string]FilePolicy{
 	},
 }
 
+// testFilePolicies is the SEPARATE closed policy registry for mode=test (G9). A
+// test submission is {student files + hidden test files}, so the policy must
+// admit the framework's fixtures the RUN-mode policy deliberately forbids — for
+// python, conftest.py (banned in run mode) — while keeping every
+// manifest/dependency/component ban intact. It is a distinct map, never a
+// relaxation of the run-mode policy: run mode is unchanged. A language absent
+// here does not support test mode (mode=test is rejected before this is reached).
+//
+// Test mode has no single entrypoint (the framework DISCOVERS tests), so
+// DefaultEntry/EntryIsClass are unused; validateTestFiles skips entrypoint
+// resolution entirely.
+var testFilePolicies = map[string]FilePolicy{
+	"python": {
+		Language:    "python",
+		AllowedExts: exts(".py"),
+		// conftest.py is now ADMITTED (pytest's fixture/hook file) — the whole point
+		// of the test policy. setup.py / pyproject.toml stay banned: a test run must
+		// never process a build/dependency manifest.
+		ForbiddenNames:      names("setup.py", "pyproject.toml"),
+		ForbiddenComponents: names("__pycache__"),
+	},
+}
+
 // policyFor returns the per-language FilePolicy with the configured numeric caps
 // applied, and whether the language is known.
 func policyFor(language string, caps FileCaps) (FilePolicy, bool) {
-	p, ok := filePolicies[language]
+	return policyForMode(language, modeRun, caps)
+}
+
+// policyForMode returns the per-language FilePolicy for the given execution mode
+// (G9) with the configured numeric caps applied, and whether the language is
+// known for that mode. Run mode reads filePolicies; test mode reads the separate
+// testFilePolicies, so a test submission's fixtures are validated against the
+// test allowlist and a run submission is completely unaffected.
+func policyForMode(language, mode string, caps FileCaps) (FilePolicy, bool) {
+	registry := filePolicies
+	if mode == modeTest {
+		registry = testFilePolicies
+	}
+	p, ok := registry[language]
 	if !ok {
 		return FilePolicy{}, false
 	}
@@ -201,6 +237,17 @@ func validateFiles(req runnerapi.RunRequest, p FilePolicy) ([]runnerapi.RunFile,
 		return nil, "", err
 	}
 	return out, entry, nil
+}
+
+// validateTestFiles is the mode=test counterpart of validateFiles (G9): it runs
+// the identical path-safety core (grammar, caps, extension/name allowlists,
+// duplicate rejection) against the test policy, but resolves NO entrypoint — a
+// test suite has no single main; the framework discovers its own tests. It
+// returns the canonical, path-sorted file list. No disk I/O; materialization
+// re-runs validatePaths over the same input against the same (test) policy.
+func validateTestFiles(req runnerapi.RunRequest, p FilePolicy) ([]runnerapi.RunFile, error) {
+	out, _, err := validatePaths(req.Files, p)
+	return out, err
 }
 
 // validatePaths is the path-safety core: count/size caps, the full path grammar

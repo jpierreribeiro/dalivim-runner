@@ -1,5 +1,31 @@
 # G9 — Test-runner grading mode (pytest / go test / node --test / JUnit)
 
+> **Status — 🟡 phase 1 implemented: Python (pytest) (2026-07-11).** `mode:"test"`
+> is live for **python**: a request runs `python3 -s -P -m pytest` over `files[]`
+> (or `source_code`) and returns the JUnit XML report **raw** in `test_report`
+> (`report_format:"junit-xml"`) plus `success`/`tests_failed`. The runner writes no
+> test and renders no verdict — the framework judges, the runner transcribes. The
+> per-language command is a **closed** registry (`internal/executor/testmode.go`),
+> never caller-supplied; test mode has a **separate** file policy that admits
+> `conftest.py` while keeping the manifest bans (`filepolicy.go`); the report is
+> handed back over the writable `/sandbox` bind (the jail's `/tmp` is a private
+> tmpfs), so the run jail is `Writable` in test mode — the read-only host rootfs is
+> unchanged. Contract: additive `mode` request field + `test_report`/
+> `report_format`/`test_report_truncated` result fields + the `tests_failed` status;
+> run mode is byte-for-byte unchanged. New env: `RUNNER_TEST_TIMEOUT_MS`,
+> `RUNNER_MAX_TEST_TIMEOUT_MS`, `RUNNER_MAX_TEST_REPORT_BYTES`. `/languages`
+> advertises `test:true`. **Discovered in implementation** (same class as the G11
+> lesson): pytest is launched `-s -P` (not `-I`) so `PYTHONHASHSEED=0` survives;
+> `AddressSpaceMB` is dropped in test mode (pytest maps far more virtual memory than
+> a bare script and dies under a tight `RLIMIT_AS`) — the cgroup `memory.max` is the
+> RSS bound instead, as for Go/JS/Java; and a collection/import error is pytest exit
+> **2** (a report IS still emitted), so `tests_failed` gates on **exit==1 && report
+> produced**, keeping the import error as `runtime_error`. On-target smoke:
+> `scripts/smoke-test.sh` + the G9 block in `ci.yml`. **Remaining:** go (`go test`,
+> single compile+run jail), js (`node --test`, TAP), java (JUnit console) — each an
+> additive entry in the same registry behind the same flag. See
+> `docs/TEST-MODE.md` for the usage guide.
+
 The single biggest **product** unlock after the language work: let the backend
 grade *"implement function `X`; we run our hidden tests against it"* instead of
 only *"read stdin, print stdout"*. It stays cleanly on the **executor** side of the

@@ -25,7 +25,7 @@ func isolatedPython(t *testing.T) *interpretedRuntime {
 	if !sb.NetworkIsolated() {
 		t.Skip("unprivileged network namespaces unavailable on this platform")
 	}
-	return NewPython(sb, 64*1024, 256, 64)
+	return NewPython(sb, 64*1024, 256, 64, 4_000_000)
 }
 
 // TestNetworkIsolation_DeniesEgress verifies that isolated code cannot open a

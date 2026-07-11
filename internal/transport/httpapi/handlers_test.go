@@ -34,7 +34,7 @@ func testServer(t *testing.T, token string) http.Handler {
 			DefaultTimeout: 3000, MaxTimeoutMs: 10000, DefaultMemory: 128, MaxMemoryMB: 512,
 			Files: executor.FileCaps{MaxFiles: 50, MaxFileBytes: 262_144, MaxFilesBytes: 1_048_576, MaxPathBytes: 180, MaxPathDepth: 8},
 		},
-		executor.NewPython(sb, 64*1024, 256, 64),
+		executor.NewPython(sb, 64*1024, 256, 64, 4_000_000),
 	)
 	return New(svc, Config{Addr: ":0", Token: token, MaxSourceBytes: 200_000, MaxStdinBytes: 1_000_000, MaxFilesBytes: 1_048_576, MaxBatch: 100, MaxBatchStdinBytes: 4_000_000}).Handler()
 }
@@ -241,7 +241,7 @@ func TestRun_StdinCap(t *testing.T) {
 	}
 	svc := executor.NewService(
 		executor.Limits{DefaultTimeout: 3000, MaxTimeoutMs: 10000, DefaultMemory: 128, MaxMemoryMB: 512},
-		executor.NewPython(sb, 64*1024, 256, 64),
+		executor.NewPython(sb, 64*1024, 256, 64, 4_000_000),
 	)
 	// Small stdin cap so the test body stays tiny; source cap stays generous to
 	// prove the two limits are independent.
@@ -512,7 +512,7 @@ func TestRun_BatchCaps(t *testing.T) {
 	}
 	svc := executor.NewService(
 		executor.Limits{DefaultTimeout: 3000, MaxTimeoutMs: 10000, DefaultMemory: 128, MaxMemoryMB: 512},
-		executor.NewPython(sb, 64*1024, 256, 64),
+		executor.NewPython(sb, 64*1024, 256, 64, 4_000_000),
 	)
 	h := New(svc, Config{Addr: ":0", MaxSourceBytes: 200_000, MaxStdinBytes: 100, MaxBatch: 2, MaxBatchStdinBytes: 150}).Handler()
 

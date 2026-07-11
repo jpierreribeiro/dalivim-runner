@@ -454,6 +454,63 @@ jobs:
           done
           echo "SMOKE OK   [G6] batch caps rejected with 400"
 
+      # ---- G9 test-runner mode (mode=test) on the shipped image ----
+      # A mode=test request runs the language's own test framework over files[] and
+      # returns its machine-readable report RAW, plus tests_failed/success — the
+      # framework judges, the runner only transcribes. These run under the REAL
+      # nsjail jail, so they prove the report hand-back over the writable /sandbox
+      # bind (a path the unit suite's netns backend does not exercise) and that a
+      # writable /sandbox did NOT open the read-only rootfs.
+
+      - name: G9 python pytest — all pass => success + raw junit report
+        run: |
+          SMOKE_FILES='[
+            {"path":"solution.py","content":"def add(a, b):\n    return a + b\n"},
+            {"path":"test_solution.py","content":"from solution import add\ndef test_a():\n    assert add(2, 3) == 5\ndef test_b():\n    assert add(0, 0) == 0\n"}
+          ]' ./scripts/smoke-test.sh python success junit-xml
+
+      - name: G9 python pytest — some fail => tests_failed (NOT runtime_error)
+        run: |
+          SMOKE_FILES='[
+            {"path":"solution.py","content":"def add(a, b):\n    return a + b\n"},
+            {"path":"test_solution.py","content":"from solution import add\ndef test_ok():\n    assert add(2, 3) == 5\ndef test_bad():\n    assert add(2, 3) == 6\n"}
+          ]' ./scripts/smoke-test.sh python tests_failed junit-xml
+
+      # Containment crux for test mode: /sandbox is writable so the framework can
+      # hand its report back, but the host rootfs stays READ-ONLY and the netns
+      # stays empty. The hidden test asserts a host write is denied and egress has
+      # no route; if either leaked the assertion would fail and the suite would come
+      # back tests_failed, so status==success IS the containment proof.
+      - name: G9 test mode containment — writable /sandbox did not open the rootfs/net
+        run: |
+          SMOKE_FILES='[
+            {"path":"test_contain.py","content":"import socket\ndef test_no_host_write():\n    try:\n        open(\"/usr/pwned\", \"w\").write(\"x\")\n        assert False, \"host write succeeded\"\n    except OSError:\n        pass\ndef test_no_egress():\n    s = socket.socket(); s.settimeout(2)\n    try:\n        s.connect((\"1.1.1.1\", 53)); assert False, \"egress reached\"\n    except OSError:\n        pass\n"}
+          ]' ./scripts/smoke-test.sh python success junit-xml
+
+      # A collection/import error is a harness crash, not a test failure: exit 2 is
+      # not the tests-failed code, so it classifies runtime_error, distinct from
+      # tests_failed — the backend must not read it as "the student failed a test".
+      - name: G9 python pytest — import error => runtime_error
+        run: |
+          SMOKE_FILES='[
+            {"path":"test_broken.py","content":"import definitely_missing_xyz\ndef test_x():\n    assert True\n"}
+          ]' ./scripts/smoke-test.sh python runtime_error junit-xml
+
+      # mode=test is admitted only for a language with a test command registered,
+      # and never for a stdins[] batch — both are 400s at the gate.
+      - name: G9 test mode guards — unsupported language and batch => 400
+        run: |
+          for body in \
+            '{"language":"lua","mode":"test","files":[{"path":"main.lua","content":"print(1)"}]}' \
+            '{"language":"c","mode":"test","source_code":"int main(void){return 0;}"}' \
+            '{"language":"python","mode":"test","source_code":"def test_x():\n    assert True","stdins":["a","b"]}' \
+            '{"language":"python","mode":"weird","source_code":"print(1)"}'; do
+            code="$(curl -s -o /dev/null -w '%{http_code}' localhost:8090/run \
+              -H 'content-type: application/json' -d "$body")"
+            [ "$code" = "400" ] || { echo "::error::expected 400 for bad mode=test payload, got $code: $body"; exit 1; }
+          done
+          echo "SMOKE OK   [G9] test-mode guards rejected with 400"
+
       # G7: execution determinism. LANG/LC_ALL/TZ are pinned identically in every
       # language's run env, so a fixed epoch formatted as LOCAL time (TZ=UTC) and
       # the reported LANG are IDENTICAL across all six runtimes. Each snippet must

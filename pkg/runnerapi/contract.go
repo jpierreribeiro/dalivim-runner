@@ -72,6 +72,18 @@ type RunRequest struct {
 	// SourceCode/Files stay text (a program is source text); CompileOutput
 	// (compiler diagnostics) is always text.
 	Encoding string `json:"encoding,omitempty"`
+
+	// Mode selects the execution shape (G9). "" / "run" (default) is the unchanged
+	// program execution: the source runs to Stdout/Stderr. "test" runs the
+	// language's own test framework (pytest, go test, node --test, JUnit) over
+	// files[] (or source_code) and returns the framework's machine-readable report
+	// VERBATIM plus a tests_failed/success status — the runner writes no test,
+	// compares nothing, and renders no verdict (the backend grades from the
+	// report). The per-language test command is a CLOSED in-code registry, never
+	// caller-supplied. Test mode ignores stdin/stdins (a suite defines its own
+	// inputs); a stdins[] batch with mode=test is rejected (400). A run-mode
+	// request (mode absent) is byte-for-byte unchanged.
+	Mode string `json:"mode,omitempty"`
 }
 
 // RunResult is the response of POST /run.
@@ -88,8 +100,8 @@ type RunResult struct {
 	StdoutTruncated bool `json:"stdout_truncated"`
 	StderrTruncated bool `json:"stderr_truncated"`
 
-	ExitCode   int `json:"exit_code"`
-	DurationMs int `json:"duration_ms"`
+	ExitCode       int    `json:"exit_code"`
+	DurationMs     int    `json:"duration_ms"`
 	CompileMs      int    `json:"compile_ms,omitempty"` // compile-phase wall time (compiled languages); 0/omitted otherwise
 	MemoryKB       int    `json:"memory_kb"`
 	RuntimeName    string `json:"runtime_name"`
@@ -111,6 +123,21 @@ type RunResult struct {
 	// working unchanged during the extraction. Drop it once every caller reads
 	// runtime_version.
 	PythonVersion string `json:"python_version,omitempty"`
+
+	// TestReport is the test framework's machine-readable report, VERBATIM, when
+	// Mode=="test" (G9). It is OPAQUE to the runner — the backend parses it per
+	// framework, named by ReportFormat — so the runner grows no framework-specific
+	// parser and a malformed report is the backend's problem, not a new attack
+	// surface here. Empty in run mode. Bounded independently of the stdout cap;
+	// TestReportTruncated marks a report cut at the report-size ceiling.
+	TestReport   string `json:"test_report,omitempty"`
+	ReportFormat string `json:"report_format,omitempty"` // "junit-xml" | "tap13" | "go-test-json"
+
+	// TestReportTruncated reports that TestReport hit the report-size cap and holds
+	// only its first bytes — the AUTHORITATIVE signal for a truncated report, the
+	// same discipline as StdoutTruncated. A backend parsing the report must read
+	// this before trusting the report is complete.
+	TestReportTruncated bool `json:"test_report_truncated,omitempty"`
 }
 
 // BatchResult is the response of POST /run when the request carries stdins[]
@@ -169,4 +196,14 @@ const (
 	// timeout. Additive — a caller that does not special-case it sees an
 	// unsuccessful run with partial output.
 	StatusOutputLimitExceeded = "output_limit_exceeded"
+
+	// StatusTestsFailed (G9, mode=test) means the test framework ran to completion
+	// and reported >=1 failing test. It is NOT runtime_error (the harness itself
+	// did not crash) and NOT a judge verdict — the backend reads TestReport to
+	// decide the grade. ExitCode is the framework's (non-zero). Additive: a caller
+	// that does not special-case it sees an unsuccessful run whose report explains
+	// why. A framework that crashed before completing (import error, segfault, OOM,
+	// timeout) stays runtime_error/memory_exceeded/timeout — the presence of a
+	// completed report, not a stderr guess, is what tells the two apart.
+	StatusTestsFailed = "tests_failed"
 )

@@ -111,7 +111,15 @@ func verifyRegularOwned(r *os.Root, rel string) error {
 // numeric caps were already enforced by the service, so their absence here cannot
 // widen anything (the grammar/extension checks are cap-independent).
 func materializeSource(workDir string, req runnerapi.RunRequest) ([]MaterializedFile, error) {
-	p, ok := filePolicies[req.Language]
+	// The defense-in-depth re-check uses the policy for the request's MODE (G9): a
+	// mode=test tree is validated against the test allowlist (which admits
+	// conftest.py), a run tree against the run allowlist — never the wrong one, so
+	// materialization can never widen or narrow what the service already accepted.
+	registry := filePolicies
+	if req.Mode == modeTest {
+		registry = testFilePolicies
+	}
+	p, ok := registry[req.Language]
 	if !ok {
 		return nil, fmt.Errorf("no file policy for language %q", req.Language)
 	}

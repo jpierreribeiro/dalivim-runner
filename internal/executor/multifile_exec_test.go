@@ -23,9 +23,9 @@ func multiFileService(t *testing.T) *Service {
 			DefaultTimeout: 8000, MaxTimeoutMs: 10000, DefaultMemory: 128, MaxMemoryMB: 512,
 			Files: FileCaps{MaxFiles: 50, MaxFileBytes: 262_144, MaxFilesBytes: 1_048_576, MaxPathBytes: 180, MaxPathDepth: 8},
 		},
-		NewPython(sb, 64*1024, 256, 64),
-		NewNode(sb, 64*1024, 256, 64),
-		NewLua(sb, 64*1024, 256, 64),
+		NewPython(sb, 64*1024, 256, 64, 4_000_000),
+		NewNode(sb, 64*1024, 256, 64, 4_000_000),
+		NewLua(sb, 64*1024, 256, 64, 4_000_000),
 	)
 }
 

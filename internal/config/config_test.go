@@ -41,17 +41,17 @@ func TestShutdownGrace_RespectsInvariant(t *testing.T) {
 	const smallBatch = 5_000
 	floor := compile + run + shutdownGraceSlackMs
 
-	if got := shutdownGraceMs(compile, run, smallBatch); got != floor {
+	if got := shutdownGraceMs(compile, run, smallBatch, 0); got != floor {
 		t.Fatalf("derived grace = %d, want floor %d", got, floor)
 	}
 
 	t.Setenv("RUNNER_SHUTDOWN_GRACE_MS", "1000") // below the floor
-	if got := shutdownGraceMs(compile, run, smallBatch); got != floor {
+	if got := shutdownGraceMs(compile, run, smallBatch, 0); got != floor {
 		t.Fatalf("an override below the floor must be ignored: got %d, want %d", got, floor)
 	}
 
 	t.Setenv("RUNNER_SHUTDOWN_GRACE_MS", "99000") // above the floor
-	if got := shutdownGraceMs(compile, run, smallBatch); got != 99_000 {
+	if got := shutdownGraceMs(compile, run, smallBatch, 0); got != 99_000 {
 		t.Fatalf("an override above the floor must win: got %d, want 99000", got)
 	}
 }
@@ -65,13 +65,28 @@ func TestShutdownGrace_CoversBatchBudget(t *testing.T) {
 	const bigBatch = 60_000 // the default; larger than compile+run (30_000)
 
 	batchFloor := bigBatch + run + shutdownGraceSlackMs
-	if got := shutdownGraceMs(compile, run, bigBatch); got != batchFloor {
+	if got := shutdownGraceMs(compile, run, bigBatch, 0); got != batchFloor {
 		t.Fatalf("grace must cover the batch budget: got %d, want %d", got, batchFloor)
 	}
 	// Sanity: the batch floor is strictly larger than the single-run floor it
 	// would otherwise have used — i.e. the fix actually raised the guarantee.
 	if singleFloor := compile + run + shutdownGraceSlackMs; batchFloor <= singleFloor {
 		t.Fatalf("batch floor %d must exceed single-run floor %d", batchFloor, singleFloor)
+	}
+}
+
+// TestShutdownGrace_CoversTestBudget pins the G9 half of the invariant: a
+// mode=test run holds one slot for up to MaxTestTimeoutMs, so when that exceeds
+// both a single compile+run and the batch budget, the grace floor must track the
+// test budget — else a deploy could kill an in-flight test suite mid-run.
+func TestShutdownGrace_CoversTestBudget(t *testing.T) {
+	const compile, run = 20_000, 10_000
+	const smallBatch = 5_000
+	const bigTest = 90_000 // larger than compile+run and the batch budget
+
+	testFloor := bigTest + shutdownGraceSlackMs
+	if got := shutdownGraceMs(compile, run, smallBatch, bigTest); got != testFloor {
+		t.Fatalf("grace must cover the test budget: got %d, want %d", got, testFloor)
 	}
 }
 

@@ -31,7 +31,7 @@ func newLua(t *testing.T) *interpretedRuntime {
 	if err != nil {
 		t.Fatalf("configure sandbox: %v", err)
 	}
-	return NewLua(sb, 64*1024, 256, 64)
+	return NewLua(sb, 64*1024, 256, 64, 4_000_000)
 }
 
 func TestLua_Success(t *testing.T) {
