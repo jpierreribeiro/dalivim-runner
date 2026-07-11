@@ -67,6 +67,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       gcc=4:12.2.0-3 g++=4:12.2.0-3 libc6-dev=2.36-9+deb12u14 \
       openjdk-17-jdk-headless=17.0.19+10-1~deb12u2 \
  && rm -rf /var/lib/apt/lists/*
+# pytest for the Python test-runner mode (G9): a mode=test request runs
+# `python3 -m pytest` over the submission and returns the JUnit XML report raw.
+# Pinned exactly (like every apt package) so a rebuild installs a byte-identical
+# framework and a student's report cannot drift with a silent upstream bump; a pin
+# that no longer exists fails the build LOUDLY, which is the signal to refresh.
+# Installed system-wide (world-readable site-packages) so the jail-private uid can
+# import it. --no-compile keeps the layer free of root-owned .pyc; PYTEST_DISABLE_
+# PLUGIN_AUTOLOAD=1 in the run env keeps third-party plugins off the test tree.
+# NOTE: transitive deps (pluggy, iniconfig, packaging) ride along unpinned; a
+# future hardening can hash-pin them via a requirements lock (see G9 / S3).
+RUN pip install --no-cache-dir --no-compile pytest==8.3.4
 # Non-root, no interactive login shell: the runner never needs a session, and
 # dropping privileges shrinks the blast radius of any escape from a run. nsjail
 # runs rootless (unprivileged user namespaces), so no elevated caps are needed.

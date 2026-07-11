@@ -19,7 +19,7 @@ func TestService_Catalog(t *testing.T) {
 	}
 	svc := NewService(
 		Limits{DefaultTimeout: 3000, MaxTimeoutMs: 10000, DefaultMemory: 128, MaxMemoryMB: 512},
-		NewPython(sb, 64*1024, 256, 64),
+		NewPython(sb, 64*1024, 256, 64, 4_000_000),
 		NewC(sb, CompiledConfig{OutputLimit: 64 * 1024, MaxProcesses: 256, MaxFileSizeMB: 64}),
 	)
 

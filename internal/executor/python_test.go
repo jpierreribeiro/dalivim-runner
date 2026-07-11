@@ -31,7 +31,7 @@ func newPython(t *testing.T) *interpretedRuntime {
 	if err != nil {
 		t.Fatalf("configure sandbox: %v", err)
 	}
-	return NewPython(sb, 64*1024, 256, 64)
+	return NewPython(sb, 64*1024, 256, 64, 4_000_000)
 }
 
 func run(t *testing.T, rt *interpretedRuntime, req runnerapi.RunRequest) runnerapi.RunResult {

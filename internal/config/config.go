@@ -44,6 +44,15 @@ type Config struct {
 	MaxStdinBytes    int // per-request stdin cap, independent of the source budget
 	MaxOutputBytes   int
 
+	// Test-runner mode (G9). A mode=test request runs a whole test framework, which
+	// legitimately takes longer than one program, so it clamps to a SEPARATE and
+	// larger timeout envelope than a run; memory reuses the run-mode budget. The
+	// report is capped independently of the stdout cap (a suite with thousands of
+	// failures emits a large report).
+	DefaultTestTimeoutMs int // default per-run budget for a mode=test request
+	MaxTestTimeoutMs     int // hard ceiling for a mode=test run
+	MaxTestReportBytes   int // cap on the returned test_report
+
 	// Multi-file submission caps (G3). These bound the attacker-controlled
 	// files[] payload: how many files, how large each is, the summed budget, and
 	// how long/deep a single path may be. Every one is enforced before a byte
@@ -123,6 +132,10 @@ func Load() (Config, error) {
 		MaxStdinBytes:       envInt("RUNNER_MAX_STDIN_BYTES", 1_000_000),
 		MaxOutputBytes:      envInt("RUNNER_MAX_OUTPUT_BYTES", 64*1024),
 
+		DefaultTestTimeoutMs: envInt("RUNNER_TEST_TIMEOUT_MS", 15_000),
+		MaxTestTimeoutMs:     envInt("RUNNER_MAX_TEST_TIMEOUT_MS", 30_000),
+		MaxTestReportBytes:   envInt("RUNNER_MAX_TEST_REPORT_BYTES", 4_000_000),
+
 		MaxFiles:      envInt("RUNNER_MAX_FILES", 50),
 		MaxFileBytes:  envInt("RUNNER_MAX_FILE_BYTES", 262_144),
 		MaxFilesBytes: envInt("RUNNER_MAX_FILES_BYTES", 1_048_576),
@@ -144,7 +157,7 @@ func Load() (Config, error) {
 	// (the whole MaxBatchTotalMs wall budget) — plus slack, so a deploy never kills
 	// a request that is still inside its own deadline. RUNNER_SHUTDOWN_GRACE_MS can
 	// only raise it above this floor.
-	cfg.ShutdownGraceMs = shutdownGraceMs(cfg.MaxCompileTimeoutMs, cfg.MaxTimeoutMs, cfg.MaxBatchTotalMs)
+	cfg.ShutdownGraceMs = shutdownGraceMs(cfg.MaxCompileTimeoutMs, cfg.MaxTimeoutMs, cfg.MaxBatchTotalMs, cfg.MaxTestTimeoutMs)
 	if len(cfg.ServiceTokens) == 0 && !cfg.Development {
 		return Config{}, fmt.Errorf("RUNNER_SERVICE_TOKEN(S) is required outside development; set RUNNER_SERVICE_TOKEN (or a comma/space-separated RUNNER_SERVICE_TOKENS for zero-downtime rotation), and send X-Runner-Token from the gateway, or set RUNNER_ENV=development for local use")
 	}
@@ -219,11 +232,18 @@ const shutdownGraceSlackMs = 5000
 //     runs, never mid-run). A batch holds one slot for its whole duration, so
 //     with a large MaxBatchTotalMs it — not the single run — is the worst case.
 //
-// The floor is the max of the two, plus slack.
-func shutdownGraceMs(maxCompileMs, maxRunMs, maxBatchTotalMs int) int {
+// A third shape competes for "longest": a mode=test run (G9) holds one slot for
+// up to MaxTestTimeoutMs — larger than a run-mode timeout — so it is folded into
+// the max as well.
+//
+// The floor is the max of the three, plus slack.
+func shutdownGraceMs(maxCompileMs, maxRunMs, maxBatchTotalMs, maxTestMs int) int {
 	worst := maxCompileMs + maxRunMs
 	if batchWorst := maxBatchTotalMs + maxRunMs; batchWorst > worst {
 		worst = batchWorst
+	}
+	if maxTestMs > worst {
+		worst = maxTestMs
 	}
 	floor := worst + shutdownGraceSlackMs
 	if v := envInt("RUNNER_SHUTDOWN_GRACE_MS", floor); v > floor {

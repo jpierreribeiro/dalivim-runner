@@ -25,6 +25,14 @@ type Limits struct {
 	DefaultMemory  int // MB, applied when the request omits a memory limit
 	MaxMemoryMB    int // MB, hard ceiling
 
+	// Test-mode (G9) run budget, a SEPARATE and larger ceiling than the run-mode
+	// timeout: a whole test suite legitimately runs longer than one program, so a
+	// mode=test request is clamped to these instead of DefaultTimeout/MaxTimeoutMs.
+	// Memory reuses the run-mode budget. Zero falls back to the run-mode values in
+	// clampLimits, so an operator that leaves them unset gets today's behaviour.
+	DefaultTestTimeout int // ms, applied when a mode=test request omits a timeout
+	MaxTestTimeoutMs   int // ms, hard ceiling for a mode=test run
+
 	// Compile-phase budget for compiled languages (C/C++). Clamped here, in the
 	// one place limits are enforced, so a request may lower its compile bound but
 	// never raise it past the ceiling (a long compile is a DoS vector). Interpreted
@@ -126,6 +134,7 @@ type LanguageInfo struct {
 	Kind      string `json:"kind"`      // "interpreted" | "compiled"
 	MultiFile bool   `json:"multifile"` // accepts a files[] submission (G3)
 	Batch     bool   `json:"batch"`     // accepts a stdins[] batch (G6)
+	Test      bool   `json:"test"`      // accepts a mode=test test-runner request (G9)
 }
 
 // Catalog returns the registered languages with provenance and capability flags,
@@ -142,6 +151,7 @@ func (s *Service) Catalog() []LanguageInfo {
 			Kind:      runtimeKind(rt),
 			MultiFile: supportsMultiFile(id),
 			Batch:     batch,
+			Test:      supportsTestMode(id),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -188,6 +198,9 @@ func (s *Service) Run(ctx context.Context, req runnerapi.RunRequest) (runnerapi.
 		// the extra inputs.
 		return runnerapi.RunResult{}, invalid("stdins_on_single_run", "stdins requires the batch execution path")
 	}
+	if err := validateMode(req); err != nil {
+		return runnerapi.RunResult{}, err
+	}
 	// Validate and normalize the submission shape (single-file sugar vs multi-file)
 	// before anything runs. A *ValidationError here is a 400 the transport surfaces;
 	// it is the fail-fast gate in front of materialization.
@@ -226,6 +239,14 @@ func (s *Service) RunBatch(ctx context.Context, req runnerapi.RunRequest) (runne
 	if req.Stdin != "" {
 		return runnerapi.BatchResult{}, invalid("both_stdin_and_stdins", "exactly one of stdin or stdins may be set, not both")
 	}
+	if req.Mode == modeTest {
+		// Test mode defines its own inputs and returns one report — a stdins[]
+		// batch has no meaning for it. Reject rather than silently ignore (G9).
+		return runnerapi.BatchResult{}, invalid("test_mode_batch", "mode=test does not support a stdins[] batch")
+	}
+	if err := validateMode(req); err != nil {
+		return runnerapi.BatchResult{}, err
+	}
 	br, ok := rt.(batchRunner)
 	if !ok {
 		return runnerapi.BatchResult{}, invalid("unsupported_batch", "language %q does not support batch execution", req.Language)
@@ -248,14 +269,26 @@ func (s *Service) RunBatch(ctx context.Context, req runnerapi.RunRequest) (runne
 // values, the global ceilings, then any per-language floors (G6) — the single
 // place limits are enforced for both the single-run and batch paths.
 func (s *Service) clampLimits(req runnerapi.RunRequest, rt Runtime) runnerapi.RunRequest {
-	req.TimeoutMs = clamp(req.TimeoutMs, s.limits.DefaultTimeout, s.limits.MaxTimeoutMs)
+	// Test mode (G9) uses a separate, larger timeout envelope — a suite runs longer
+	// than one program. When the operator leaves the test ceilings unset they fall
+	// back to the run-mode values, so behaviour is unchanged until they are set.
+	defTimeout, maxTimeout := s.limits.DefaultTimeout, s.limits.MaxTimeoutMs
+	if req.Mode == modeTest {
+		if s.limits.DefaultTestTimeout > 0 {
+			defTimeout = s.limits.DefaultTestTimeout
+		}
+		if s.limits.MaxTestTimeoutMs > 0 {
+			maxTimeout = s.limits.MaxTestTimeoutMs
+		}
+	}
+	req.TimeoutMs = clamp(req.TimeoutMs, defTimeout, maxTimeout)
 	req.MemoryMB = clamp(req.MemoryMB, s.limits.DefaultMemory, s.limits.MaxMemoryMB)
 	req.CompileTimeoutMs = clamp(req.CompileTimeoutMs, s.limits.DefaultCompileTimeout, s.limits.MaxCompileTimeoutMs)
 	if lf, ok := rt.(limitFloorer); ok {
 		// Per-language floors raise an undersized budget so the runtime can
-		// start at all; the global ceiling still wins over any floor.
+		// start at all; the global ceiling (mode-appropriate) still wins over a floor.
 		f := lf.LimitFloors()
-		req.TimeoutMs = raiseToFloor(req.TimeoutMs, f.TimeoutMs, s.limits.MaxTimeoutMs)
+		req.TimeoutMs = raiseToFloor(req.TimeoutMs, f.TimeoutMs, maxTimeout)
 		req.MemoryMB = raiseToFloor(req.MemoryMB, f.MemoryMB, s.limits.MaxMemoryMB)
 	}
 	return req
@@ -280,11 +313,23 @@ func (s *Service) normalize(req runnerapi.RunRequest) (runnerapi.RunRequest, err
 		return req, nil // single-file sugar: unchanged legacy path
 	}
 
-	// Multi-file: validate against the per-language policy. The language is known
-	// (the runtime resolved), so policyFor cannot miss.
-	policy, ok := policyFor(req.Language, s.limits.Files)
+	// Multi-file: validate against the per-language policy for the request's MODE.
+	// The language is known (the runtime resolved) and, for test mode, its test
+	// support was already checked by validateMode, so policyForMode cannot miss.
+	policy, ok := policyForMode(req.Language, req.Mode, s.limits.Files)
 	if !ok {
 		return req, invalid("unsupported_language", "language %q does not support multi-file submissions", req.Language)
+	}
+	if req.Mode == modeTest {
+		// Test mode has no entrypoint — the framework discovers its own tests over
+		// the whole tree, so validate the files but resolve no main.
+		files, err := validateTestFiles(req, policy)
+		if err != nil {
+			return req, err
+		}
+		req.Files = files
+		req.Entrypoint = ""
+		return req, nil
 	}
 	files, entry, err := validateFiles(req, policy)
 	if err != nil {
@@ -293,6 +338,24 @@ func (s *Service) normalize(req runnerapi.RunRequest) (runnerapi.RunRequest, err
 	req.Files = files
 	req.Entrypoint = entry
 	return req, nil
+}
+
+// validateMode enforces the closed set of execution modes (G9): "" / "run" (the
+// unchanged program execution) and "test" (the per-language test framework). A
+// test-mode request is admitted only for a language that has a test command
+// registered; anything else is a 400 before normalization or materialization.
+func validateMode(req runnerapi.RunRequest) error {
+	switch req.Mode {
+	case "", modeRun:
+		return nil
+	case modeTest:
+		if !supportsTestMode(req.Language) {
+			return invalid("unsupported_test_mode", "language %q does not support test mode", req.Language)
+		}
+		return nil
+	default:
+		return invalid("unsupported_mode", "mode must be \"run\" or \"test\" (got %q)", req.Mode)
+	}
 }
 
 // clamp returns def when v <= 0, caps at max (when max > 0), else v.

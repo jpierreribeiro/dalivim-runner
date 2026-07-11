@@ -155,7 +155,7 @@ func batchService(t *testing.T, maxBatchTotalMs int) *Service {
 			DefaultTimeout: 8000, MaxTimeoutMs: 10000, DefaultMemory: 128, MaxMemoryMB: 512,
 			MaxBatchTotalMs: maxBatchTotalMs,
 		},
-		NewPython(sb, 64*1024, 256, 64),
+		NewPython(sb, 64*1024, 256, 64, 4_000_000),
 	)
 }
 

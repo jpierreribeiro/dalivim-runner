@@ -29,7 +29,7 @@ func newNode(t *testing.T) *interpretedRuntime {
 	if err != nil {
 		t.Fatalf("configure sandbox: %v", err)
 	}
-	return NewNode(sb, 64*1024, 256, 64)
+	return NewNode(sb, 64*1024, 256, 64, 4_000_000)
 }
 
 func TestNode_Success(t *testing.T) {
@@ -143,7 +143,7 @@ func TestNode_InheritsNetnsJail(t *testing.T) {
 	if !sb.NetworkIsolated() {
 		t.Skip("unprivileged network namespaces unavailable on this platform")
 	}
-	rt := NewNode(sb, 64*1024, 256, 64)
+	rt := NewNode(sb, 64*1024, 256, 64, 4_000_000)
 	src := "const net = require('net');\n" +
 		"const s = net.connect({host: '1.1.1.1', port: 80});\n" +
 		"s.on('connect', () => { console.log('OPEN'); process.exit(0); });\n" +

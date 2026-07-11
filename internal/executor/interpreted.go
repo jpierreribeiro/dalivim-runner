@@ -21,47 +21,49 @@ import (
 // containment. Adding an interpreted language is a languageSpec entry plus a
 // constructor; this file does not change.
 type interpretedRuntime struct {
-	spec          languageSpec
-	sandbox       sandbox.Sandbox
-	bin           string // absolute interpreter path, resolved once (see resolveBin)
-	version       string
-	outputLimit   int
-	maxProcesses  int // per-run RLIMIT_NPROC in the jail (fork-bomb cap)
-	maxFileSizeMB int // per-run RLIMIT_FSIZE in the jail
+	spec           languageSpec
+	sandbox        sandbox.Sandbox
+	bin            string // absolute interpreter path, resolved once (see resolveBin)
+	version        string
+	outputLimit    int
+	maxProcesses   int // per-run RLIMIT_NPROC in the jail (fork-bomb cap)
+	maxFileSizeMB  int // per-run RLIMIT_FSIZE in the jail
+	maxReportBytes int // cap on the returned test report (mode=test, G9); 0 = uncapped
 }
 
 // NewPython builds the Python runtime.
-func NewPython(sb sandbox.Sandbox, outputLimit, maxProcesses, maxFileSizeMB int) *interpretedRuntime {
-	return newInterpreted(pythonSpec, sb, outputLimit, maxProcesses, maxFileSizeMB)
+func NewPython(sb sandbox.Sandbox, outputLimit, maxProcesses, maxFileSizeMB, maxReportBytes int) *interpretedRuntime {
+	return newInterpreted(pythonSpec, sb, outputLimit, maxProcesses, maxFileSizeMB, maxReportBytes)
 }
 
 // NewNode builds the JavaScript (Node) runtime. It inherits the exact same jail
 // as Python — the only differences (interpreter argv, source filename, version
 // parsing) live in javascriptSpec, which is the whole point of the seam.
-func NewNode(sb sandbox.Sandbox, outputLimit, maxProcesses, maxFileSizeMB int) *interpretedRuntime {
-	return newInterpreted(javascriptSpec, sb, outputLimit, maxProcesses, maxFileSizeMB)
+func NewNode(sb sandbox.Sandbox, outputLimit, maxProcesses, maxFileSizeMB, maxReportBytes int) *interpretedRuntime {
+	return newInterpreted(javascriptSpec, sb, outputLimit, maxProcesses, maxFileSizeMB, maxReportBytes)
 }
 
 // NewLua builds the Lua (PUC-Lua 5.4) runtime. Like Node it reuses the identical
 // interpreted jail; only luaSpec (interpreter argv, source filename, version
 // parsing) differs — the whole point of the seam.
-func NewLua(sb sandbox.Sandbox, outputLimit, maxProcesses, maxFileSizeMB int) *interpretedRuntime {
-	return newInterpreted(luaSpec, sb, outputLimit, maxProcesses, maxFileSizeMB)
+func NewLua(sb sandbox.Sandbox, outputLimit, maxProcesses, maxFileSizeMB, maxReportBytes int) *interpretedRuntime {
+	return newInterpreted(luaSpec, sb, outputLimit, maxProcesses, maxFileSizeMB, maxReportBytes)
 }
 
 // newInterpreted resolves the interpreter and detects its version once at
 // construction so every result carries real provenance rather than a
 // hand-configured value.
-func newInterpreted(spec languageSpec, sb sandbox.Sandbox, outputLimit, maxProcesses, maxFileSizeMB int) *interpretedRuntime {
+func newInterpreted(spec languageSpec, sb sandbox.Sandbox, outputLimit, maxProcesses, maxFileSizeMB, maxReportBytes int) *interpretedRuntime {
 	bin := resolveBin(spec.binNames)
 	return &interpretedRuntime{
-		spec:          spec,
-		sandbox:       sb,
-		bin:           bin,
-		version:       detectVersion(bin, spec),
-		outputLimit:   outputLimit,
-		maxProcesses:  maxProcesses,
-		maxFileSizeMB: maxFileSizeMB,
+		spec:           spec,
+		sandbox:        sb,
+		bin:            bin,
+		version:        detectVersion(bin, spec),
+		outputLimit:    outputLimit,
+		maxProcesses:   maxProcesses,
+		maxFileSizeMB:  maxFileSizeMB,
+		maxReportBytes: maxReportBytes,
 	}
 }
 
@@ -79,6 +81,12 @@ func (r *interpretedRuntime) LimitFloors() Floors {
 // wall-clock deadline, a CPU-seconds cap, and an address-space cap. Timeout and
 // memory are already clamped by the Service.
 func (r *interpretedRuntime) Run(ctx context.Context, req runnerapi.RunRequest) runnerapi.RunResult {
+	if req.Mode == modeTest {
+		// mode=test (G9) is a wholly separate shape (test framework argv, a writable
+		// jail, a report hand-back, tests_failed classification), so it takes its own
+		// path — run mode below is left byte-for-byte unchanged.
+		return r.runTest(ctx, req)
+	}
 	workDir, err := os.MkdirTemp("", "dalivim-run-*")
 	if err != nil {
 		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "could not create sandbox dir"}
@@ -243,6 +251,162 @@ func (r *interpretedRuntime) prepare(workDir string, req runnerapi.RunRequest) (
 	runArgs = r.spec.multiFileRunArgs(srcRel(req.Entrypoint))
 	env = append(append([]string{}, r.spec.env...), "HOME=/nonexistent")
 	return runArgs, env, nil
+}
+
+// runTest is the mode=test entry point (G9): materialize the submission, launch
+// the language's test framework over it in a writable jail, and classify the
+// outcome from the framework's exit code + the report it produced. It reuses the
+// identical containment as run mode (empty netns, cgroup, rlimits, denylist) —
+// the only differences are the argv, the writable /sandbox for the report
+// hand-back, and the classification.
+func (r *interpretedRuntime) runTest(ctx context.Context, req runnerapi.RunRequest) runnerapi.RunResult {
+	tc, ok := testCommands[r.spec.name]
+	if !ok {
+		// Defensive: the service only routes a test-supported language here.
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "test mode not supported for this language"}
+	}
+	workDir, err := os.MkdirTemp("", "dalivim-test-*")
+	if err != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "could not create sandbox dir"}
+	}
+	defer os.RemoveAll(workDir)
+
+	target, err := r.prepareTest(workDir, req)
+	if err != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: err.Error()}
+	}
+	return r.executeTest(ctx, req, workDir, target, tc)
+}
+
+// prepareTest materializes the submission for a test run and returns the target
+// the framework should discover tests under, relative to the jail cwd (/sandbox):
+// the materialized source root ("src") for a files[] tree, or the single source
+// filename for source_code. Materialization re-validates against the TEST policy
+// (materializeSource is mode-aware), so a conftest.py the run policy forbids is
+// admitted here.
+func (r *interpretedRuntime) prepareTest(workDir string, req runnerapi.RunRequest) (string, error) {
+	if len(req.Files) == 0 {
+		scriptPath := filepath.Join(workDir, r.spec.sourceFile)
+		if werr := os.WriteFile(scriptPath, []byte(req.SourceCode), 0o600); werr != nil {
+			return "", errors.New("could not write source")
+		}
+		return r.spec.sourceFile, nil
+	}
+	if _, merr := materializeSource(workDir, req); merr != nil {
+		return "", merr
+	}
+	return srcRootName, nil
+}
+
+// executeTest launches one test-framework process in the sandbox against the
+// prepared workDir and classifies the outcome (G9). It mirrors execute() but:
+// runs the framework argv (not the run-mode argv), binds /sandbox WRITABLE so the
+// framework can hand its report back, ignores stdin, and adds the
+// success/tests_failed classification on a completed report.
+func (r *interpretedRuntime) executeTest(ctx context.Context, req runnerapi.RunRequest, workDir, target string, tc testCommand) runnerapi.RunResult {
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(req.TimeoutMs)*time.Millisecond)
+	defer cancel()
+	// Cause-carrying cancel so an output flood can kill the framework and be told
+	// apart from a deadline afterwards through context.Cause (as run mode).
+	ctx, cancelCause := context.WithCancelCause(ctx)
+	defer cancelCause(nil)
+
+	argv := append([]string{r.bin}, tc.argvTail(target, tc.reportFile)...)
+
+	cmd, acct := r.sandbox.Command(ctx, sandbox.Spec{
+		Argv:      argv,
+		WorkDir:   workDir,
+		TimeoutMs: req.TimeoutMs,
+		// No hard RLIMIT_AS in test mode: a test framework (pytest + assertion
+		// rewrite, worker forks) maps far more virtual memory than a bare script and
+		// dies spuriously under a tight address-space cap. The cgroup memory.max
+		// (MemoryMB) is the authoritative RSS bound and OOM signal instead — the same
+		// posture the Go/JS/Java runtimes already use.
+		AddressSpaceMB: 0,
+		MemoryMB:       req.MemoryMB,
+		MaxProcesses:   r.maxProcesses,
+		MaxFileSizeMB:  r.maxFileSizeMB,
+		// The framework writes its machine-readable report into /sandbox for the host
+		// to read back — the same host-visible hand-back the compile phase uses (the
+		// jail's /tmp is a private tmpfs the host cannot read). The read-only host
+		// rootfs is unchanged; only the ephemeral per-run workdir mount is writable.
+		Writable: true,
+	})
+	if acct != nil {
+		defer acct.Close()
+	}
+	// Test mode ignores stdin: the suite defines its own inputs.
+	cmd.Stdin = strings.NewReader("")
+	cmd.Env = tc.env
+
+	onFlood := func() { cancelCause(errOutputLimit) }
+	stdout := &limitedBuffer{limit: r.outputLimit, onLimit: onFlood}
+	stderr := &limitedBuffer{limit: r.outputLimit, onLimit: onFlood}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+
+	start := time.Now()
+	_ = cmd.Run()
+	duration := int(time.Since(start).Milliseconds())
+
+	res := runnerapi.RunResult{
+		Stdout:          encodeStream(req.Encoding, stdout.String()),
+		Stderr:          encodeStream(req.Encoding, stderr.String()),
+		StdoutTruncated: stdout.truncated,
+		StderrTruncated: stderr.truncated,
+		DurationMs:      duration,
+		MemoryKB:        memoryKB(acct, cmd),
+		ReportFormat:    tc.reportFormat,
+	}
+	if cmd.ProcessState != nil {
+		res.ExitCode = cmd.ProcessState.ExitCode()
+	}
+
+	report, produced, reportTrunc := readTestReport(workDir, tc, stdout.String(), r.maxReportBytes)
+	res.TestReport = report
+	res.TestReportTruncated = reportTrunc
+
+	// Resource bounds first (a crash is never a test verdict), then the test-mode
+	// success/tests_failed on a COMPLETED report, then the generic runtime_error for
+	// a framework that neither passed, failed cleanly, nor hit a resource bound
+	// (import/collection error, usage error, no tests, crash before the report).
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		res.Status = runnerapi.StatusTimeout
+	case acct != nil && acct.OOMKilled():
+		res.Status = runnerapi.StatusMemoryExceeded
+	case errors.Is(context.Cause(ctx), errOutputLimit):
+		res.Status = runnerapi.StatusOutputLimitExceeded
+	default:
+		if st := classifyTestExit(tc, res.ExitCode, produced); st != "" {
+			res.Status = st
+		} else {
+			res.Status = runnerapi.StatusRuntimeError
+		}
+	}
+	return res
+}
+
+// readTestReport returns the framework's report (G9): the contents of its report
+// file under workDir (read back from the writable /sandbox bind), or the captured
+// stdout for a framework that reports there (reportFile == ""). It reports whether
+// a non-empty report was actually produced — the authoritative "the suite ran"
+// signal — and caps the report at maxBytes independently of the stdout limit,
+// flagging a cut.
+func readTestReport(workDir string, tc testCommand, stdout string, maxBytes int) (report string, produced, truncated bool) {
+	var raw string
+	if tc.reportFile == "" {
+		raw = stdout
+		produced = raw != ""
+	} else if b, err := os.ReadFile(filepath.Join(workDir, tc.reportFile)); err == nil && len(b) > 0 {
+		raw = string(b)
+		produced = true
+	}
+	if maxBytes > 0 && len(raw) > maxBytes {
+		raw = raw[:maxBytes]
+		truncated = true
+	}
+	return raw, produced, truncated
 }
 
 // memoryKB prefers the cgroup's authoritative peak (memory.peak) when a delegated
