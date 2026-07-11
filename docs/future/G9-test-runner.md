@@ -1,5 +1,24 @@
 # G9 — Test-runner grading mode (pytest / go test / node --test / JUnit)
 
+> **Status — 🟡 phase 3 implemented: + JavaScript (`node --test`) (2026-07-11).**
+> `mode:"test"` is now live for **javascript** via node's built-in `--test` runner
+> (Node ≥18.17, **zero `node_modules`** — kept out of the image on purpose): a
+> request runs `node --disable-proto=throw --test --test-reporter=tap`, returning the
+> **TAP13** report **raw** on stdout (`report_format:"tap13"`) plus
+> `success`/`tests_failed`. It reuses the interpreted test path (`testCommands` in
+> `testmode.go`) + a separate JS test file policy (`filepolicy.go`). **Two things
+> discovered in implementation:** (1) node's runner does **not** recurse a positional
+> directory (it treats it as a single test file and errors), so tests are DISCOVERED
+> from the jail cwd — no positional arg — and a `source_code` test is written to
+> `main.test.js` so discovery matches it (new `testCommand.sourceFile` override); (2)
+> unlike pytest's distinct exit-2 collection error, a JS test file that throws while
+> loading exits **1** *and* emits TAP, so node folds a load failure into its report as
+> a failing test → classified `tests_failed` (the error visible in the raw TAP), the
+> honest dumb-runner relay of node's own verdict; a crash before any TAP still falls
+> through to `runtime_error` via the report-produced guard. Unit tests
+> (`js_testmode_test.go`) + on-target smoke (pass / fail / read-only-rootfs+egress
+> containment) added. **Remaining:** java (JUnit console). Prior banners follow.
+>
 > **Status — 🟡 phase 2 implemented: Python (pytest) + Go (`go test`) (2026-07-11).**
 > Go update: `mode:"test"` runs `go test -json -p 1 -count=1 ./...` in a **single
 > toolchain jail** (compile+run in one — NOT the two-jail run-mode model), seeding

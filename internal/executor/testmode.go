@@ -48,6 +48,14 @@ type testCommand struct {
 	// StatusTestsFailed, distinct from a crash exit. Any other non-zero code
 	// (collection/usage error, no tests, signal) falls through to runtime_error.
 	testsFailedExit int
+
+	// sourceFile, when set, overrides the run-mode spec.sourceFile as the filename a
+	// single source_code test submission is written to, so the framework's discovery
+	// matches it. node --test only runs files matching its test-name pattern, so a JS
+	// source_code test is written to main.test.js; pytest collects from an
+	// explicitly-named file, so python leaves this empty and reuses main.py. A
+	// files[] submission ignores it (the backend names its own files).
+	sourceFile string
 }
 
 // testCommands is the closed test-mode registry keyed by language (G9). A
@@ -96,6 +104,36 @@ var testCommands = map[string]testCommand{
 		reportFormat:    "junit-xml",
 		reportFile:      "report.xml",
 		testsFailedExit: 1,
+	},
+	"javascript": {
+		// node --disable-proto=throw --test --test-reporter=tap, with NO positional
+		// path: node's built-in runner DISCOVERS test files recursively from the jail
+		// cwd (/sandbox) — it finds src/*.test.js for a files[] tree and main.test.js
+		// at the root for a source_code submission. A positional DIRECTORY is not
+		// recursed by node 18's runner (it is treated as a single test file and
+		// errors), so discovery — not a positional arg — is the portable form; the
+		// argvTail therefore ignores target. --disable-proto=throw mirrors run mode's
+		// prototype-pollution hardening. Built-in runner => no node_modules, so the
+		// offline posture needs no extra policy beyond the empty netns.
+		//
+		// The TAP report is on STDOUT (reportFile ""), like go test -json. Node exits
+		// 1 both when a test fails AND when a test file throws while loading (e.g. a
+		// student module with a syntax error): unlike pytest's distinct exit-2
+		// collection error, node folds a load failure into its report as a failing
+		// test, so such a run classifies tests_failed with the error visible in the
+		// raw TAP — the honest, dumb-runner relay of node's own verdict. A crash before
+		// any TAP is produced still falls through to runtime_error (no report).
+		argvTail: func(_, _ string) []string {
+			return []string{"--disable-proto=throw", "--test", "--test-reporter=tap"}
+		},
+		env: determinismEnv(
+			"PATH=/usr/local/bin:/usr/bin:/bin",
+			"HOME=/nonexistent", // no user config (.node_repl_history, etc.)
+		),
+		reportFormat:    "tap13",
+		reportFile:      "", // TAP on stdout
+		testsFailedExit: 1,
+		sourceFile:      "main.test.js", // so node's discovery matches a source_code test
 	},
 }
 

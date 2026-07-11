@@ -190,6 +190,18 @@ var testFilePolicies = map[string]FilePolicy{
 		ForbiddenNames:      names("go.mod", "go.sum", "go.work", "go.work.sum"),
 		ForbiddenComponents: names("vendor"),
 	},
+	"javascript": {
+		Language:    "javascript",
+		AllowedExts: exts(".js", ".mjs", ".cjs", ".json"),
+		// A JS test submission is {student modules + hidden *.test.js files} — all
+		// plain .js, so the run-mode extension allowlist already fits. Same
+		// manifest/lockfile bans (a test run must never process a package manifest),
+		// and node_modules stays forbidden (no dependency fetch/vendor — node's
+		// built-in --test runner needs none). Minus the entrypoint: node --test
+		// DISCOVERS its tests.
+		ForbiddenNames:      names("package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml"),
+		ForbiddenComponents: names("node_modules"),
+	},
 }
 
 // policyFor returns the per-language FilePolicy with the configured numeric caps
