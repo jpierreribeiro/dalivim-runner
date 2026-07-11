@@ -66,10 +66,10 @@ type Config struct {
 const defaultShutdownGrace = 15 * time.Second
 
 // New builds the server: POST /run (and the deprecated POST /run/python alias)
-// behind the token gate; unauthenticated GET /healthz (liveness) and GET /readyz
-// (containment-aware readiness, G4.3); and token-gated GET /metrics (Prometheus,
-// G4.1). Method+path routing (Go 1.22+) makes a wrong method a 405 without any
-// per-handler checks.
+// behind the token gate; unauthenticated GET /healthz (liveness), GET /readyz
+// (containment-aware readiness, G4.3), and GET /languages (capability discovery,
+// G12); and token-gated GET /metrics (Prometheus, G4.1). Method+path routing
+// (Go 1.22+) makes a wrong method a 405 without any per-handler checks.
 func New(svc *executor.Service, cfg Config) *Server {
 	m := metrics.New()
 	h := &handler{
@@ -110,6 +110,9 @@ func New(svc *executor.Service, cfg Config) *Server {
 	mux.Handle("POST /run/python", gate(http.HandlerFunc(h.runPythonCompat)))
 	mux.HandleFunc("GET /healthz", h.health)
 	mux.HandleFunc("GET /readyz", h.ready)
+	// GET /languages (G12): unauthenticated capability discovery — the live
+	// language catalog + effective limits, secret-free (same posture as /readyz).
+	mux.HandleFunc("GET /languages", h.languages)
 	mux.Handle("GET /metrics", RequireTokens(metricsTokens, http.HandlerFunc(h.serveMetrics)))
 
 	grace := cfg.ShutdownGrace

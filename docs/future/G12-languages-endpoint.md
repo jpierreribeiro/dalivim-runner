@@ -1,5 +1,11 @@
 # G12 — `GET /languages` capability-discovery endpoint
 
+> **Status — ✅ implemented (2026-07-11).** `GET /languages` is live: unauthenticated
+> and secret-free (same posture as `/readyz`), it returns the boot-resolved catalog
+> (`Service.Catalog()` → id / version / kind / multifile / batch) plus the effective
+> limits. A test pins that the catalog id set equals the run-dispatch registry (no
+> drift) and that no token leaks into the payload. Planning notes kept below.
+
 A small observability/DX addition ([G4](G4-observability.md) family): expose the
 runner's supported languages, detected versions, and effective limits so the
 frontend/backend can render and validate **dynamically** instead of hardcoding a

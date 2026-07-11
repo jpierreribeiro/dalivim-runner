@@ -121,11 +121,12 @@ func TestJavaMultiFile(t *testing.T) {
 // stop-flag guard before the entrypoint.
 func TestInterpretedMultiFileArgs(t *testing.T) {
 	py := pythonSpec.multiFileRunArgs("src/main.py")
-	if len(py) != 4 || py[0] != "-I" || py[1] != "-B" || py[2] != "-c" {
+	// -s -P (not -I, so PYTHONHASHSEED is honoured — G11) + -B, then the -c wrapper.
+	if len(py) != 5 || py[0] != "-s" || py[1] != "-P" || py[2] != "-B" || py[3] != "-c" {
 		t.Fatalf("python multi-file flags = %v", py)
 	}
-	if !strings.Contains(py[3], `sys.path.insert(0, "src")`) || !strings.Contains(py[3], `run_path("src/main.py"`) {
-		t.Fatalf("python runpy wrapper wrong: %s", py[3])
+	if !strings.Contains(py[4], `sys.path.insert(0, "src")`) || !strings.Contains(py[4], `run_path("src/main.py"`) {
+		t.Fatalf("python runpy wrapper wrong: %s", py[4])
 	}
 	js := javascriptSpec.multiFileRunArgs("src/main.js")
 	if strings.Join(js, " ") != "--disable-proto=throw -- src/main.js" {

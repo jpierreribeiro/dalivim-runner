@@ -197,6 +197,17 @@ reports the resolved posture (`{"ready","backend","network_isolated"}`) — no
 secrets, so it may be public. Relax the requirement with
 `RUNNER_READY_REQUIRES=none` when running the netns backend intentionally.
 
+### `GET /languages`
+
+Unauthenticated capability discovery → `200` with the live language catalog and the
+effective limits, so a caller can render a language picker and validate a request
+without a hardcoded, drift-prone list. Each entry is
+`{id, version, kind, multifile, batch}` (e.g. `{"id":"python","version":"3.12.3",
+"kind":"interpreted","multifile":true,"batch":true}`); `limits` carries the
+default/max timeout & memory, compile budget, and the source/stdin/files/batch caps.
+Capability only — no secrets — so it may be public, like `/readyz`. The catalog is
+resolved once at boot (static thereafter).
+
 ### `GET /metrics`
 
 Prometheus exposition (`runner_runs_total{language,status}`, run/compile duration

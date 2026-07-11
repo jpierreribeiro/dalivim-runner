@@ -67,6 +67,56 @@ func TestRun_RejectsEmptySource(t *testing.T) {
 	}
 }
 
+// TestLanguages_Endpoint pins G12: GET /languages is unauthenticated (open even
+// when a service token is set), lists the registered languages with their flags,
+// reports the effective limits, and leaks no secret.
+func TestLanguages_Endpoint(t *testing.T) {
+	h := testServer(t, "secret") // token set: /languages must still be reachable without it
+	rec := get(h, "/languages", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for GET /languages, got %d", rec.Code)
+	}
+	var resp struct {
+		Languages []struct {
+			ID        string `json:"id"`
+			Kind      string `json:"kind"`
+			MultiFile bool   `json:"multifile"`
+			Batch     bool   `json:"batch"`
+		} `json:"languages"`
+		Limits struct {
+			MaxTimeoutMs   int `json:"max_timeout_ms"`
+			MaxMemoryMB    int `json:"max_memory_mb"`
+			MaxSourceBytes int `json:"max_source_bytes"`
+			MaxBatch       int `json:"max_batch"`
+		} `json:"limits"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode /languages: %v", err)
+	}
+	if len(resp.Languages) != 1 || resp.Languages[0].ID != "python" {
+		t.Fatalf("expected python in catalog, got %+v", resp.Languages)
+	}
+	if resp.Languages[0].Kind != "interpreted" || !resp.Languages[0].MultiFile || !resp.Languages[0].Batch {
+		t.Fatalf("python capability flags wrong: %+v", resp.Languages[0])
+	}
+	if resp.Limits.MaxTimeoutMs != 10000 || resp.Limits.MaxMemoryMB != 512 ||
+		resp.Limits.MaxSourceBytes != 200_000 || resp.Limits.MaxBatch != 100 {
+		t.Fatalf("effective limits wrong: %+v", resp.Limits)
+	}
+	if strings.Contains(rec.Body.String(), "secret") {
+		t.Fatalf("token leaked into /languages payload")
+	}
+}
+
+// TestLanguages_WrongMethod pins that path+method routing gives a 405 for POST.
+func TestLanguages_WrongMethod(t *testing.T) {
+	h := testServer(t, "")
+	rec := post(h, "/languages", "", "")
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 for POST /languages, got %d", rec.Code)
+	}
+}
+
 // TestRun_Base64BinaryRoundTrip is the headline for the base64 I/O mode: a program
 // emitting invalid UTF-8 bytes survives the JSON boundary intact with
 // encoding=base64, and is corrupted (U+FFFD) in the default text path — proving the
