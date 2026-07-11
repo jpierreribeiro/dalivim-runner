@@ -9,8 +9,17 @@ import "strconv"
 // CPython and Node have an enormous syscall surface that an allowlist breaks
 // easily, so we start by killing the syscalls a sandbox escape actually needs —
 // tracer attach, mount/namespace manipulation, kernel-module and BPF loading,
-// key management, reboot/swap, and fd-to-path handle tricks — and tighten per
+// key management, reboot/swap, the fd-to-path handle tricks, and the two
+// escape-only kernel primitives io_uring and userfaultfd — and tighten per
 // language later (a static C binary tolerates a strict allowlist; see the plan).
+//
+// io_uring_setup/enter/register and userfaultfd (S2) are killed because they are
+// unambiguously escape-only: io_uring is a recurring LPE surface AND a way to
+// smuggle I/O past a seccomp filter (operations submitted via the ring are not
+// syscalls per op), and userfaultfd races kernel page faults for exploitation. No
+// judged program needs either. They are the newest names in this block (425-427,
+// 323) and could only be added once the pinned kafel could NAME them — hence the
+// nsjail 3.4->3.6 bump this policy depends on (Dockerfile; docs/future/security/S2).
 //
 // clone3 is deliberately NOT killed: modern glibc (bookworm) uses it for thread
 // creation and posix_spawn, so killing it breaks the interpreter itself. Fork
@@ -30,7 +39,8 @@ const seccompPolicy = `POLICY dalivim {
 		bpf, setns, unshare,
 		add_key, keyctl, request_key,
 		reboot, swapon, swapoff,
-		open_by_handle_at, name_to_handle_at, perf_event_open
+		open_by_handle_at, name_to_handle_at, perf_event_open,
+		io_uring_setup, io_uring_enter, io_uring_register, userfaultfd
 	}
 }
 USE dalivim DEFAULT ALLOW`
@@ -52,14 +62,19 @@ USE dalivim DEFAULT ALLOW`
 // `fstat`) and 63 is `newuname` (not `uname`). Using the glibc-common spelling
 // fails the policy compile (fail-closed), same class as the umount/umount2 catch.
 //
-// nsjail 3.4's bundled kafel is old enough to lack the NAMES of the newest
-// syscalls (statx=332, rseq=334) and its grammar rejects bare numbers, so those
-// two cannot be allow-listed at all. We remove the NEED for them instead:
+// Historically nsjail 3.4's bundled kafel lacked the NAMES of the newest syscalls
+// (statx=332, rseq=334) and its grammar rejects bare numbers, so neither could be
+// allow-listed at all. We removed the NEED for them instead, and keep doing so:
 //   - rseq: disabled at the glibc level via GLIBC_TUNABLES=glibc.pthread.rseq=0
 //     on the run's env (see compiled.go), so __libc_start_main never registers it;
 //   - statx: not listed — glibc-static resolves fstat() through newfstat/
-//     newfstatat here, both of which ARE named. (If a future glibc insists on
-//     statx, the fix is a newer nsjail/kafel, not opening the allowlist.)
+//     newfstatat here, both of which ARE named.
+//
+// The nsjail 3.6 bump (S2) means kafel CAN now name statx and rseq, so this gap is
+// closeable — but the removal (add them to the allowlist and drop the rseq tunable)
+// is a separate, independently-validated change to the static C/C++ path, not part
+// of S2's denylist tightening. Until then the workarounds above remain, and they
+// are still the fallback if a future glibc insists on statx.
 //
 // execve is allowed for one structural reason: nsjail installs the seccomp
 // filter and THEN execve()s the payload, so the launch execve is itself filtered

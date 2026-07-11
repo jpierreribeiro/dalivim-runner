@@ -233,6 +233,21 @@ func TestSeccompProfiles(t *testing.T) {
 	if !strings.Contains(deny, "DEFAULT ALLOW") {
 		t.Fatalf("denylist must be DEFAULT ALLOW, got %q", deny)
 	}
+	// S2: the escape-only primitives (io_uring family + userfaultfd) must be in the
+	// KILL block. This is a name-level pin; the on-target CI smoke proves they are
+	// actually SIGSYS-killed on the shipped nsjail 3.6. clone/clone3 must stay OUT
+	// of KILL — killing them breaks glibc thread creation (fork-bomb containment is
+	// --rlimit_nproc + the concurrency cap).
+	for _, killed := range []string{"io_uring_setup", "io_uring_enter", "io_uring_register", "userfaultfd"} {
+		if !containsToken(deny, killed) {
+			t.Fatalf("denylist must KILL escape-only syscall %q", killed)
+		}
+	}
+	for _, allowed := range []string{"clone", "clone3"} {
+		if containsToken(deny, allowed) {
+			t.Fatalf("denylist must NOT kill %q (breaks glibc thread creation)", allowed)
+		}
+	}
 
 	enforce := seccompPolicyFor(SeccompStaticEnforce)
 	if !strings.Contains(enforce, "ALLOW {") || !strings.Contains(enforce, "DEFAULT KILL") {
