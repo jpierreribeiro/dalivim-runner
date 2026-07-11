@@ -13,7 +13,7 @@ The runner's live containment posture (already in prod) is catalogued in
 
 | # | Theme | Value | Size | Breaks contract? | Risk if skipped |
 |---|---|---|---|---|---|
-| **[S1](S1-fuzzing-validators.md)** | Fuzz the request validators (path grammar, JSON decode) | 🔴 high | **S** | no | a parser edge case reaches materialization |
+| **[S1](S1-fuzzing-validators.md)** ✅ | Fuzz the request validators (path grammar, JSON decode) | 🔴 high | **S** | no | a parser edge case reaches materialization |
 | **[S2](S2-seccomp-allowlist-interpreters.md)** | Tighten interpreters toward a seccomp allowlist (nsjail/kafel bump) | 🟠 medium | M/L | no | wider kernel attack surface than necessary |
 | **[S3](S3-supply-chain-sbom-signing.md)** | SBOM + image signing / provenance (cosign) | 🟢 medium | S/M | no | no attestable provenance of the shipped image |
 
@@ -27,7 +27,8 @@ Effort. Every claim is anchored to code.
 ## Ordering
 
 **S1 first** — highest ROI, lowest effort, zero deploy risk (it's a test suite over
-pure functions). **S3 next** — mechanical, CI-only, no runtime change. **S2 last** —
+pure functions). ✅ **done (2026-07-11)** — six invariant fuzz targets + a bounded CI
+lane. **S3 next** — mechanical, CI-only, no runtime change. **S2 last** —
 it changes the live seccomp policy and **must** be validated on-target (a wrong
 allowlist fails the nsjail boot probe closed under `RUNNER_SANDBOX=require`), so it
 carries real rollout risk and should ride behind the `complain`-mode tooling that

@@ -1,5 +1,20 @@
 # S1 — Fuzz the request validators (path grammar, JSON decode, base64)
 
+> **Status — ✅ implemented (2026-07-11).** Native-Go fuzz targets now guard the
+> pre-jail validators, each asserting a **containment invariant** rather than an
+> expected output: `FuzzValidatePath` (no accepted path escapes the source root),
+> `FuzzResolveEntrypoint` (an accepted path entry is always a submitted file),
+> `FuzzJavaClass` (an accepted Java entry is a class name, never a path),
+> `FuzzBase64RoundTrip` (binary-safe I/O is a lossless identity), and
+> `FuzzMaterialize` (validator + traversal-resistant writer together — nothing
+> lands outside `t.TempDir()`, no symlink), plus `FuzzDecode` in the transport
+> (arbitrary bodies never panic and never bypass a size cap). CI runs a bounded
+> budget per target on every PR/push and a 15 m search weekly via
+> [`scripts/fuzz.sh`](../../../scripts/fuzz.sh) (it enumerates targets because
+> `go test -fuzz` fuzzes one at a time); the `vet + race` job replays any committed
+> `testdata/fuzz` crasher on every run so a found bug stays red. No escape was
+> found on the initial search — the validators hold. Planning notes kept below.
+
 The runner has an excellent **example-based** test suite, but **no fuzzing**. The
 highest-severity code in the repo — the attacker-controlled path validator that
 gates a host filesystem write — is exactly the class of code where a fuzzer finds the
