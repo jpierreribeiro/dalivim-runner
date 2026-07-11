@@ -271,7 +271,14 @@ func (r *interpretedRuntime) runTest(ctx context.Context, req runnerapi.RunReque
 	}
 	defer os.RemoveAll(workDir)
 
-	target, err := r.prepareTest(workDir, req)
+	// A single source_code test is written to the test command's own filename when
+	// it sets one (JS: main.test.js, so node's discovery matches it), else the
+	// run-mode source filename (python: main.py, which pytest collects explicitly).
+	srcFile := r.spec.sourceFile
+	if tc.sourceFile != "" {
+		srcFile = tc.sourceFile
+	}
+	target, err := r.prepareTest(workDir, req, srcFile)
 	if err != nil {
 		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: err.Error()}
 	}
@@ -283,14 +290,15 @@ func (r *interpretedRuntime) runTest(ctx context.Context, req runnerapi.RunReque
 // the materialized source root ("src") for a files[] tree, or the single source
 // filename for source_code. Materialization re-validates against the TEST policy
 // (materializeSource is mode-aware), so a conftest.py the run policy forbids is
-// admitted here.
-func (r *interpretedRuntime) prepareTest(workDir string, req runnerapi.RunRequest) (string, error) {
+// admitted here. srcFile is the filename a source_code submission is written to
+// (test-command override or the run-mode default) — see runTest.
+func (r *interpretedRuntime) prepareTest(workDir string, req runnerapi.RunRequest, srcFile string) (string, error) {
 	if len(req.Files) == 0 {
-		scriptPath := filepath.Join(workDir, r.spec.sourceFile)
+		scriptPath := filepath.Join(workDir, srcFile)
 		if werr := os.WriteFile(scriptPath, []byte(req.SourceCode), 0o600); werr != nil {
 			return "", errors.New("could not write source")
 		}
-		return r.spec.sourceFile, nil
+		return srcFile, nil
 	}
 	if _, merr := materializeSource(workDir, req); merr != nil {
 		return "", merr

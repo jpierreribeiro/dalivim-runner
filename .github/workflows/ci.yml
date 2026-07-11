@@ -590,6 +590,33 @@ jobs:
             {"path":"contain_test.go","content":"package contain\nimport (\n\t\"net\"\n\t\"os\"\n\t\"testing\"\n\t\"time\"\n)\nfunc TestNoHostWrite(t *testing.T){ if os.WriteFile(\"/usr/pwned\", []byte(\"x\"), 0644) == nil { t.Fatal(\"host write succeeded\") } }\nfunc TestNoEgress(t *testing.T){ c, err := net.DialTimeout(\"tcp\", \"1.1.1.1:53\", 2*time.Second); if err == nil { c.Close(); t.Fatal(\"egress reached\") } }\n"}
           ]' ./scripts/smoke-test.sh go success go-test-json
 
+      # JavaScript test mode (G9): node's built-in `--test` runner (no node_modules)
+      # DISCOVERS *.test.js under the jail cwd and emits a TAP report on stdout.
+      # Proves the interpreted report-hand-back-on-stdout path and the discovery form
+      # on the shipped node (18.20), and that /sandbox writable did not open the rootfs.
+      - name: G9 node --test — all pass => success + raw tap report
+        run: |
+          SMOKE_FILES='[
+            {"path":"solution.js","content":"module.exports.add = (a, b) => a + b;\n"},
+            {"path":"solution.test.js","content":"const test=require(\"node:test\");const assert=require(\"node:assert\");const {add}=require(\"./solution.js\");\ntest(\"adds\",()=>assert.strictEqual(add(2,3),5));\ntest(\"zero\",()=>assert.strictEqual(add(0,0),0));\n"}
+          ]' ./scripts/smoke-test.sh javascript success tap13
+
+      - name: G9 node --test — some fail => tests_failed (NOT runtime_error)
+        run: |
+          SMOKE_FILES='[
+            {"path":"solution.js","content":"module.exports.add = (a, b) => a + b;\n"},
+            {"path":"solution.test.js","content":"const test=require(\"node:test\");const assert=require(\"node:assert\");const {add}=require(\"./solution.js\");\ntest(\"ok\",()=>assert.strictEqual(add(2,3),5));\ntest(\"bad\",()=>assert.strictEqual(add(2,3),6));\n"}
+          ]' ./scripts/smoke-test.sh javascript tests_failed tap13
+
+      # Containment: /sandbox is writable for materialization but the host rootfs stays
+      # READ-ONLY and the netns empty. The hidden test asserts a host write is denied
+      # and egress has no route; success IS the containment proof.
+      - name: G9 node --test containment — read-only rootfs + no egress
+        run: |
+          SMOKE_FILES='[
+            {"path":"contain.test.js","content":"const test=require(\"node:test\");const assert=require(\"node:assert\");const fs=require(\"node:fs\");const net=require(\"node:net\");\ntest(\"no host write\",()=>{ assert.throws(()=>fs.writeFileSync(\"/usr/pwned\",\"x\")); });\ntest(\"no egress\",()=>new Promise((res,rej)=>{ const s=net.connect({host:\"1.1.1.1\",port:53,timeout:2000}); s.on(\"connect\",()=>{s.destroy();rej(new Error(\"egress reached\"))}); s.on(\"error\",()=>res()); s.on(\"timeout\",()=>{s.destroy();res()}); }));\n"}
+          ]' ./scripts/smoke-test.sh javascript success tap13
+
       # mode=test is admitted only for a language with a test command registered,
       # and never for a stdins[] batch — both are 400s at the gate.
       - name: G9 test mode guards — unsupported language and batch => 400
