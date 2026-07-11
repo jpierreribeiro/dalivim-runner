@@ -8,6 +8,7 @@ package executor
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/jpierreribeiro/dalivim-runner/pkg/runnerapi"
 )
@@ -114,6 +115,62 @@ func (s *Service) Languages() []string {
 		out = append(out, lang)
 	}
 	return out
+}
+
+// LanguageInfo describes one registered language for the GET /languages discovery
+// endpoint (G12): its wire id, detected version, runtime kind, and capability
+// flags. It is capability metadata only — never any secret or backend posture.
+type LanguageInfo struct {
+	ID        string `json:"id"`
+	Version   string `json:"version"`
+	Kind      string `json:"kind"`      // "interpreted" | "compiled"
+	MultiFile bool   `json:"multifile"` // accepts a files[] submission (G3)
+	Batch     bool   `json:"batch"`     // accepts a stdins[] batch (G6)
+}
+
+// Catalog returns the registered languages with provenance and capability flags,
+// sorted by id, for the discovery endpoint. It reads only the immutable registry
+// resolved at construction (versions detected once, kinds/flags fixed), so it is
+// safe for concurrent use and allocates a small, bounded response.
+func (s *Service) Catalog() []LanguageInfo {
+	out := make([]LanguageInfo, 0, len(s.runtimes))
+	for id, rt := range s.runtimes {
+		_, batch := rt.(batchRunner)
+		out = append(out, LanguageInfo{
+			ID:        id,
+			Version:   rt.Version(),
+			Kind:      runtimeKind(rt),
+			MultiFile: supportsMultiFile(id),
+			Batch:     batch,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// Limits exposes the resolved limit policy for the discovery endpoint. It returns
+// a value copy, so a caller cannot mutate the service's limits.
+func (s *Service) Limits() Limits { return s.limits }
+
+// runtimeKind names a runtime's shape for the catalog. It type-switches on the
+// concrete runtime rather than widening the minimal Runtime interface with a
+// Kind() method; a language whose type is neither reports "unknown".
+func runtimeKind(rt Runtime) string {
+	switch rt.(type) {
+	case *compiledRuntime:
+		return "compiled"
+	case *interpretedRuntime:
+		return "interpreted"
+	default:
+		return "unknown"
+	}
+}
+
+// supportsMultiFile reports whether a language has a file policy — i.e. whether a
+// files[] submission is accepted for it (the normalize path gates on the same map).
+func supportsMultiFile(lang string) bool {
+	_, ok := filePolicies[lang]
+	return ok
 }
 
 // Run clamps the request's limits, dispatches to the runtime, and fills

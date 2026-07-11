@@ -67,8 +67,8 @@ judge). Specs are written; none is implemented yet.
 |---|---|---|---|---|---|
 | **[G9](G9-test-runner.md)** | Test-runner grading mode (pytest / go test / node --test / JUnit) | 🔴 high | large | no (additive `mode`) | 📋 spec |
 | **[G10](G10-sql-sqlite.md)** | SQL execution (SQLite; PostgreSQL later shape) | 🟡 high | S–M (P1) | no (new language) | 📋 spec |
-| **[G11](G11-determinism-completion.md)** | Determinism completion (`PYTHONHASHSEED`, per-lang non-guarantees) | 🟢 hygiene | **XS** | no | 📋 spec |
-| **[G12](G12-languages-endpoint.md)** | `GET /languages` capability discovery | 🟢 medium | XS/S | no (additive route) | 📋 spec |
+| **[G11](G11-determinism-completion.md)** | Determinism completion (`PYTHONHASHSEED`, per-lang non-guarantees) | 🟢 hygiene | **XS** | no | ✅ done |
+| **[G12](G12-languages-endpoint.md)** | `GET /languages` capability discovery | 🟢 medium | XS/S | no (additive route) | ✅ done |
 
 Recommended order: **G11** (XS quick win) → **G12** (XS/S, unblocks the frontend) →
 **G9** (the big product unlock) → **G10** (SQLite first). G9 and G10 each force the
