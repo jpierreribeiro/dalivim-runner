@@ -58,6 +58,27 @@ owner decision above) are all implemented. The higher-leverage near-term work is
 now at the **system** level (seam consolidation, runner migration, abuse/quota
 hardening) — tracked outside this runner-only roadmap.
 
+**Wave 3 — capability breadth (planned).** The runner is a mature *executor* for the
+I/O-problem model; Wave 3 widens *what kinds of exercise it can judge* and completes
+the determinism/observability edges — all still on the executor side of the line (no
+judge). Specs are written; none is implemented yet.
+
+| Phase | Theme | Value | Size | Breaks contract? | Status |
+|---|---|---|---|---|---|
+| **[G9](G9-test-runner.md)** | Test-runner grading mode (pytest / go test / node --test / JUnit) | 🔴 high | large | no (additive `mode`) | 📋 spec |
+| **[G10](G10-sql-sqlite.md)** | SQL execution (SQLite; PostgreSQL later shape) | 🟡 high | S–M (P1) | no (new language) | 📋 spec |
+| **[G11](G11-determinism-completion.md)** | Determinism completion (`PYTHONHASHSEED`, per-lang non-guarantees) | 🟢 hygiene | **XS** | no | 📋 spec |
+| **[G12](G12-languages-endpoint.md)** | `GET /languages` capability discovery | 🟢 medium | XS/S | no (additive route) | 📋 spec |
+
+Recommended order: **G11** (XS quick win) → **G12** (XS/S, unblocks the frontend) →
+**G9** (the big product unlock) → **G10** (SQLite first). G9 and G10 each force the
+same output-contract decisions, so doing G9 first informs G10.
+
+**Security hardening** is tracked **separately** in [`security/`](security/README.md)
+— S1 (fuzz the validators), S2 (seccomp allowlist for interpreters), S3 (SBOM +
+image signing). Those harden existing guarantees rather than add capability, so they
+get their own review bar and on-target proof.
+
 ## How each spec is written
 
 Every `G*.md` follows the same shape so an agent (or you) can pick one up and
