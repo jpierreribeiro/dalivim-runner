@@ -194,20 +194,27 @@ jobs:
       # This is the teeth of the S2 denials, and is only compilable at all because the
       # nsjail 3.6 bump gave kafel the NAMES for these syscalls. Raw syscall() with the
       # amd64 numbers is used so the test does not depend on a libc wrapper existing.
-      - name: S2 io_uring_setup => SIGSYS (denylist has teeth)
+      #
+      # How SIGSYS surfaces: nsjail (the runner's direct child) does not re-raise the
+      # child's signal — it exits 128+signum, so a seccomp-killed jailed process comes
+      # back as status=runtime_error with exit_code == 159 (128 + SIGSYS(31)) and an
+      # empty `signal`, NOT signal=="SIGSYS". So exit_code==159 IS the SIGSYS proof
+      # here; we accept signal=="SIGSYS" too in case a runtime ever surfaces it raw.
+      # Same reason the socket-under-enforce check below ORs signal/runtime_error.
+      - name: S2 io_uring_setup => killed by SIGSYS (denylist has teeth)
         run: |
           resp="$(curl -fsS localhost:8090/run -H 'content-type: application/json' \
             -d "$(jq -nc '{language:"c",source_code:"#include <unistd.h>\n#include <sys/syscall.h>\n#include <stdio.h>\nint main(void){ syscall(425, 1, (void*)0); printf(\"SURVIVED\\n\"); return 0; }"}')")"
-          echo "$resp" | jq '{status, signal, stdout}'
-          echo "$resp" | jq -e '.status != "success" and .signal == "SIGSYS" and (.stdout | contains("SURVIVED") | not)' >/dev/null \
+          echo "$resp" | jq '{status, signal, exit_code, stdout}'
+          echo "$resp" | jq -e '.status != "success" and (.stdout | contains("SURVIVED") | not) and (.exit_code == 159 or .signal == "SIGSYS")' >/dev/null \
             || { echo "::error::io_uring_setup was not SIGSYS-killed under the denylist"; exit 1; }
 
-      - name: S2 userfaultfd => SIGSYS (denylist has teeth)
+      - name: S2 userfaultfd => killed by SIGSYS (denylist has teeth)
         run: |
           resp="$(curl -fsS localhost:8090/run -H 'content-type: application/json' \
             -d "$(jq -nc '{language:"c",source_code:"#include <unistd.h>\n#include <sys/syscall.h>\n#include <stdio.h>\nint main(void){ syscall(323, 0); printf(\"SURVIVED\\n\"); return 0; }"}')")"
-          echo "$resp" | jq '{status, signal, stdout}'
-          echo "$resp" | jq -e '.status != "success" and .signal == "SIGSYS" and (.stdout | contains("SURVIVED") | not)' >/dev/null \
+          echo "$resp" | jq '{status, signal, exit_code, stdout}'
+          echo "$resp" | jq -e '.status != "success" and (.stdout | contains("SURVIVED") | not) and (.exit_code == 159 or .signal == "SIGSYS")' >/dev/null \
             || { echo "::error::userfaultfd was not SIGSYS-killed under the denylist"; exit 1; }
 
       # ---- G1 executor-robustness acceptance on the shipped image ----
