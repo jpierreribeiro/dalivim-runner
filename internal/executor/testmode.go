@@ -1,6 +1,11 @@
 package executor
 
-import "github.com/jpierreribeiro/dalivim-runner/pkg/runnerapi"
+import (
+	"os"
+	"path/filepath"
+
+	"github.com/jpierreribeiro/dalivim-runner/pkg/runnerapi"
+)
 
 // modeRun and modeTest are the two execution shapes (G9). The empty string is an
 // alias for modeRun so a request that omits mode takes the unchanged run path.
@@ -94,18 +99,120 @@ var testCommands = map[string]testCommand{
 	},
 }
 
+// compiledTestCommand is the CLOSED test-mode recipe for a COMPILED language
+// (G9). Unlike an interpreted test run — and unlike run mode — it does NOT use the
+// two-jail compile→run model: a toolchain's own `test` subcommand compiles AND
+// runs in ONE jail (`go test`), so the recipe is a single full argv (a /bin/sh
+// prelude that seeds the build cache, cds into the module, and execs the test
+// command) plus the jail knobs that single toolchain jail needs. It is edited
+// deliberately here, never request-driven.
+type compiledTestCommand struct {
+	// argv is the full jail argv — a /bin/sh -c prelude (argv[0] absolute, execve'd
+	// directly) that seeds GOCACHE, cds into the in-jail source root, and execs
+	// `go test`. No student token appears in it.
+	argv []string
+
+	// env is the toolchain environment: the determinism pin plus the offline module
+	// policy and the seeded GOCACHE/GOPATH (as the compile jail uses).
+	env []string
+
+	// reportFormat labels the report (ReportFormat on the result); the report is on
+	// stdout for `go test -json`.
+	reportFormat string
+
+	// testsFailedExit is the exit code meaning "ran to completion, >=1 test failed"
+	// (`go test` = 1) — the gate for tests_failed.
+	testsFailedExit int
+
+	// tmpfsMB sizes the writable /tmp the toolchain needs for GOCACHE + build output
+	// (as the compile jail: a cold stdlib build writes tens of MB).
+	tmpfsMB int
+
+	// buildFailMarker, when non-empty and present in the report, means the toolchain
+	// failed to COMPILE the submission. `go test -json` emits an
+	// `"Action":"build-fail"` event and exits 1 — the SAME exit code as a real test
+	// failure — so exit code alone cannot tell a build failure from a test failure.
+	// This structured, documented marker (not a stderr guess) is the authoritative
+	// signal that routes a build failure to compile_error instead of tests_failed,
+	// matching go's run-mode semantics.
+	buildFailMarker string
+
+	// prep runs on the host after materialization and before the jail — synthesize
+	// the module file (go.mod) at the source root, mirroring the multi-file build.
+	prep func(workDir string) error
+
+	// sourceFile is the filename a single source_code test submission is written to
+	// under the source root. For go it MUST end in _test.go (main_test.go) so
+	// `go test` discovers it; a files[] submission ignores this.
+	sourceFile string
+}
+
+// compiledTestCommands is the closed compiled-language test registry (G9), keyed
+// by language and populated in init below. A language here supports mode=test via
+// the single-toolchain-jail path; a language in testCommands supports it via the
+// interpreted path. supportsTestMode unions the two.
+var compiledTestCommands = map[string]*compiledTestCommand{}
+
+func init() { compiledTestCommands["go"] = goTestCommand() }
+
+// goTestCommand builds Go's test recipe. `go test` compiles AND runs in one jail,
+// so — unlike run mode's split compile/run jails — this is a single full-rootfs,
+// toolchain-present, writable-/tmp jail (the compile-jail posture, kept alive to
+// run). It seeds the pre-warmed /opt/gocache exactly as the compile prelude does,
+// pins single-package parallelism + a fresh (uncached) run for determinism, and
+// stays offline. The report is `go test -json` on stdout.
+//
+// -trimpath is REQUIRED, not cosmetic: the image warms /opt/gocache with -trimpath
+// (Dockerfile) and it is part of Go's build-cache key, so a `go test` WITHOUT it
+// hits zero of the warm cache and cold-rebuilds the whole stdlib single-threaded —
+// which blows the run wall (SIGKILL/timeout). It also matches run mode's
+// `go build -trimpath`, keeping the toolchain determinism (G7) consistent.
+func goTestCommand() *compiledTestCommand {
+	src := srcJailDir() // /sandbox/src, the synthesized module root
+	sh := "cp -r /opt/gocache /tmp/gocache && cd " + shellQuote(src) +
+		" && exec go test -trimpath -json -p 1 -count=1 ./..."
+	return &compiledTestCommand{
+		argv: []string{"/bin/sh", "-c", sh},
+		// Determinism pin (G7) + the toolchain env: seeded GOCACHE/GOPATH on the
+		// size-capped /tmp, local toolchain (no network fetch), and the offline
+		// module policy (-mod=readonly so a self-contained stdlib module never tries
+		// to write go.mod/go.sum into the read-only /sandbox; an external import fails
+		// closed as a build error). GOMAXPROCS=1 keeps scheduler churn low under the
+		// denylist + pids cap.
+		env: determinismEnv(
+			"PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin", "TMPDIR=/tmp",
+			"CGO_ENABLED=0", "GOCACHE=/tmp/gocache", "GOPATH=/tmp/gopath",
+			"GOTOOLCHAIN=local", "GOENV=off",
+			"GOPROXY=off", "GOSUMDB=off", "GOWORK=off", "GOFLAGS=-mod=readonly",
+			"GOMAXPROCS=1",
+		),
+		reportFormat:    "go-test-json",
+		testsFailedExit: 1,
+		tmpfsMB:         256,
+		buildFailMarker: `"Action":"build-fail"`,
+		prep: func(workDir string) error {
+			return os.WriteFile(filepath.Join(workDir, srcRootName, "go.mod"), []byte(goModContent), 0o600)
+		},
+		sourceFile: "main_test.go",
+	}
+}
+
 // supportsTestMode reports whether a language has a test-mode command registered
-// (G9). The service gates a mode=test request on this, and the catalog advertises
-// it via LanguageInfo.Test.
+// (G9), in either the interpreted or the compiled registry. The service gates a
+// mode=test request on this, and the catalog advertises it via LanguageInfo.Test.
 func supportsTestMode(lang string) bool {
-	_, ok := testCommands[lang]
+	if _, ok := testCommands[lang]; ok {
+		return true
+	}
+	_, ok := compiledTestCommands[lang]
 	return ok
 }
 
 // classifyTestExit maps a completed test run to its terminal status, given the
-// framework's exit code and whether a report was actually produced. It is the ONE
-// addition to the run-mode classification switch, evaluated after timeout/memory/
-// output but before the generic runtime_error default:
+// framework's exit code, the exit code that means "ran, some failed", and whether
+// a report was actually produced. It is the ONE addition to the run-mode
+// classification switch, evaluated after timeout/memory/output but before the
+// generic runtime_error default:
 //
 //   - exit == 0                          → success (all tests passed)
 //   - exit == testsFailedExit && report  → tests_failed (ran, some failed)
@@ -115,14 +222,37 @@ func supportsTestMode(lang string) bool {
 // failed" from "harness crashed" by the presence of a completed report, not by
 // guessing from stderr. A collection/import error (pytest exit 2) never matches
 // testsFailedExit, so it stays runtime_error even though pytest also emits a
-// report for it.
-func classifyTestExit(tc testCommand, exitCode int, reportProduced bool) string {
+// report for it. (A go BUILD failure also exits 1, so the compiled path checks its
+// buildFailMarker BEFORE calling this — see the compiled executeTest.)
+func classifyTestExit(exitCode, testsFailedExit int, reportProduced bool) string {
 	switch {
 	case exitCode == 0:
 		return runnerapi.StatusSuccess
-	case exitCode == tc.testsFailedExit && reportProduced:
+	case exitCode == testsFailedExit && reportProduced:
 		return runnerapi.StatusTestsFailed
 	default:
 		return "" // not a test-mode terminal state; caller decides (runtime_error)
 	}
+}
+
+// readTestReport returns the framework's report (G9): the contents of its report
+// file under workDir (read back from the writable /sandbox bind), or the given
+// stdout for a framework that reports there (reportFile == ""). It reports whether
+// a non-empty report was actually produced — the authoritative "the suite ran"
+// signal — and caps the report at maxBytes independently of the stdout limit,
+// flagging a cut. Shared by the interpreted and compiled test paths.
+func readTestReport(workDir, reportFile, stdout string, maxBytes int) (report string, produced, truncated bool) {
+	var raw string
+	if reportFile == "" {
+		raw = stdout
+		produced = raw != ""
+	} else if b, err := os.ReadFile(filepath.Join(workDir, reportFile)); err == nil && len(b) > 0 {
+		raw = string(b)
+		produced = true
+	}
+	if maxBytes > 0 && len(raw) > maxBytes {
+		raw = raw[:maxBytes]
+		truncated = true
+	}
+	return raw, produced, truncated
 }

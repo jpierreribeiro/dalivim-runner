@@ -11,8 +11,9 @@ nothing, decides no grade. The framework judges its own assertions; the runner
 only *transcribes* the report it produced. Turning `3/5 passed` into AC/WA is the
 **backend's** job — read `test_report` and decide.
 
-> **Status:** phase 1 ships **Python (pytest)**. `go` / `javascript` / `java`
-> follow behind the same flag. Ask for a language via `GET /languages` (`test:true`).
+> **Status:** ships **Python (pytest)** and **Go (`go test`)**. `javascript`
+> (`node --test`) and `java` (JUnit) follow behind the same flag. Ask for a
+> language via `GET /languages` (`test:true`).
 
 ---
 
@@ -93,7 +94,7 @@ per-input results.
 |---|---|
 | `status` | `success` (all passed), `tests_failed` (ran, ≥1 failed), or a crash/limit status (below). |
 | `test_report` | the framework's machine-readable report, **verbatim**. Opaque to the runner. |
-| `report_format` | how to parse it: `"junit-xml"` (pytest today). |
+| `report_format` | how to parse it: `"junit-xml"` (pytest), `"go-test-json"` (go test). |
 | `test_report_truncated` | `true` if the report hit `RUNNER_MAX_TEST_REPORT_BYTES` and was cut — read this before trusting the report is complete. |
 | `exit_code` | the framework's exit code (pytest: `0` pass, `1` some failed). |
 
@@ -111,6 +112,7 @@ harness**.
 |---|---|---|
 | all tests passed | `success` | framework exit `0` |
 | some tests failed | `tests_failed` | framework exit `1` **and** a report was produced |
+| the submission didn't compile (Go: build/`vet` error) | `compile_error` | go test's `build-fail` marker in the report |
 | harness crashed before completing (import/collection error, syntax error, no tests, segfault) | `runtime_error` | any other exit; a report may still exist but the exit code is not the tests-failed code |
 | exceeded the wall/CPU budget | `timeout` | deadline hit |
 | exceeded memory | `memory_exceeded` | cgroup OOM |
@@ -147,6 +149,27 @@ and a `503` / `internal_error` as *our* infrastructure failure to retry.
   student file (pytest inserts the test directory on `sys.path`); the workdir root
   stays off `sys.path`, so a student cannot plant a module to hijack an import.
 
+### Go — `go test`
+
+- Command (fixed, in-jail): `go test -json -p 1 -count=1 ./...`, run in a **single
+  jail** that has the Go toolchain (unlike run mode's split compile/run jails — `go
+  test` compiles *and* runs in one invocation). The pre-warmed build cache is seeded
+  so a run is fast, not a cold stdlib rebuild.
+- Report: **go-test-json** (`report_format:"go-test-json"`) — one JSON event per
+  line, on stdout.
+- Layout: the runner **synthesizes** the module (`go.mod`); a caller-supplied
+  `go.mod` is **forbidden**. Put the student code and the hidden `*_test.go` in the
+  same package. A single `source_code` submission is written to `main_test.go`.
+- Offline & deterministic: `GOPROXY=off` + `-mod=readonly` (an external import fails
+  closed as a build error), `-p 1 -count=1` (no package parallelism, no result
+  cache), `GOMAXPROCS=1`.
+- **Build failure vs. test failure:** `go test -json` reports a compile error as an
+  `"Action":"build-fail"` event and exits `1` — the *same* exit code as a test
+  failure. The runner distinguishes them by that structured marker and classifies a
+  build failure as **`compile_error`** (details in the report), not `tests_failed`.
+- Note: `go test` runs `go vet` by default, so a `vet` error is a build failure
+  (`compile_error`), not a test that ran.
+
 ---
 
 ## Containment
@@ -157,13 +180,18 @@ jail**: empty network namespace (no egress), read-only host rootfs, per-run cgro
 syscall surface, so never the static allowlist), and framework parallelism
 disabled so worker forks stay inside the per-run process cap.
 
-The **one** difference from run mode: the per-run `/sandbox` mount is **writable**
-so the framework can hand its report file back to the host (the jail's `/tmp` is a
-private tmpfs the host can't read — same hand-back the compile phase uses for its
-artifact). This widens **only** the ephemeral per-run workdir; **the host rootfs
-stays read-only** and the network stays empty. The on-target smoke
-(`scripts/smoke-test.sh`, the G9 block in `ci.yml`) proves a hidden test cannot
-write outside `/sandbox` and cannot reach the network.
+Report hand-back differs by framework, and neither weakens the jail:
+
+- **pytest** writes a report *file*, so its jail binds the per-run `/sandbox`
+  **writable** (the jail's `/tmp` is a private tmpfs the host can't read — same
+  hand-back the compile phase uses for its artifact). This widens **only** the
+  ephemeral per-run workdir.
+- **go test** reports on *stdout*, so its jail keeps `/sandbox` **read-only** — the
+  toolchain writes only to the size-capped `/tmp` tmpfs.
+
+In both cases **the host rootfs stays read-only** and the network stays empty. The
+on-target smoke (`scripts/smoke-test.sh`, the G9 block in `ci.yml`) proves a hidden
+test cannot write outside its workdir and cannot reach the network.
 
 Report parsing stays in the **backend**: the runner passes the report through raw
 and grows no framework-specific parser, so a malformed report is the backend's

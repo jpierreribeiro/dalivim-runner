@@ -362,7 +362,7 @@ func (r *interpretedRuntime) executeTest(ctx context.Context, req runnerapi.RunR
 		res.ExitCode = cmd.ProcessState.ExitCode()
 	}
 
-	report, produced, reportTrunc := readTestReport(workDir, tc, stdout.String(), r.maxReportBytes)
+	report, produced, reportTrunc := readTestReport(workDir, tc.reportFile, stdout.raw(), r.maxReportBytes)
 	res.TestReport = report
 	res.TestReportTruncated = reportTrunc
 
@@ -378,35 +378,13 @@ func (r *interpretedRuntime) executeTest(ctx context.Context, req runnerapi.RunR
 	case errors.Is(context.Cause(ctx), errOutputLimit):
 		res.Status = runnerapi.StatusOutputLimitExceeded
 	default:
-		if st := classifyTestExit(tc, res.ExitCode, produced); st != "" {
+		if st := classifyTestExit(res.ExitCode, tc.testsFailedExit, produced); st != "" {
 			res.Status = st
 		} else {
 			res.Status = runnerapi.StatusRuntimeError
 		}
 	}
 	return res
-}
-
-// readTestReport returns the framework's report (G9): the contents of its report
-// file under workDir (read back from the writable /sandbox bind), or the captured
-// stdout for a framework that reports there (reportFile == ""). It reports whether
-// a non-empty report was actually produced — the authoritative "the suite ran"
-// signal — and caps the report at maxBytes independently of the stdout limit,
-// flagging a cut.
-func readTestReport(workDir string, tc testCommand, stdout string, maxBytes int) (report string, produced, truncated bool) {
-	var raw string
-	if tc.reportFile == "" {
-		raw = stdout
-		produced = raw != ""
-	} else if b, err := os.ReadFile(filepath.Join(workDir, tc.reportFile)); err == nil && len(b) > 0 {
-		raw = string(b)
-		produced = true
-	}
-	if maxBytes > 0 && len(raw) > maxBytes {
-		raw = raw[:maxBytes]
-		truncated = true
-	}
-	return raw, produced, truncated
 }
 
 // memoryKB prefers the cgroup's authoritative peak (memory.peak) when a delegated
