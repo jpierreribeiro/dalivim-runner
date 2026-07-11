@@ -161,10 +161,16 @@ func init() { compiledTestCommands["go"] = goTestCommand() }
 // run). It seeds the pre-warmed /opt/gocache exactly as the compile prelude does,
 // pins single-package parallelism + a fresh (uncached) run for determinism, and
 // stays offline. The report is `go test -json` on stdout.
+//
+// -trimpath is REQUIRED, not cosmetic: the image warms /opt/gocache with -trimpath
+// (Dockerfile) and it is part of Go's build-cache key, so a `go test` WITHOUT it
+// hits zero of the warm cache and cold-rebuilds the whole stdlib single-threaded —
+// which blows the run wall (SIGKILL/timeout). It also matches run mode's
+// `go build -trimpath`, keeping the toolchain determinism (G7) consistent.
 func goTestCommand() *compiledTestCommand {
 	src := srcJailDir() // /sandbox/src, the synthesized module root
 	sh := "cp -r /opt/gocache /tmp/gocache && cd " + shellQuote(src) +
-		" && exec go test -json -p 1 -count=1 ./..."
+		" && exec go test -trimpath -json -p 1 -count=1 ./..."
 	return &compiledTestCommand{
 		argv: []string{"/bin/sh", "-c", sh},
 		// Determinism pin (G7) + the toolchain env: seeded GOCACHE/GOPATH on the

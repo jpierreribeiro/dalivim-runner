@@ -23,7 +23,10 @@ func TestGoTestCommand_Spec(t *testing.T) {
 	if !strings.Contains(joined, "/opt/gocache") {
 		t.Fatalf("go test must seed GOCACHE from /opt/gocache: %v", tc.argv)
 	}
-	for _, want := range []string{"go test", "-json", "-p 1", "-count=1", "./..."} {
+	// -trimpath is load-bearing: it MUST match the image's -trimpath warm cache
+	// (Dockerfile) or `go test` hits none of it and cold-rebuilds the stdlib past
+	// the run wall. Pin it so a future edit can't silently drop it.
+	for _, want := range []string{"go test", "-trimpath", "-json", "-p 1", "-count=1", "./..."} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("go test argv must contain %q: %v", want, tc.argv)
 		}

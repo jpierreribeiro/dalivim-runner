@@ -109,16 +109,27 @@ ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC
 # compile would pay a ~14 s cold stdlib rebuild (over the compile budget). The Go
 # compile jail seeds its writable /tmp/gocache from this (see goSpec); a warm build
 # is ~0.3 s. World-readable so the jail-private uid can copy it.
-# NOTE: -trimpath below MUST match the real compiles (single-file goSpec.compile
-# and multi-file compiled_multifile.go). It is part of Go's build-cache key, so a
-# mismatch makes this warm cache useless → cold stdlib rebuild → compile timeout.
+# NOTE: -trimpath below MUST match the real compiles (single-file goSpec.compile,
+# multi-file compiled_multifile.go, AND the G9 `go test -trimpath` in testmode.go).
+# It is part of Go's build-cache key, so a mismatch makes this warm cache useless →
+# cold stdlib rebuild → compile timeout.
 RUN set -eux; \
     mkdir -p /opt/gowarm; \
     printf 'package main\nimport (\n_ "bufio"\n_ "bytes"\n_ "container/heap"\n_ "container/list"\n_ "encoding/json"\n_ "errors"\n_ "fmt"\n_ "math"\n_ "math/rand"\n_ "net"\n_ "os"\n_ "regexp"\n_ "sort"\n_ "strconv"\n_ "strings"\n_ "sync"\n_ "testing"\n_ "testing/quick"\n_ "time"\n)\nfunc main(){}\n' > /opt/gowarm/warm.go; \
     cd /opt/gowarm; \
     CGO_ENABLED=0 GOCACHE=/opt/gocache GOPATH=/opt/gopath GOTOOLCHAIN=local GOENV=off go build -trimpath -o /dev/null warm.go; \
+    # ALSO warm the `go test` compile path (G9 Go test mode). `go test` builds a TEST
+    # binary whose artifacts `go build` never produces — testing/internal/testdeps,
+    # internal/fuzz + its deps, os/signal, the generated test main — so without this a
+    # first `go test` cold-rebuilds ~60 packages single-threaded and blows the wall.
+    # Same -trimpath + toolchain so the keys match the real run (testmode.go).
+    mkdir -p /opt/gowarmt; \
+    printf 'module warm\n\ngo 1.23\n' > /opt/gowarmt/go.mod; \
+    printf 'package warm\nimport "testing"\nfunc TestWarm(t *testing.T){ _ = 1 }\n' > /opt/gowarmt/warm_test.go; \
+    cd /opt/gowarmt; \
+    CGO_ENABLED=0 GOCACHE=/opt/gocache GOPATH=/opt/gopath GOTOOLCHAIN=local GOENV=off GOFLAGS=-mod=readonly go test -trimpath -count=1 ./... >/dev/null; \
     chmod -R a+rX /opt/gocache; \
-    rm -rf /opt/gowarm /opt/gopath
+    rm -rf /opt/gowarm /opt/gowarmt /opt/gopath
 USER runner
 EXPOSE 8090
 ENTRYPOINT ["/usr/local/bin/runner"]
