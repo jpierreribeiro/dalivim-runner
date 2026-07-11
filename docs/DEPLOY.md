@@ -372,8 +372,10 @@ auditor (or a pull-based deploy) can prove the artifact and enumerate its compon
 - **Signed image** — `cosign sign` (keyless, Sigstore/Fulcio; no stored key).
 - **Signed SBOM** — an SPDX-json Bill of Materials attached as a cosign attestation
   (and uploaded as a workflow build artifact).
-- **SLSA build-provenance** — binds the digest to the workflow + commit, pushed to
-  the registry and verifiable with `gh attestation verify`.
+- **SLSA build-provenance** — binds the digest to the workflow + commit, written to
+  the registry with `cosign attest --type slsaprovenance` (GitHub's native
+  attestation API is unavailable for user-owned private repos), verifiable with
+  `cosign verify-attestation`.
 
 If you deploy by **pulling** the published image instead of building on the box,
 gate it on a signature check that fails **closed** — verifying the signer *identity*

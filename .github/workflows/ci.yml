@@ -883,12 +883,14 @@ jobs:
     needs: [test, fuzz, runner-smoke]
     runs-on: ubuntu-latest
     # Narrowly scoped OIDC + registry writes, job-level ONLY — the workflow's
-    # top-level `contents: read` stays intact for every other job.
+    # top-level `contents: read` stays intact for every other job. No
+    # `attestations: write`: the signature, SBOM, AND provenance are all written to
+    # GHCR by cosign (packages: write + Fulcio OIDC), not GitHub's attestation API —
+    # which is unavailable for user-owned private repos anyway.
     permissions:
-      contents: read       # checkout
-      packages: write      # push the image + attestations to GHCR
-      id-token: write      # keyless cosign + provenance (Fulcio OIDC)
-      attestations: write  # actions/attest-build-provenance
+      contents: read   # checkout
+      packages: write  # push the image + cosign sig/attestations to GHCR
+      id-token: write  # keyless cosign (Fulcio OIDC)
     steps:
       - uses: actions/checkout@v4
 
@@ -965,13 +967,38 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: cosign attest --yes --type spdxjson --predicate sbom.spdx.json "ghcr.io/${{ github.repository }}@${DIGEST}"
 
-      # SLSA build-provenance bound to the digest, workflow, and commit — GitHub's
-      # canonical generator (hand-rolling the predicate is the error-prone part),
-      # pushed to the registry alongside the image and verifiable with
-      # `gh attestation verify` / cosign.
-      - name: Attach SLSA build-provenance attestation
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-name: ghcr.io/${{ github.repository }}
-          subject-digest: ${{ steps.build.outputs.digest }}
-          push-to-registry: true
+      # SLSA build-provenance bound to the digest, workflow, and commit, written to
+      # GHCR with cosign (the spec's `cosign attest --type slsaprovenance` path).
+      # NOT GitHub's actions/attest-build-provenance: that persists via the GitHub
+      # attestations API, which returns "Feature not available for user-owned
+      # private repositories" — so we use the same keyless, registry-stored
+      # mechanism as the signature and SBOM, verifiable identically with cosign and
+      # unaffected by that restriction. jq builds the predicate so it is always
+      # valid JSON regardless of expansion.
+      - name: Attest SLSA build-provenance to the registry (keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+          SERVER: ${{ github.server_url }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          jq -n \
+            --arg builder "$SERVER/$REPO/.github/workflows/ci.yml@$REF" \
+            --arg uri "git+$SERVER/$REPO@$REF" \
+            --arg sha "$SHA" \
+            --arg run "$RUN" \
+            --arg event "$EVENT" \
+            '{
+              buildType: "https://actions.github.io/buildtypes/workflow/v1",
+              builder: { id: $builder },
+              invocation: {
+                configSource: { uri: $uri, digest: { sha1: $sha }, entryPoint: ".github/workflows/ci.yml" },
+                environment: { github_event_name: $event, github_run: $run }
+              },
+              metadata: { buildInvocationID: $run }
+            }' > provenance.json
+          cat provenance.json
+          cosign attest --yes --type slsaprovenance --predicate provenance.json "ghcr.io/${REPO}@${DIGEST}"
