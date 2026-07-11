@@ -65,7 +65,7 @@ judge). Specs are written; none is implemented yet.
 
 | Phase | Theme | Value | Size | Breaks contract? | Status |
 |---|---|---|---|---|---|
-| **[G9](G9-test-runner.md)** | Test-runner grading mode (pytest / go test / node --test / JUnit) | 🔴 high | large | no (additive `mode`) | 📋 spec |
+| **[G9](G9-test-runner.md)** | Test-runner grading mode (pytest / go test / node --test / JUnit) | 🔴 high | large | no (additive `mode`) | ✅ done (all 4 langs) |
 | **[G10](G10-sql-sqlite.md)** | SQL execution (SQLite; PostgreSQL later shape) | 🟡 high | S–M (P1) | no (new language) | 📋 spec |
 | **[G11](G11-determinism-completion.md)** | Determinism completion (`PYTHONHASHSEED`, per-lang non-guarantees) | 🟢 hygiene | **XS** | no | ✅ done |
 | **[G12](G12-languages-endpoint.md)** | `GET /languages` capability discovery | 🟢 medium | XS/S | no (additive route) | ✅ done |

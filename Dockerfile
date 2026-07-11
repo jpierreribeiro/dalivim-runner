@@ -87,6 +87,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # NOTE: transitive deps (pluggy, iniconfig, packaging) ride along unpinned; a
 # future hardening can hash-pin them via a requirements lock (see G9 / S3).
 RUN pip install --no-cache-dir --no-compile pytest==8.3.4
+# JUnit Platform Console Standalone (G9 Java test mode): one fat jar with the
+# launcher + Jupiter/Vintage engines. A mode=test java request javac-compiles the
+# submission against it, runs the launcher (which discovers @Test methods on the
+# classpath), and returns the JUnit XML report raw. Pinned by version AND sha256 —
+# ADD --checksum verifies the download at build (buildkit; the syntax directive at
+# the top enables it), so a rebuild fetches a byte-identical jar or FAILS LOUDLY,
+# the same reproducibility discipline as the apt/base pins.
+ADD --checksum=sha256:33440476714985bda2584ed6c70d0d877085012343be67e961dcf80dac596227 \
+    https://repo1.maven.org/maven2/org/junit/platform/junit-platform-console-standalone/1.11.3/junit-platform-console-standalone-1.11.3.jar \
+    /opt/junit/junit-console.jar
+# ADD from a URL yields a 0600 root-owned file. The run jail maps the runner's uid
+# to 0 INSIDE its user namespace, but the kernel checks file access against the
+# REAL (non-zero) uid, so a 0600 root file is unreadable to the jailed process
+# ("javac: error reading …: Permission denied"). Make it world-readable so the
+# jail-private uid can read it — the same `a+rX` treatment the pre-warmed GOCACHE
+# gets below.
+RUN chmod -R a+rX /opt/junit
 # Non-root, no interactive login shell: the runner never needs a session, and
 # dropping privileges shrinks the blast radius of any escape from a run. nsjail
 # runs rootless (unprivileged user namespaces), so no elevated caps are needed.

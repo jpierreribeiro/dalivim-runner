@@ -617,6 +617,48 @@ jobs:
             {"path":"contain.test.js","content":"const test=require(\"node:test\");const assert=require(\"node:assert\");const fs=require(\"node:fs\");const net=require(\"node:net\");\ntest(\"no host write\",()=>{ assert.throws(()=>fs.writeFileSync(\"/usr/pwned\",\"x\")); });\ntest(\"no egress\",()=>new Promise((res,rej)=>{ const s=net.connect({host:\"1.1.1.1\",port:53,timeout:2000}); s.on(\"connect\",()=>{s.destroy();rej(new Error(\"egress reached\"))}); s.on(\"error\",()=>res()); s.on(\"timeout\",()=>{s.destroy();res()}); }));\n"}
           ]' ./scripts/smoke-test.sh javascript success tap13
 
+      # Java test mode (G9): a single /bin/sh jail javac-compiles {student + hidden
+      # test} against the bundled JUnit console jar into /sandbox/classes, then the
+      # JVM runs the launcher which discovers @Test methods and writes JUnit XML into
+      # /sandbox/reports. /sandbox is WRITABLE for that hand-back; the host rootfs
+      # stays read-only. Proves the compile+run-in-one-jail path and the file report.
+      - name: G9 java junit — all pass => success + raw junit report
+        run: |
+          SMOKE_FILES='[
+            {"path":"com/acme/Solution.java","content":"package com.acme;\npublic class Solution { public static int add(int a,int b){ return a+b; } }\n"},
+            {"path":"com/acme/SolutionTest.java","content":"package com.acme;\nimport org.junit.jupiter.api.Test;\nimport static org.junit.jupiter.api.Assertions.*;\npublic class SolutionTest { @Test void adds(){ assertEquals(5, Solution.add(2,3)); } @Test void zero(){ assertEquals(0, Solution.add(0,0)); } }\n"}
+          ]' ./scripts/smoke-test.sh java success junit-xml
+
+      - name: G9 java junit — some fail => tests_failed (NOT runtime_error)
+        run: |
+          SMOKE_FILES='[
+            {"path":"com/acme/Solution.java","content":"package com.acme;\npublic class Solution { public static int add(int a,int b){ return a+b; } }\n"},
+            {"path":"com/acme/SolutionTest.java","content":"package com.acme;\nimport org.junit.jupiter.api.Test;\nimport static org.junit.jupiter.api.Assertions.*;\npublic class SolutionTest { @Test void ok(){ assertEquals(5, Solution.add(2,3)); } @Test void bad(){ assertEquals(6, Solution.add(2,3)); } }\n"}
+          ]' ./scripts/smoke-test.sh java tests_failed junit-xml
+
+      # A javac failure short-circuits the prelude with the sentinel exit (|| exit 42),
+      # which the JUnit launcher never returns, so it classifies compile_error — and
+      # produces NO report (the launcher never ran), so this is asserted inline rather
+      # than via smoke-test.sh (which requires a non-empty report).
+      - name: G9 java junit — compile error => compile_error (no report, nothing run)
+        run: |
+          body="$(jq -nc '{language:"java",mode:"test",files:[
+            {path:"BadTest.java",content:"import org.junit.jupiter.api.Test; public class BadTest { @Test void x(){ int y = ; } }"}
+          ]}')"
+          resp="$(curl -fsS localhost:8090/run -H 'content-type: application/json' -d "$body")"
+          echo "$resp" | jq '{status, report_len:(.test_report|length)}'
+          echo "$resp" | jq -e '.status=="compile_error"' >/dev/null \
+            || { echo "::error::java javac failure not classified compile_error: $resp"; exit 1; }
+
+      # Containment: /sandbox is writable for the class/report hand-back, but the host
+      # rootfs stays READ-ONLY and the netns empty. The hidden test asserts a host
+      # write and an outbound connect both fail; success IS the containment proof.
+      - name: G9 java junit containment — writable /sandbox did not open the rootfs/net
+        run: |
+          SMOKE_FILES='[
+            {"path":"ContainTest.java","content":"import org.junit.jupiter.api.Test;\nimport static org.junit.jupiter.api.Assertions.*;\nimport java.nio.file.*;\nimport java.net.*;\npublic class ContainTest {\n @Test void noHostWrite(){ assertThrows(Exception.class, () -> Files.writeString(Path.of(\"/usr/pwned\"), \"x\")); }\n @Test void noEgress(){ assertThrows(Exception.class, () -> { try (Socket s = new Socket()){ s.connect(new InetSocketAddress(\"1.1.1.1\", 53), 2000); } }); }\n}\n"}
+          ]' ./scripts/smoke-test.sh java success junit-xml
+
       # mode=test is admitted only for a language with a test command registered,
       # and never for a stdins[] batch — both are 400s at the gate.
       - name: G9 test mode guards — unsupported language and batch => 400
