@@ -44,7 +44,7 @@ out of compilation? → B. Does a VM run bytecode? → C. No compile step? → A
 
 ---
 
-## Shape B — static-compiled (reference: `c`, `cpp`, `go`; next: `rust`)
+## Shape B — static-compiled (reference: `c`, `cpp`, `go`, `rust`)
 
 1. **Image**: install the toolchain (compile stage or runtime stage). Ensure it
    can emit a **static** binary — this is the invariant that lets the run jail use

@@ -61,7 +61,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # The full language set. Override with ESCAPE_LANGS to run a subset (e.g. when a
 # toolchain is absent in a stripped image).
-LANGS=(${ESCAPE_LANGS:-python javascript c cpp go java lua})
+LANGS=(${ESCAPE_LANGS:-python javascript c cpp go java lua rust})
 
 auth=()
 if [ -n "${RUNNER_SERVICE_TOKEN:-}" ]; then
@@ -172,6 +172,21 @@ func main() {
 }
 GO
     ;;
+    rust) cat <<'RS'
+use std::net::TcpStream;
+use std::time::Duration;
+fn probe(addr: &str) -> &'static str {
+    match addr.parse().and_then(|a| Ok(TcpStream::connect_timeout(&a, Duration::from_secs(3)))) {
+        Ok(Ok(_)) => "OPEN",
+        _ => "blocked",
+    }
+}
+fn main() {
+    println!("egress={}", probe("1.1.1.1:80"));
+    println!("metadata={}", probe("169.254.169.254:80"));
+}
+RS
+    ;;
     java) cat <<'JAVA'
 import java.net.InetSocketAddress;
 import java.net.Socket;
@@ -269,6 +284,19 @@ func main() {
 }
 GO
     ;;
+    rust) cat <<'RS'
+use std::fs;
+fn main() {
+    for p in ["/usr/pwned", "/bin/pwned", "/app/pwned", "/sandbox/pwned"] {
+        match fs::write(p, b"x") {
+            Ok(_) => print!("{}=WRITTEN ", p),
+            Err(_) => print!("{}=denied ", p),
+        }
+    }
+    println!();
+}
+RS
+    ;;
     java) cat <<'JAVA'
 import java.io.FileWriter;
 
@@ -347,6 +375,14 @@ func main() {
 }
 GO
     ;;
+    rust) cat <<'RS'
+use std::fs;
+fn main() {
+    let s = if fs::read("/etc/shadow").is_ok() { "readable" } else { "denied" };
+    println!("shadow={}", s);
+}
+RS
+    ;;
     java) cat <<'JAVA'
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -377,6 +413,7 @@ src_spin() {
     javascript) printf 'while (true) {}\n' ;;
     c|cpp)      printf 'int main(void) { for (;;) {} }\n' ;;
     go)         printf 'package main\n\nfunc main() { for {} }\n' ;;
+    rust)       printf 'fn main() { loop {} }\n' ;;
     java)       printf 'public class Main { public static void main(String[] a) { while (true) {} } }\n' ;;
     lua)        printf 'while true do end\n' ;;
     *) echo "UNSUPPORTED_LANG:$1" >&2; return 1 ;;
@@ -423,6 +460,21 @@ func main() {
 	}
 }
 GO
+    ;;
+    # Rust: grow a Vec of touched 64 MiB buffers until the hard RLIMIT_AS refuses the
+    # allocation — Rust's allocator then aborts ("memory allocation of N bytes
+    # failed"), contained like C (capAddressSpace:true), asserted every run.
+    rust) cat <<'RS'
+fn main() {
+    let mut keep: Vec<Vec<u8>> = Vec::new();
+    loop {
+        let mut b = vec![0u8; 64 * 1024 * 1024];
+        let mut i = 0;
+        while i < b.len() { b[i] = 1; i += 4096; }
+        keep.push(b);
+    }
+}
+RS
     ;;
     # Node: OFF-HEAP Buffers, which --max-old-space-size does NOT bound — so RLIMIT_AS
     # and the V8 heap flag both miss them, and only the cgroup memory.max stops the
@@ -541,8 +593,10 @@ echo "== memory bombs — memory_accounting: $CG_MODE =="
 deferred=()
 for lang in "${LANGS[@]}"; do
   case " $lang " in
-    # RLIMIT_AS languages: contained deterministically, every run.
-    " python "|" c "|" cpp "|" lua ") run_membomb "$lang" ;;
+    # RLIMIT_AS languages: contained deterministically, every run. Rust uses the
+    # system allocator (capAddressSpace:true), so a hard RLIMIT_AS refuses the
+    # allocation and Rust aborts ("memory allocation of N bytes failed") — like C.
+    " python "|" c "|" cpp "|" lua "|" rust ") run_membomb "$lang" ;;
     # RLIMIT_AS-incompatible languages: memory_exceeded ONLY under a live cgroup.
     " go "|" javascript "|" java ")
       if [ "$CG_ENGAGED" = 1 ]; then

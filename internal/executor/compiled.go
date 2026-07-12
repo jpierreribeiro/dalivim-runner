@@ -184,6 +184,45 @@ var goSpec = compiledLangSpec{
 	compileTmpfsMB: 256,
 }
 
+// rustSpec is the fourth static-compiled language (G13), the cleanest since Go: a
+// single-file, std-only program compiled to a STATIC musl binary that runs in the
+// minimal-rootfs jail. Unlike Go there is NO cold-stdlib rebuild — the musl std
+// ships precompiled as rlibs with the target — so a single-file build is ~0.3 s and
+// no /opt cache pre-warm is needed.
+//
+// The musl target is static by construction (crt-static): rustc self-links via its
+// bundled rust-lld and self-contained musl (verified: no external cc/musl-gcc is
+// invoked), so the artifact is a static-PIE that needs nothing but itself. No cargo,
+// no crates, no network — single-crate std is the whole surface, like single-file Go.
+var rustSpec = compiledLangSpec{
+	name:       "rust",
+	sourceFile: "main.rs",
+	// -O optimises; --edition 2021 pins the language edition (determinism). The musl
+	// target makes the binary fully static → the run jail keeps the minimal rootfs.
+	compile:  []string{"rustc", "--edition", "2021", "-O", "--target", "x86_64-unknown-linux-musl", "-o", "{out}", "{src}"},
+	run:      []string{"{out}"},
+	binNames: []string{"rustc"},
+	runEnv:   determinismEnv(),
+	// Rust uses the system allocator (musl malloc), NOT a Go/V8-style virtual arena,
+	// so a hard RLIMIT_AS bounds it deterministically — capAddressSpace TRUE (like C).
+	// Verified: a hello-world runs fine under RLIMIT_AS 256 MB.
+	capAddressSpace: true,
+	// Start on the DENYLIST: Rust std touches futex/getrandom/sigaltstack/rt_sig*/poll
+	// — wider than the C/C++ static allowlist names. Denylist is already strong
+	// (ro-rootfs + empty netns + no_new_privs + cgroup); tune an allowlist later via
+	// RUNNER_STATIC_SECCOMP=complain (ADDING-A-LANGUAGE.md).
+	staticAllowlistOK: false,
+	// No-cgroup fallback OOM marker: under a hard RLIMIT_AS a Rust allocation failure
+	// aborts with "memory allocation of N bytes failed" on stderr (verified). On the
+	// target the cgroup OOM event is the authoritative memory_exceeded signal.
+	memErrSubstr: "memory allocation of",
+	versionArgs:  []string{"--version"}, // "rustc 1.83.0 (…)"
+	parseVersion: secondField,           // -> "1.83.0"
+	// rustc links the whole musl std into the artifact; give the compile jail a roomy
+	// /tmp for the link intermediates (nsjail's default tmpfs is only a few MB).
+	compileTmpfsMB: 128,
+}
+
 // javaSpec is the VM-compiled shape (G2.2): javac compiles Main.java to bytecode,
 // then the JVM runs it — the run step is `java -cp {dir} Main`, not "exec the
 // artifact". Java is dynamically linked with a huge syscall surface, so it runs on
@@ -342,6 +381,13 @@ func newCompiled(spec compiledLangSpec, sb sandbox.Sandbox, cfg CompiledConfig) 
 // the denylist (not the static allowlist) and without RLIMIT_AS — see goSpec.
 func NewGo(sb sandbox.Sandbox, cfg CompiledConfig) *compiledRuntime {
 	return newCompiled(goSpec, sb, cfg)
+}
+
+// NewRust builds the Rust runtime (G13): rustc compiles a single-file program to a
+// static musl binary run in the minimal-rootfs jail, on the denylist and with
+// RLIMIT_AS (Rust tolerates it, unlike Go) — see rustSpec.
+func NewRust(sb sandbox.Sandbox, cfg CompiledConfig) *compiledRuntime {
+	return newCompiled(rustSpec, sb, cfg)
 }
 
 // NewJava builds the Java (VM-compiled) runtime: javac to bytecode, then the JVM

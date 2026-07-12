@@ -156,6 +156,18 @@ var filePolicies = map[string]FilePolicy{
 		DefaultEntry: "Main",
 		EntryIsClass: true,
 	},
+	"rust": {
+		Language:    "rust",
+		AllowedExts: exts(".rs"),
+		CompileExts: exts(".rs"),
+		// Forbid the cargo/build surface: the runner compiles a single-file, std-only
+		// program with rustc directly — never cargo, never a build script, never a
+		// crate manifest (offline, single-crate). build.rs is arbitrary compile-time
+		// code execution and is banned even though its .rs extension is allowed.
+		ForbiddenNames:      names("Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain.toml"),
+		ForbiddenComponents: names("target"),
+		DefaultEntry:        "main.rs",
+	},
 }
 
 // testFilePolicies is the SEPARATE closed policy registry for mode=test (G9). A

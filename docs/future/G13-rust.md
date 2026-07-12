@@ -1,5 +1,21 @@
 # G13 — Rust (static-compiled, Shape B)
 
+> **Status — ✅ implemented (2026-07-12).** `rust` runs a single-file, std-only
+> program compiled by `rustc --edition 2021 -O --target x86_64-unknown-linux-musl`
+> to a **static-PIE musl** binary, executed in the minimal-rootfs jail on the
+> denylist (`rustSpec`/`NewRust`, `internal/executor/compiled.go`). **Verified
+> empirically before coding**: musl self-links via the bundled `rust-lld` (no
+> `musl-gcc` needed), a single-file build is ~0.3 s (std is precompiled — **no cache
+> pre-warm**, unlike Go), the binary runs fine under `RLIMIT_AS` (`capAddressSpace:
+> true`, unlike Go), a panic exits 101 (`runtime_error`), a type error is
+> `compile_error`, and an allocation bomb aborts with "memory allocation of N bytes
+> failed" (the `memErrSubstr` fallback; cgroup OOM is authoritative on-target). Rust
+> joins the escape corpus (`scripts/smoke-escape.sh` LANGS + 5 snippets, RLIMIT_AS
+> mem-bomb bucket) and has a G13 functional block in `ci.yml`. Image: a pinned Rust
+> toolchain + musl target copied from a `rust:*-slim-bookworm` build stage. The
+> `HashMap`-order non-guarantee is documented (`docs/DETERMINISM.md`). Multi-file
+> (G3) is a follow-up.
+
 Rust is the fourth compiled language and the cleanest new addition since Go: it
 slots into **Shape B** (`ADDING-A-LANGUAGE.md:47`) — a static binary comes out of
 compilation and the run jail executes only that artifact — reusing the two-jail

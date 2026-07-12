@@ -54,6 +54,17 @@ RUN git clone --depth 1 --branch "${NSJAIL_VERSION}" https://github.com/google/n
  && make -C /nsjail \
  && test -x /nsjail/nsjail
 
+# ---- rust stage: pinned toolchain + musl target (G13) ----
+# The official rust image is Debian-bookworm-based, so its rustc/std are ABI-matched
+# to the runtime base below. We add the x86_64-unknown-linux-musl target (its std
+# ships precompiled as rlibs) and copy the whole toolchain into the final image;
+# rustc self-links the static musl binary via its bundled rust-lld — no musl-gcc
+# needed. Pinned to an exact version for reproducibility (bump deliberately).
+# TODO(pin-by-digest): capture `docker inspect` digest of rust:1.83.0-slim-bookworm
+# and pin it here like the other bases, once CI resolves it.
+FROM rust:1.83.0-slim-bookworm AS rust-build
+RUN rustup target add x86_64-unknown-linux-musl
+
 # ---- runtime stage: interpreters + nsjail + non-root user ----
 # Bookworm base so the nsjail runtime libs (copied from the build stage above)
 # match ABI. Interpreted runtimes: python3 (in this base) + nodejs (F-C) + lua5.4
@@ -126,6 +137,15 @@ COPY --from=nsjail-build /nsjail/nsjail /usr/local/bin/nsjail
 # runs the resulting static artifact and never sees it.
 COPY --from=build       /usr/local/go   /usr/local/go
 ENV PATH="/usr/local/go/bin:${PATH}"
+# Rust toolchain (G13) for the `rust` compile jail. Copy the whole toolchain (rustc
+# + the musl target std + rust-lld) and run rustc directly by absolute path — it
+# self-finds its sysroot at ../lib/rustlib, so no rustup runtime is needed. Bound
+# into the COMPILE jail only (full rootfs); the minimal-rootfs run jail executes the
+# resulting static musl artifact and never sees the toolchain. World-readable so the
+# jail-private uid can read it (same `a+rX` as GOCACHE / the JUnit jar).
+COPY --from=rust-build /usr/local/rustup/toolchains/1.83.0-x86_64-unknown-linux-gnu /opt/rust
+ENV PATH="/opt/rust/bin:${PATH}"
+RUN chmod -R a+rX /opt/rust
 # Determinism pin (G7), belt-and-suspenders: the jail sets these explicitly in
 # every run env (an explicit minimal cmd.Env means this ENV does NOT reach the
 # child), so this line only pins the daemon itself and any image-level tooling.

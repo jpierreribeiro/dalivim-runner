@@ -81,7 +81,7 @@ entry in the closed registry, offline, with mandatory on-target containment proo
 
 | Phase | Theme | Shape | Value | Size | Breaks contract? | Status |
 |---|---|---|---|---|---|---|
-| **[G13](G13-rust.md)** | Rust | B (static, like C/Go) | 🟡 high | M | no (new language) | 📋 spec |
+| **[G13](G13-rust.md)** | Rust | B (static, like C/Go) | 🟡 high | M | no (new language) | ✅ implemented |
 | **[G14](G14-typescript.md)** | TypeScript (`tsc` → Node jail) | C (compile→VM, reuses JS run) | 🔴 high | M | no (new language) | 📋 spec |
 | **[G15](G15-csharp.md)** | C# / .NET | C (VM, like Java) | 🟡 high | L | no (new language) | 📋 spec |
 
