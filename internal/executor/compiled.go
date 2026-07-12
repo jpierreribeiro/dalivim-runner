@@ -391,6 +391,12 @@ var csharpSpec = compiledLangSpec{
 		// redundant here — the jail already contains the process (ro rootfs, empty netns,
 		// seccomp denylist, cgroup). Both csc AND the run JIT need this, so it is on both.
 		"DOTNET_EnableWriteXorExecute=0",
+		// Invariant globalization: the runtime base has no libicu, and the CLR aborts
+		// ("Couldn't find a valid ICU package") the moment globalization is invoked — csc
+		// trips it just formatting an internal exception message. Invariant mode drops the
+		// ICU dependency AND collapses every culture to the invariant one, which is exactly
+		// the culture-independence the runner already pins (C.UTF-8, G7). On both phases.
+		"DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1",
 	},
 	// Run env: the shared determinism pin + DOTNET_ROOT (locate the shared framework),
 	// writable HOME/TMPDIR on the jail's /tmp, telemetry/first-run off, and
@@ -402,6 +408,10 @@ var csharpSpec = compiledLangSpec{
 		"DOTNET_EnableDiagnostics=0",
 		// See compileEnv: the run JIT also file-backs W^X and would trip RLIMIT_FSIZE.
 		"DOTNET_EnableWriteXorExecute=0",
+		// See compileEnv: no libicu in the base; invariant mode (also the runner's
+		// culture-independence guarantee). The run env DOES set LC_ALL=C.UTF-8 (the
+		// determinism pin), which is precisely what would trigger the ICU load.
+		"DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1",
 	),
 	runFullRootfs:     true,                   // the CoreCLR is dynamically linked — full rootfs (like the JVM)
 	capAddressSpace:   false,                  // the CLR reserves a large virtual space; RLIMIT_AS kills startup

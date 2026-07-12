@@ -37,7 +37,7 @@ The per-language envs, in full:
 | c / cpp | pin + `GLIBC_TUNABLES=glibc.pthread.rseq=0` |
 | go | pin + `GOMAXPROCS=1` |
 | java | pin only |
-| csharp | pin + `PATH`, `DOTNET_ROOT`, `HOME=/tmp`, `DOTNET_CLI_TELEMETRY_OPTOUT=1`, `DOTNET_NOLOGO=1`, `DOTNET_EnableDiagnostics=0` |
+| csharp | pin + `PATH`, `DOTNET_ROOT`, `HOME=/tmp`, `DOTNET_CLI_TELEMETRY_OPTOUT=1`, `DOTNET_NOLOGO=1`, `DOTNET_EnableDiagnostics=0`, `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1` (culture-invariant, reinforcing the C.UTF-8 pin) |
 
 Other pinned properties that contribute to run-to-run stability:
 

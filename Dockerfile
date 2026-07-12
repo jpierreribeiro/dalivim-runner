@@ -210,10 +210,14 @@ ENV PATH="/opt/dotnet:${PATH}"
 # version). Then a BUILD-TIME PROOF compiles + runs a hello-world through the exact
 # per-run path — crucially UNDER `ulimit -f` (the jail's RLIMIT_FSIZE) and with the
 # SAME env the jail uses (esp. DOTNET_EnableWriteXorExecute=0, without which .NET 8's
-# W^X JIT ftruncates a 2 TB sparse file and SIGXFSZ-dies under the file-size cap). So a
-# wrong SDK path/version/offline/rlimit assumption FAILS THE BUILD LOUDLY here rather
-# than at request time. World-readable for the jail uid. (65536 KiB = 64 MiB =
-# RUNNER_MAX_FILE_SIZE_MB default.)
+# W^X JIT ftruncates a 2 TB sparse file and SIGXFSZ-dies under the file-size cap; and
+# the base has no libicu, so the CLR aborts on globalization unless invariant mode is
+# set). The proof runs the compile and run in `env -i` with the EXACT envs the jail
+# uses — including LC_ALL=C.UTF-8 on the run (the determinism pin, which is what
+# triggers the ICU load) — and exercises .ToUpper() (globalization). So a wrong SDK
+# path/version/offline/rlimit/globalization assumption FAILS THE BUILD LOUDLY here,
+# faithfully mirroring the jail, rather than surfacing at request time. World-readable
+# for the jail uid. (65536 KiB = 64 MiB = RUNNER_MAX_FILE_SIZE_MB default.)
 RUN set -eux; \
     mkdir -p /opt/cs; \
     for f in /opt/dotnet/packs/Microsoft.NETCore.App.Ref/*/ref/net8.0/*.dll; do echo "-r:$f"; done > /opt/cs/refs.rsp; \
@@ -222,12 +226,13 @@ RUN set -eux; \
     chmod -R a+rX /opt/cs; \
     test -s /opt/cs/refs.rsp; \
     csc="$(echo /opt/dotnet/sdk/*/Roslyn/bincore/csc.dll)"; \
-    printf 'System.Console.WriteLine("csharp-ok");\n' > /tmp/Main.cs; \
-    export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_EnableDiagnostics=0 DOTNET_EnableWriteXorExecute=0 HOME=/tmp; \
+    printf 'System.Console.WriteLine("csharp-ok".ToUpper());\n' > /tmp/Main.cs; \
+    CENV="PATH=/usr/local/bin:/usr/bin:/bin TMPDIR=/tmp DOTNET_ROOT=/opt/dotnet HOME=/tmp DOTNET_CLI_HOME=/tmp DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_EnableDiagnostics=0 DOTNET_EnableWriteXorExecute=0 DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1"; \
+    RENV="LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC PATH=/usr/local/bin:/usr/bin:/bin DOTNET_ROOT=/opt/dotnet HOME=/tmp TMPDIR=/tmp DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_EnableDiagnostics=0 DOTNET_EnableWriteXorExecute=0 DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1"; \
     ( ulimit -f 65536; \
-      /opt/dotnet/dotnet exec "$csc" -nologo -optimize+ -nostdlib @/opt/cs/refs.rsp -out:/tmp/Main.dll /tmp/Main.cs; \
+      env -i $CENV /opt/dotnet/dotnet exec "$csc" -nologo -optimize+ -nostdlib @/opt/cs/refs.rsp -out:/tmp/Main.dll /tmp/Main.cs; \
       cp /opt/cs/Main.runtimeconfig.json /tmp/Main.runtimeconfig.json; \
-      test "$(/opt/dotnet/dotnet exec /tmp/Main.dll)" = "csharp-ok" ); \
+      test "$(env -i $RENV /opt/dotnet/dotnet exec /tmp/Main.dll)" = "CSHARP-OK" ); \
     rm -f /tmp/Main.cs /tmp/Main.dll /tmp/Main.runtimeconfig.json
 # Determinism pin (G7), belt-and-suspenders: the jail sets these explicitly in
 # every run env (an explicit minimal cmd.Env means this ENV does NOT reach the

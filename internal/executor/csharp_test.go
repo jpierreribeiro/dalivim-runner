@@ -71,6 +71,15 @@ func TestCSharpSpec(t *testing.T) {
 	if !strings.Contains(runEnv, "DOTNET_EnableWriteXorExecute=0") {
 		t.Fatalf("csharp run env must disable W^X (the run JIT trips RLIMIT_FSIZE too): %v", csharpSpec.runEnv)
 	}
+	// Invariant globalization on BOTH phases: the base image has no libicu, so the CLR
+	// aborts on any globalization (even csc formatting an exception) without it. Also
+	// the runner's culture-independence guarantee. A regression reintroduces the ICU crash.
+	if !strings.Contains(compileEnv, "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1") {
+		t.Fatalf("csharp compile env must set invariant globalization (no libicu in base): %v", csharpSpec.compileEnv)
+	}
+	if !strings.Contains(runEnv, "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1") {
+		t.Fatalf("csharp run env must set invariant globalization (LC_ALL triggers the ICU load): %v", csharpSpec.runEnv)
+	}
 	if csharpSpec.parseVersion == nil || csharpSpec.parseVersion("8.0.422\n") != "8.0.422" {
 		t.Fatal("csharp version parse must extract the bare dotnet version")
 	}
