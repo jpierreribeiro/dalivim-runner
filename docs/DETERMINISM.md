@@ -32,6 +32,7 @@ The per-language envs, in full:
 |---|---|
 | python | pin + `PATH`, `PYTHONUNBUFFERED=1`, `PYTHONHASHSEED=0` (multi-file adds `HOME=/nonexistent`) |
 | javascript | pin + `PATH` (multi-file adds `HOME=/nonexistent`) |
+| typescript | pin + `PATH` (compiled by `tsc` to JS, then run on the javascript posture) |
 | lua | pin + `PATH` (multi-file adds `HOME=/nonexistent`) |
 | c / cpp | pin + `GLIBC_TUNABLES=glibc.pthread.rseq=0` |
 | go | pin + `GOMAXPROCS=1` |
@@ -69,7 +70,9 @@ concern:
   the exception** — its `set`/`dict` iteration order **is** pinned via
   `PYTHONHASHSEED=0` (G11).
 - `time.Now()` / `Date.now()` / wall-clock reads (the *timezone* is pinned; the
-  clock still advances).
+  clock still advances). **TypeScript** compiles to JavaScript and runs on the Node
+  jail, so it shares the `javascript` runtime's determinism profile exactly
+  (`Date.now()`, `Math.random()` unseeded, etc.) — nothing TypeScript-specific.
 - Unseeded PRNGs (`math/rand`, `Math.random()`, `random` without a seed).
 - Floating-point differences across CPU architectures.
 - Thread/goroutine interleaving (mitigated but not eliminated by

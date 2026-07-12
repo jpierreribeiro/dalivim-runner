@@ -22,7 +22,7 @@
 #       /readyz (memory_accounting) instead of assuming:
 #         * python/c/cpp/lua get a hard RLIMIT_AS, so a bomb is contained
 #           DETERMINISTICALLY regardless of cgroup — asserted here in EVERY run.
-#         * go/js/java opt OUT of RLIMIT_AS (they reserve a huge virtual cage a
+#         * go/js/java/typescript opt OUT of RLIMIT_AS (they reserve a huge virtual cage a
 #           tight RLIMIT_AS refuses) and are bounded by the delegated cgroup
 #           memory.max / -Xmx instead. Their bomb is contained as memory_exceeded
 #           ONLY when a delegated cgroup is engaged (memory_accounting=cgroup-v2).
@@ -34,8 +34,8 @@
 #           the coverage gap is visible, never hidden.
 #
 #       COVERAGE MATRIX (mem-bomb):
-#         python/c/cpp/lua  RLIMIT_AS       contained everywhere (asserted every run)
-#         go/js/java    cgroup memory.max   memory_exceeded — asserted where cgroup
+#         python/c/cpp/lua/rust  RLIMIT_AS  contained everywhere (asserted every run)
+#         go/js/java/ts  cgroup memory.max  memory_exceeded — asserted where cgroup
 #                                           is engaged (VPS deploy verify +
 #                                           runner-smoke-cgroup); explicitly skipped
 #                                           (with a printed reason) where it is not.
@@ -61,7 +61,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # The full language set. Override with ESCAPE_LANGS to run a subset (e.g. when a
 # toolchain is absent in a stripped image).
-LANGS=(${ESCAPE_LANGS:-python javascript c cpp go java lua rust})
+LANGS=(${ESCAPE_LANGS:-python javascript c cpp go java lua rust typescript})
 
 auth=()
 if [ -n "${RUNNER_SERVICE_TOKEN:-}" ]; then
@@ -187,6 +187,23 @@ fn main() {
 }
 RS
     ;;
+    typescript) cat <<'TS'
+import * as net from "net";
+function probe(host: string): Promise<string> {
+  return new Promise((resolve) => {
+    const s = net.connect({ host, port: 80 });
+    s.setTimeout(3000);
+    s.on("connect", () => { s.destroy(); resolve("OPEN"); });
+    s.on("error", (e: NodeJS.ErrnoException) => resolve("blocked:" + (e.code ?? "err")));
+    s.on("timeout", () => { s.destroy(); resolve("blocked:timeout"); });
+  });
+}
+(async () => {
+  console.log("egress=" + await probe("1.1.1.1"));
+  console.log("metadata=" + await probe("169.254.169.254"));
+})();
+TS
+    ;;
     java) cat <<'JAVA'
 import java.net.InetSocketAddress;
 import java.net.Socket;
@@ -297,6 +314,16 @@ fn main() {
 }
 RS
     ;;
+    typescript) cat <<'TS'
+import { writeFileSync } from "fs";
+const out: string[] = [];
+for (const p of ["/usr/pwned", "/bin/pwned", "/app/pwned", "/sandbox/pwned"]) {
+  try { writeFileSync(p, "x"); out.push(p + "=WRITTEN"); }
+  catch { out.push(p + "=denied"); }
+}
+console.log(out.join(" "));
+TS
+    ;;
     java) cat <<'JAVA'
 import java.io.FileWriter;
 
@@ -383,6 +410,13 @@ fn main() {
 }
 RS
     ;;
+    typescript) cat <<'TS'
+import { readFileSync } from "fs";
+let shadow = "readable";
+try { readFileSync("/etc/shadow"); } catch { shadow = "denied"; }
+console.log("shadow=" + shadow);
+TS
+    ;;
     java) cat <<'JAVA'
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -414,6 +448,7 @@ src_spin() {
     c|cpp)      printf 'int main(void) { for (;;) {} }\n' ;;
     go)         printf 'package main\n\nfunc main() { for {} }\n' ;;
     rust)       printf 'fn main() { loop {} }\n' ;;
+    typescript) printf 'while (true) {}\n' ;;
     java)       printf 'public class Main { public static void main(String[] a) { while (true) {} } }\n' ;;
     lua)        printf 'while true do end\n' ;;
     *) echo "UNSUPPORTED_LANG:$1" >&2; return 1 ;;
@@ -485,6 +520,15 @@ for (;;) {
   keep.push(Buffer.alloc(64 * 1024 * 1024, 1));
 }
 JS
+    ;;
+    # TypeScript compiles to JS and runs on the same Node jail — same off-heap Buffer
+    # bomb, bounded by the cgroup memory.max (capAddressSpace:false), like javascript.
+    typescript) cat <<'TS'
+const keep: Buffer[] = [];
+for (;;) {
+  keep.push(Buffer.alloc(64 * 1024 * 1024, 1));
+}
+TS
     ;;
     # Java: retain 64 MiB byte[] chunks past the -Xmx heap. The allocation exceeds
     # the heap (OutOfMemoryError, classified via the memErrSubstr fallback) and/or
@@ -598,7 +642,8 @@ for lang in "${LANGS[@]}"; do
     # allocation and Rust aborts ("memory allocation of N bytes failed") — like C.
     " python "|" c "|" cpp "|" lua "|" rust ") run_membomb "$lang" ;;
     # RLIMIT_AS-incompatible languages: memory_exceeded ONLY under a live cgroup.
-    " go "|" javascript "|" java ")
+    # typescript runs on the Node jail (capAddressSpace:false), so it joins this group.
+    " go "|" javascript "|" java "|" typescript ")
       if [ "$CG_ENGAGED" = 1 ]; then
         run_membomb_cgroup "$lang"
       else

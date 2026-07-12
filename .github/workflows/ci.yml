@@ -739,6 +739,33 @@ jobs:
       - name: G13 rust — runs in the minimal-rootfs run jail (proves static)
         run: ./scripts/smoke-run.sh rust $'fn main(){ println!("static-ok"); }' $'static-ok\n'
 
+      # ---- G14 TypeScript (tsc type-check -> Node run jail, Shape C) ----
+      # tsc type-checks the .ts and emits main.js (--noEmitOnError: a type error
+      # emits nothing -> compile_error, nothing runs); node then runs the emitted JS
+      # on the SAME full-rootfs denylist jail the `javascript` language uses. Egress /
+      # host-write / cpu-spin / mem-bomb containment for typescript is proven by the
+      # escape corpus step above (typescript is in LANGS); these cover the functional
+      # classification and prove the bundled @types/node types resolve on-target.
+      # NOTE: `x:number` (no space after the colon) is deliberate — a `: ` inside an
+      # unquoted YAML scalar is a mapping indicator and breaks the parse. It is still
+      # valid TypeScript (same as the rust `let x:i32` step above).
+      - name: G14 typescript — success (typed, console.log)
+        run: ./scripts/smoke-run.sh typescript 'const x:number = 2 + 2; console.log(x);' $'4\n'
+
+      # A type error must stop at compile_error with tsc's diagnostics — nothing runs
+      # (--noEmitOnError). This is the whole point of TypeScript, and proves --strict
+      # is enforced by the runner (not a caller-supplied tsconfig).
+      - name: G14 typescript — type error => compile_error (nothing executed)
+        run: ./scripts/smoke-run.sh typescript $'const x:number = "nope";\nconsole.log(x);' '' compile_error
+
+      - name: G14 typescript — runtime throw => runtime_error
+        run: ./scripts/smoke-run.sh typescript $'throw new Error("boom");' '' runtime_error
+
+      # Reads stdin via node's fs — proves the bundled @types/node resolves (process /
+      # fs / Buffer type-check) AND the emitted JS runs on the Node jail end to end.
+      - name: G14 typescript — reads stdin (proves @types/node resolves)
+        run: SMOKE_STDIN='abc' ./scripts/smoke-run.sh typescript $'import { readFileSync } from "fs";\nprocess.stdout.write(readFileSync(0, "utf8").trim().toUpperCase());' 'ABC'
+
       # G7: execution determinism. LANG/LC_ALL/TZ are pinned identically in every
       # language's run env, so a fixed epoch formatted as LOCAL time (TZ=UTC) and
       # the reported LANG are IDENTICAL across all six runtimes. Each snippet must

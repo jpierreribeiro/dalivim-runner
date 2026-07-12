@@ -159,8 +159,9 @@ arbitrary/binary output round-trips without loss. `source_code`/`files` stay tex
 `compile_output` (compiler diagnostics) is always text. Malformed base64 input or
 an unknown encoding → `400`.
 
-**Languages:** `python`, `javascript` (interpreted), `c`, `cpp`, `go` (static
-compiled), `java` (VM compiled). C is linked against libm, so ordinary `<math.h>`
+**Languages:** `python`, `javascript`, `lua`, `sql` (interpreted), `c`, `cpp`,
+`go`, `rust` (static compiled), `java`, `typescript` (VM compiled). C is linked
+against libm, so ordinary `<math.h>`
 (`sqrt`, `pow`, …) works. `go` compiles a single `main.go` with `CGO_ENABLED=0`
 (static binary, no `go.mod` needed — modules are a later phase); it runs on the
 seccomp denylist and is bounded by the cgroup rather than `RLIMIT_AS` (the Go
@@ -169,7 +170,13 @@ with `javac` and runs the class on the JVM — **the public class must be named
 `Main`** (the source is written to `Main.java`); it runs on the denylist, full
 rootfs (the JVM is dynamically linked), heap bounded by `-Xmx` plus the cgroup.
 Provision a generous `memory_mb` for `java` — the JVM's non-heap overhead is on
-top of the heap. A compiled request may set `compile_timeout_ms` (bounds
+top of the heap. `rust` compiles a single `main.rs` with `rustc` to a **static
+musl** binary (like C/Go, minimal-rootfs run jail) — no `cargo`, no crates, std
+only. `typescript` type-checks a single `main.ts` with `tsc` (`--strict`; a type
+error is `compile_error`, nothing runs) and runs the emitted JavaScript on the same
+Node jail as `javascript`; the pinned compiler config and bundled `@types/node` are
+runner guarantees (no caller `tsconfig.json`). A compiled request may set
+`compile_timeout_ms` (bounds
 the compile phase, separate from `timeout_ms`; lowers the compile bound within the
 ceiling, never raises it); a failed compile returns `status: compile_error` with
 the compiler diagnostics in `compile_output`, and nothing is executed. `signal`

@@ -146,6 +146,38 @@ ENV PATH="/usr/local/go/bin:${PATH}"
 COPY --from=rust-build /usr/local/rustup/toolchains/1.83.0-x86_64-unknown-linux-gnu /opt/rust
 ENV PATH="/opt/rust/bin:${PATH}"
 RUN chmod -R a+rX /opt/rust
+# TypeScript compiler + Node type definitions (G14) for the `typescript` compile
+# jail. TypeScript is a compile step that emits JavaScript (Shape C): the compile
+# jail runs `node /opt/typescript/bin/tsc` to type-check + emit main.js, then the
+# run jail runs the emitted JS on the SAME Node posture the `javascript` language
+# uses (nodejs, installed above) — no second runtime. Two pinned tarballs, bundled
+# offline (no `npm install` ever runs per request), the same "bundle the tool,
+# pinned" choice G9 made for pytest / the JUnit jar:
+#   - typescript: the tsc compiler (a Node program; lib/tsc.js).
+#   - @types/node: the Node global/module type declarations, so console/process/
+#     Buffer/require and the fs/net modules type-check (without them even
+#     `console.log` is a type error under --lib ES2020). PURE .d.ts — no runtime
+#     code, so it adds zero execution surface. Pinned to the 18.x line to match the
+#     Node 18 the run jail actually runs. tsc compiles with --skipLibCheck, so
+#     @types/node's own reference to the unbundled `undici-types` does not block emit.
+# ADD --checksum verifies each download's sha256 at build (buildkit; the syntax
+# directive at the top enables it), the same reproducibility discipline as the
+# apt/base/jar pins — a rebuild fetches byte-identical tarballs or FAILS LOUDLY.
+# The npm-registry tarballs unpack with a top-level `package/` dir (strip 1). Bound
+# into the COMPILE jail only (full rootfs); world-readable so the jail-private uid
+# can read them (same `a+rX` as the Go cache / JUnit jar / Rust toolchain).
+ADD --checksum=sha256:10e108c9cf7d5f2879053dff18515fb405abf2ccef63eaaf017d9c571687a1d3 \
+    https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz /opt/ts-src/typescript.tgz
+ADD --checksum=sha256:30e36412dac091a634407127bea2c712c55de136e33c2d234b1529bb876418ca \
+    https://registry.npmjs.org/@types/node/-/node-18.19.130.tgz /opt/ts-src/types-node.tgz
+RUN set -eux; \
+    mkdir -p /opt/typescript /opt/ts-types/node; \
+    tar -xzf /opt/ts-src/typescript.tgz --strip-components=1 -C /opt/typescript; \
+    tar -xzf /opt/ts-src/types-node.tgz --strip-components=1 -C /opt/ts-types/node; \
+    rm -rf /opt/ts-src; \
+    chmod -R a+rX /opt/typescript /opt/ts-types; \
+    test -f /opt/typescript/bin/tsc; \
+    test -f /opt/ts-types/node/index.d.ts
 # Determinism pin (G7), belt-and-suspenders: the jail sets these explicitly in
 # every run env (an explicit minimal cmd.Env means this ENV does NOT reach the
 # child), so this line only pins the daemon itself and any image-level tooling.

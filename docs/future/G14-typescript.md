@@ -1,5 +1,27 @@
 # G14 — TypeScript (compile with `tsc`, run on the Node jail; Shape C mechanically)
 
+> **Status — ✅ implemented (2026-07-12).** `typescript` compiles a single-file
+> program with `node /opt/typescript/bin/tsc --strict --noEmitOnError --skipLibCheck
+> --esModuleInterop --target ES2020 --module commonjs --lib ES2020 --types node
+> --typeRoots /opt/ts-types --outDir {dir} {src}` to `main.js`, then runs it on the
+> **javascript** run posture verbatim — node on the full-rootfs denylist jail, V8
+> heap bounded, no RLIMIT_AS (`typescriptSpec`/`NewTypeScript`,
+> `internal/executor/compiled.go`). **Validated empirically before coding** with the
+> real `tsc`: a type error emits nothing (`--noEmitOnError`) → `compile_error`; a
+> runtime `throw` → `runtime_error`; stdin/`console`/`process` type-check via the
+> bundled `@types/node`; `--skipLibCheck` is REQUIRED (@types/node references the
+> unbundled `undici-types`, which otherwise blocks emit for every program). Two
+> pinned, sha256-verified tarballs are baked into the image (`typescript@5.9.3`,
+> `@types/node@18.19.130` — matching the run jail's Node 18). typescript joins the
+> escape corpus (`scripts/smoke-escape.sh` LANGS + 5 snippets, cgroup mem-bomb
+> bucket) and has a G14 functional block in `ci.yml`. **Deviations from this spec,
+> discovered in implementation:** (1) `@types/node` + `--skipLibCheck` are needed for
+> Node globals to type-check (the spec's "one dependency, `--lib ES2020`" alone
+> leaves even `console.log` a type error); (2) NO file policy — a `files[]` request
+> is a clean 400 (the SQL precedent), better than a policy-without-multi-file 500;
+> (3) `--esModuleInterop` added for `import fs from "fs"` ergonomics. Multi-file
+> (sibling `.ts` imports, G3) is a follow-up.
+
 TypeScript is not a runtime — it is a **compile step that produces JavaScript**. So
 it maps, mechanically, onto **Shape C** (`ADDING-A-LANGUAGE.md:95`): compile to an
 intermediate (`tsc` → `.js`), then run it on a "VM" — here the existing Node jail.
