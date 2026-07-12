@@ -716,6 +716,29 @@ jobs:
           [ "$code" = "400" ] || { echo "::error::files[] sql must be 400 (source_code-only phase 1), got $code"; exit 1; }
           echo "SMOKE OK   [G10] result_format + multi-file guard"
 
+      # ---- G13 Rust (static musl, Shape B) on the shipped image ----
+      # rustc compiles a single-file std-only program to a STATIC musl binary run in
+      # the minimal-rootfs jail (like C/Go). Egress / host-write / cpu-spin / mem-bomb
+      # containment for rust is proven by the escape corpus step above (rust is in
+      # LANGS); these cover the functional classification.
+      - name: G13 rust — success (println)
+        run: ./scripts/smoke-run.sh rust $'fn main() { println!("{}", 2 + 2); }' $'4\n'
+
+      - name: G13 rust — compile error => compile_error (nothing executed)
+        run: ./scripts/smoke-run.sh rust $'fn main() { let x:i32 = "nope"; println!("{}", x); }' '' compile_error
+
+      - name: G13 rust — panic => runtime_error (exit 101)
+        run: ./scripts/smoke-run.sh rust $'fn main() { panic!("boom"); }' '' runtime_error
+
+      - name: G13 rust — reads stdin
+        run: SMOKE_STDIN='abc' ./scripts/smoke-run.sh rust $'use std::io::Read;\nfn main(){ let mut s=String::new(); std::io::stdin().read_to_string(&mut s).unwrap(); print!("{}", s.to_uppercase()); }' 'ABC'
+
+      # G13 rust static-binary proof: the artifact needs no libc, so the run jail's
+      # minimal rootfs (no toolchain, no /lib) still runs it — a dynamically-linked
+      # build would fail to start there.
+      - name: G13 rust — runs in the minimal-rootfs run jail (proves static)
+        run: ./scripts/smoke-run.sh rust $'fn main(){ println!("static-ok"); }' $'static-ok\n'
+
       # G7: execution determinism. LANG/LC_ALL/TZ are pinned identically in every
       # language's run env, so a fixed epoch formatted as LOCAL time (TZ=UTC) and
       # the reported LANG are IDENTICAL across all six runtimes. Each snippet must

@@ -63,8 +63,11 @@ Language-level nondeterminism remains the submission's (or the backend's)
 concern:
 
 - Go map-iteration order (randomized by the runtime by design, not seedable);
-  `HashMap`/table iteration order in Java/Lua. **Python is the exception** — its
-  `set`/`dict` iteration order **is** pinned via `PYTHONHASHSEED=0` (G11).
+  `HashMap`/table iteration order in Java/Lua; and Rust's `std::collections::HashMap`
+  (SipHash seeded per-map from `getrandom` — like Go, **not seedable**, no
+  `PYTHONHASHSEED`-style knob; use `BTreeMap` or sort for stable output). **Python is
+  the exception** — its `set`/`dict` iteration order **is** pinned via
+  `PYTHONHASHSEED=0` (G11).
 - `time.Now()` / `Date.now()` / wall-clock reads (the *timezone* is pinned; the
   clock still advances).
 - Unseeded PRNGs (`math/rand`, `Math.random()`, `random` without a seed).
