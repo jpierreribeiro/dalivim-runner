@@ -271,6 +271,73 @@ var javaSpec = compiledLangSpec{
 	minTimeoutMs: 2000,
 }
 
+// typescriptSpec is TypeScript (G14). TypeScript is not a runtime — it is a
+// COMPILE step that produces JavaScript — so it maps mechanically onto Shape C
+// (like Java): compile to an intermediate (tsc -> main.js), then run it on a "VM",
+// here the existing Node run posture (javascriptSpec). No new sandbox, no new run
+// shape — the run jail is JavaScript's, verbatim.
+//
+// The compiler is `node /opt/typescript/bin/tsc` (tsc is itself a Node program):
+// compileArgv0Absolute is FALSE so compile[0] ("node") is resolved to the image's
+// absolute node path, exactly like the compilerBin the other specs execve. The tsc
+// flags are PINNED by the runner (never the caller) — the type-check strictness and
+// target are a runner guarantee, the analogue of the sqlite/pytest flag pinning:
+//
+//	--strict          full type-checking (a type error is the whole point of TS)
+//	--noEmitOnError   emit NOTHING on a type error -> no main.js artifact -> the
+//	                  compile phase short-circuits to compile_error, nothing runs
+//	--skipLibCheck    do not type-check the bundled .d.ts internals. REQUIRED:
+//	                  @types/node references `undici-types` (a transitive types dep
+//	                  we deliberately do not bundle), and without this its own
+//	                  fetch/worker_threads.d.ts fail to resolve it (TS2307) and
+//	                  block emit for EVERY program. skipLibCheck skips checking the
+//	                  library declarations, not the student's code — an implicit-any
+//	                  or wrong-type in the submission is still a compile_error.
+//	--esModuleInterop let `import fs from "fs"` (default import of a CommonJS module)
+//	                  type-check and run, the common student ergonomics.
+//	--target/--module/--lib ES2020 + commonjs   pinned language level; Node 18 runs
+//	                  the emitted CommonJS directly.
+//	--types node --typeRoots /opt/ts-types   resolve the bundled @types/node so the
+//	                  Node globals (console, process, Buffer, require, the fs/net
+//	                  modules) type-check — without this even `console.log` is a type
+//	                  error under --lib ES2020. The types are pure .d.ts (no runtime
+//	                  code), so they add no execution surface.
+//	--outDir {dir} {src}   emit main.js into the per-run /sandbox next to main.ts
+//	                  (validated as the artifact before the run jail launches).
+//
+// The RUN step is the JavaScript posture: node runs the emitted main.js on the
+// FULL rootfs denylist jail (node is dynamically linked, like the JVM), V8's heap
+// bounded by --max-old-space-size (RLIMIT_AS refused — capAddressSpace FALSE, like
+// Node/Go/JVM), the cgroup memory.max the authoritative OOM. Single-file, std-only:
+// no npm, no node_modules, no crate/module resolution off the tree, offline.
+var typescriptSpec = compiledLangSpec{
+	name:       "typescript",
+	sourceFile: "main.ts",
+	compile: []string{"node", "/opt/typescript/bin/tsc",
+		"--strict", "--noEmitOnError", "--skipLibCheck", "--esModuleInterop",
+		"--target", "ES2020", "--module", "commonjs", "--lib", "ES2020",
+		"--types", "node", "--typeRoots", "/opt/ts-types",
+		"--outDir", "{dir}", "{src}"},
+	// compile[0] ("node") is resolved to the image's absolute node path (like the
+	// other compilers); tsc itself is a literal script arg, not argv[0].
+	binNames: []string{"node", "nodejs"},
+	artifact: "main.js", // tsc emits main.js from main.ts into {dir}; validated after compile
+	// RUN = the JavaScript posture: node executes the emitted CommonJS. --disable-proto
+	// closes a prototype-pollution path; --max-old-space-size bounds V8's heap to the
+	// run budget (RLIMIT_AS refused). runBin resolves node's absolute launcher.
+	run:               []string{"--disable-proto=throw", "--max-old-space-size={mem}", "{out}"},
+	runBin:            []string{"node", "nodejs"},
+	runEnv:            determinismEnv("PATH=/usr/local/bin:/usr/bin:/bin"),
+	runFullRootfs:     true,  // node is dynamically linked — keep the full rootfs (like the JVM)
+	capAddressSpace:   false, // V8 reserves a virtual cage; bound the heap + cgroup, no RLIMIT_AS
+	staticAllowlistOK: false, // node's syscall surface is wide → denylist (like the interpreted JS jail)
+	// No memErrSubstr: Node's OOM ("JavaScript heap out of memory") is a V8 abort,
+	// classified runtime_error, exactly like javascriptSpec; the cgroup memory.max is
+	// the authoritative memory_exceeded signal on-target.
+	versionArgs:  []string{"/opt/typescript/bin/tsc", "--version"}, // node runs tsc: "Version 5.9.3"
+	parseVersion: secondField,                                      // -> "5.9.3"
+}
+
 // parseGoVersion pulls the bare version out of `go version` output
 // ("go version go1.26 linux/amd64" → "1.26"), degrading to the trimmed raw
 // string if the shape is unexpected.
@@ -394,6 +461,14 @@ func NewRust(sb sandbox.Sandbox, cfg CompiledConfig) *compiledRuntime {
 // runs it on the full-rootfs denylist jail, -Xmx+cgroup bounded — see javaSpec.
 func NewJava(sb sandbox.Sandbox, cfg CompiledConfig) *compiledRuntime {
 	return newCompiled(javaSpec, sb, cfg)
+}
+
+// NewTypeScript builds the TypeScript runtime (G14): tsc type-checks and emits
+// main.js (a type error is compile_error, --noEmitOnError), then node runs the
+// emitted JS on the full-rootfs denylist jail — the JavaScript run posture reused
+// whole — see typescriptSpec.
+func NewTypeScript(sb sandbox.Sandbox, cfg CompiledConfig) *compiledRuntime {
+	return newCompiled(typescriptSpec, sb, cfg)
 }
 
 func (r *compiledRuntime) Language() string { return r.spec.name }
