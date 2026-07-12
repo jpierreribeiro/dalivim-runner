@@ -83,7 +83,7 @@ entry in the closed registry, offline, with mandatory on-target containment proo
 |---|---|---|---|---|---|---|
 | **[G13](G13-rust.md)** | Rust | B (static, like C/Go) | 🟡 high | M | no (new language) | ✅ implemented |
 | **[G14](G14-typescript.md)** | TypeScript (`tsc` → Node jail) | C (compile→VM, reuses JS run) | 🔴 high | M | no (new language) | ✅ implemented |
-| **[G15](G15-csharp.md)** | C# / .NET | C (VM, like Java) | 🟡 high | L | no (new language) | 📋 spec |
+| **[G15](G15-csharp.md)** | C# / .NET | C (VM, like Java) | 🟡 high | L | no (new language) | ✅ implemented |
 
 Recommended order (locked with the owner): **G13 Rust** (most contained, reuses the
 C/Go static posture, no VM, no cache pre-warm) → **G14 TypeScript** (`tsc` type-check

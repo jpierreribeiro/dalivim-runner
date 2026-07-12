@@ -86,6 +86,7 @@ func main() {
 		executor.NewJava(sb, compiledConfig(cfg)),
 		executor.NewRust(sb, compiledConfig(cfg)),
 		executor.NewTypeScript(sb, compiledConfig(cfg)),
+		executor.NewCSharp(sb, compiledConfig(cfg)),
 	)
 
 	srv := httpapi.New(svc, httpapi.Config{

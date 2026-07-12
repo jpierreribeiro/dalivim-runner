@@ -338,6 +338,77 @@ var typescriptSpec = compiledLangSpec{
 	parseVersion: secondField,                                      // -> "5.9.3"
 }
 
+// csharpSpec is C# (.NET, G15), the second VM-compiled language after Java. It
+// slots into Shape C: compile the source to an IL assembly (Roslyn `csc`), run the
+// IL on the CoreCLR (`dotnet exec`), reusing the generalised compiledRuntime and
+// Java's run posture — full-rootfs denylist jail, no RLIMIT_AS (the CLR reserves a
+// large virtual space, like the JVM/V8), cgroup-authoritative memory, a startup
+// memory floor. Validated end-to-end against the real SDK (8.0.422 / runtime 8.0.28)
+// before coding.
+//
+// The genuinely hard part is not the shape (Java proved it) but staying OFFLINE:
+// .NET's reflex is to restore NuGet packages over the network. csc-direct sidesteps
+// MSBuild/restore ENTIRELY — it is just the compiler, invoked against the shared
+// framework's reference assemblies (a pre-baked response file, /opt/cs/refs.rsp),
+// producing Main.dll. `dotnet exec` then hosts it with a PROGRAM-INDEPENDENT
+// runtimeconfig.json (baked once at image build; it depends only on the target
+// framework, so the compile prelude just copies it next to Main.dll). No cargo/npm
+// analogue, no crate/package restore, no network — the shared framework assemblies
+// shipped in the image are the whole surface, like single-file Java.
+//
+// The compile is a /bin/sh prelude (compileArgv0Absolute) so the `csc && cp
+// runtimeconfig` chain runs in one jail: csc emits Main.dll, then the baked
+// runtimeconfig is copied to Main.runtimeconfig.json beside it (dotnet exec looks
+// for <assembly>.runtimeconfig.json). The csc.dll path globs the single SDK.
+var csharpSpec = compiledLangSpec{
+	name:       "csharp",
+	sourceFile: "Main.cs",
+	// csc-direct: `dotnet exec <sdk>/Roslyn/bincore/csc.dll -nostdlib @refs.rsp` (the
+	// ref pack referenced via the baked response file) -> Main.dll, then copy the baked
+	// runtimeconfig beside it. -optimize+ for release; -nostdlib because the ref pack
+	// (refs.rsp) supplies System.Runtime/Console/… explicitly. {out}/{src}/{dir} are
+	// substituted to in-jail /sandbox paths; /opt/dotnet + /opt/cs are on the ro rootfs.
+	compile: []string{"/bin/sh", "-c",
+		"/opt/dotnet/dotnet exec $(echo /opt/dotnet/sdk/*/Roslyn/bincore/csc.dll) -nologo -optimize+ -nostdlib @/opt/cs/refs.rsp -out:{out} {src} && cp /opt/cs/Main.runtimeconfig.json {dir}/Main.runtimeconfig.json"},
+	compileArgv0Absolute: true,
+	artifact:             "Main.dll",
+	// RUN on the CoreCLR: `dotnet exec Main.dll` (dotnet finds Main.runtimeconfig.json
+	// beside it and the shared framework via DOTNET_ROOT). runBin is the dotnet muxer.
+	run:      []string{"exec", "{out}"},
+	runBin:   []string{"dotnet"},
+	binNames: []string{"dotnet"},
+	// Compile env: DOTNET_ROOT for the CLR hosting csc; a writable HOME/CLI_HOME on the
+	// size-capped /tmp; offline/quiet/no-diagnostics. capAddressSpace:false means the
+	// compile jail (the CLR running csc reserves a virtual arena, like `go build`/javac)
+	// skips RLIMIT_AS and leans on the cgroup — see execute()/compile().
+	compileEnv: []string{
+		"DOTNET_ROOT=/opt/dotnet", "HOME=/tmp", "DOTNET_CLI_HOME=/tmp",
+		"DOTNET_CLI_TELEMETRY_OPTOUT=1", "DOTNET_NOLOGO=1", "DOTNET_EnableDiagnostics=0",
+	},
+	// Run env: the shared determinism pin + DOTNET_ROOT (locate the shared framework),
+	// writable HOME/TMPDIR on the jail's /tmp, telemetry/first-run off, and
+	// DOTNET_EnableDiagnostics=0 so the CLR opens no /tmp diagnostic IPC socket. Never
+	// inherit the runner's env (COMPlus_*/DOTNET_* must not leak in — the Java lesson).
+	runEnv: determinismEnv(
+		"PATH=/usr/local/bin:/usr/bin:/bin", "DOTNET_ROOT=/opt/dotnet",
+		"HOME=/tmp", "TMPDIR=/tmp", "DOTNET_CLI_TELEMETRY_OPTOUT=1", "DOTNET_NOLOGO=1",
+		"DOTNET_EnableDiagnostics=0",
+	),
+	runFullRootfs:     true,                   // the CoreCLR is dynamically linked — full rootfs (like the JVM)
+	capAddressSpace:   false,                  // the CLR reserves a large virtual space; RLIMIT_AS kills startup
+	staticAllowlistOK: false,                  // widest syscall surface (JIT mmap, clone) → denylist, like the JVM
+	memErrSubstr:      "OutOfMemoryException", // no-cgroup fallback OOM classify
+	// The CLR's non-heap overhead (JIT, metadata) sits on top of allocations, like the
+	// JVM: floor an undersized budget so it starts at all. cgroup memory.max is the
+	// authoritative bound (deploy-time proof, like Go/Java — not the cgroup=auto CI).
+	minMemoryMB:  128,
+	versionArgs:  []string{"--version"}, // `dotnet --version` -> "8.0.422"
+	parseVersion: strings.TrimSpace,
+	// csc via the CLR writes a little JIT/temp scratch; give /tmp a roomy tmpfs (the
+	// output Main.dll itself goes to the writable /sandbox, not /tmp).
+	compileTmpfsMB: 64,
+}
+
 // parseGoVersion pulls the bare version out of `go version` output
 // ("go version go1.26 linux/amd64" → "1.26"), degrading to the trimmed raw
 // string if the shape is unexpected.
@@ -469,6 +540,13 @@ func NewJava(sb sandbox.Sandbox, cfg CompiledConfig) *compiledRuntime {
 // whole — see typescriptSpec.
 func NewTypeScript(sb sandbox.Sandbox, cfg CompiledConfig) *compiledRuntime {
 	return newCompiled(typescriptSpec, sb, cfg)
+}
+
+// NewCSharp builds the C# runtime (G15): csc-direct compiles Main.cs to an IL
+// Main.dll offline (no NuGet restore), then the CoreCLR runs it via `dotnet exec`
+// on the full-rootfs denylist jail — Java's VM run posture reused — see csharpSpec.
+func NewCSharp(sb sandbox.Sandbox, cfg CompiledConfig) *compiledRuntime {
+	return newCompiled(csharpSpec, sb, cfg)
 }
 
 func (r *compiledRuntime) Language() string { return r.spec.name }

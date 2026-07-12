@@ -65,6 +65,19 @@ RUN git clone --depth 1 --branch "${NSJAIL_VERSION}" https://github.com/google/n
 FROM rust:1.83.0-slim-bookworm AS rust-build
 RUN rustup target add x86_64-unknown-linux-musl
 
+# ---- dotnet stage: pinned .NET SDK, copied into the final image (G15) ----
+# The official SDK image is Debian-bookworm-based (the -bookworm-slim tag), so its
+# CoreCLR + shared framework are ABI-matched to the runtime base below. We copy the
+# whole SDK (/usr/share/dotnet) into the final image and compile C# OFFLINE with
+# csc-direct — no NuGet restore, no MSBuild — against the shared framework's ref
+# assemblies (see /opt/cs/refs.rsp, baked below). Pinned to an exact SDK version for
+# reproducibility (bump deliberately). Validated end-to-end against this exact SDK
+# (8.0.422 / runtime 8.0.28) before shipping.
+# TODO(pin-by-digest): capture `docker inspect` digest of
+# mcr.microsoft.com/dotnet/sdk:8.0.422-bookworm-slim and pin it here like the other
+# bases, once CI resolves it.
+FROM mcr.microsoft.com/dotnet/sdk:8.0.422-bookworm-slim AS dotnet-build
+
 # ---- runtime stage: interpreters + nsjail + non-root user ----
 # Bookworm base so the nsjail runtime libs (copied from the build stage above)
 # match ABI. Interpreted runtimes: python3 (in this base) + nodejs (F-C) + lua5.4
@@ -178,6 +191,39 @@ RUN set -eux; \
     chmod -R a+rX /opt/typescript /opt/ts-types; \
     test -f /opt/typescript/bin/tsc; \
     test -f /opt/ts-types/node/index.d.ts
+# .NET SDK (G15) for the `csharp` compile jail. Copy the whole SDK from the pinned
+# build stage (like the Go/Rust toolchains) and run C# OFFLINE: csc-direct compiles
+# Main.cs -> Main.dll, then the CoreCLR runs it via `dotnet exec`. The SDK is heavy
+# (~350 MB, the largest single toolchain here); an SDK-for-compile / runtime-for-run
+# split is a deferred size follow-up (like Java's JRE/JDK note). Bound into the
+# COMPILE jail only (full rootfs); world-readable so the jail-private uid can read it.
+COPY --from=dotnet-build /usr/share/dotnet /opt/dotnet
+ENV DOTNET_ROOT=/opt/dotnet
+ENV PATH="/opt/dotnet:${PATH}"
+# Bake the two PROGRAM-INDEPENDENT compile inputs once, from the copied SDK:
+#   refs.rsp — a csc response file referencing every shared-framework ref assembly
+#     (so csc -nostdlib resolves System.Runtime/Console/… without MSBuild/restore).
+#   Main.runtimeconfig.json — tells `dotnet exec` which shared framework + version to
+#     host; it depends ONLY on the target framework, so it is generated once here and
+#     the per-run compile prelude just copies it next to the freshly-compiled Main.dll.
+# The runtime version is globbed from the shared framework dir (no hardcoded patch
+# version). Then a BUILD-TIME PROOF compiles + runs a hello-world through the exact
+# per-run path, so a wrong SDK path / version / offline assumption FAILS THE BUILD
+# LOUDLY here rather than at request time. World-readable for the jail uid.
+RUN set -eux; \
+    mkdir -p /opt/cs; \
+    for f in /opt/dotnet/packs/Microsoft.NETCore.App.Ref/*/ref/net8.0/*.dll; do echo "-r:$f"; done > /opt/cs/refs.rsp; \
+    rtver="$(basename "$(ls -d /opt/dotnet/shared/Microsoft.NETCore.App/*/)")"; \
+    printf '{"runtimeOptions":{"tfm":"net8.0","framework":{"name":"Microsoft.NETCore.App","version":"%s"}}}\n' "$rtver" > /opt/cs/Main.runtimeconfig.json; \
+    chmod -R a+rX /opt/cs; \
+    test -s /opt/cs/refs.rsp; \
+    csc="$(echo /opt/dotnet/sdk/*/Roslyn/bincore/csc.dll)"; \
+    printf 'System.Console.WriteLine("csharp-ok");\n' > /tmp/Main.cs; \
+    DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_EnableDiagnostics=0 HOME=/tmp \
+      /opt/dotnet/dotnet exec "$csc" -nologo -optimize+ -nostdlib @/opt/cs/refs.rsp -out:/tmp/Main.dll /tmp/Main.cs; \
+    cp /opt/cs/Main.runtimeconfig.json /tmp/Main.runtimeconfig.json; \
+    test "$(DOTNET_EnableDiagnostics=0 DOTNET_CLI_TELEMETRY_OPTOUT=1 HOME=/tmp /opt/dotnet/dotnet exec /tmp/Main.dll)" = "csharp-ok"; \
+    rm -f /tmp/Main.cs /tmp/Main.dll /tmp/Main.runtimeconfig.json
 # Determinism pin (G7), belt-and-suspenders: the jail sets these explicitly in
 # every run env (an explicit minimal cmd.Env means this ENV does NOT reach the
 # child), so this line only pins the daemon itself and any image-level tooling.
