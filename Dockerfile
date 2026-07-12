@@ -196,7 +196,9 @@ RUN set -eux; \
 # Main.cs -> Main.dll, then the CoreCLR runs it via `dotnet exec`. The SDK is heavy
 # (~350 MB, the largest single toolchain here); an SDK-for-compile / runtime-for-run
 # split is a deferred size follow-up (like Java's JRE/JDK note). Bound into the
-# COMPILE jail only (full rootfs); world-readable so the jail-private uid can read it.
+# COMPILE jail only (full rootfs); made world-readable by the `chmod -R a+rX` below
+# (COPY --from preserves the SDK's non-world-traversable dir modes, which the non-root
+# jail uid cannot enter — see the RUN comment).
 COPY --from=dotnet-build /usr/share/dotnet /opt/dotnet
 ENV DOTNET_ROOT=/opt/dotnet
 ENV PATH="/opt/dotnet:${PATH}"
@@ -207,33 +209,35 @@ ENV PATH="/opt/dotnet:${PATH}"
 #     host; it depends ONLY on the target framework, so it is generated once here and
 #     the per-run compile prelude just copies it next to the freshly-compiled Main.dll.
 # The runtime version is globbed from the shared framework dir (no hardcoded patch
-# version). Then a BUILD-TIME PROOF compiles + runs a hello-world through the exact
-# per-run path — crucially UNDER `ulimit -f` (the jail's RLIMIT_FSIZE) and with the
-# SAME env the jail uses (esp. DOTNET_EnableWriteXorExecute=0, without which .NET 8's
-# W^X JIT ftruncates a 2 TB sparse file and SIGXFSZ-dies under the file-size cap; and
-# the base has no libicu, so the CLR aborts on globalization unless invariant mode is
-# set). The proof runs the compile and run in `env -i` with the EXACT envs the jail
-# uses — including LC_ALL=C.UTF-8 on the run (the determinism pin, which is what
-# triggers the ICU load) — and exercises .ToUpper() (globalization). So a wrong SDK
-# path/version/offline/rlimit/globalization assumption FAILS THE BUILD LOUDLY here,
-# faithfully mirroring the jail, rather than surfacing at request time. World-readable
-# for the jail uid. (65536 KiB = 64 MiB = RUNNER_MAX_FILE_SIZE_MB default.)
+# version). `chmod -R a+rX /opt/dotnet` is MANDATORY: COPY --from preserves the SDK's
+# source modes, and the shared-framework dirs are NOT world-traversable — so the
+# non-root jail uid cannot enter them to load System.Console.dll (csc dies with
+# "Could not load ... System.Console"). Same a+rX the Go cache / JUnit jar / Rust
+# toolchain need after a COPY/ADD.
+# Then a BUILD-TIME PROOF compiles + runs a hello-world through the exact per-run path,
+# faithfully MIRRORING THE JAIL: as the NON-ROOT `nobody` uid (so a missing a+rX fails
+# here, not at request time — root would mask it), UNDER `ulimit -f` (the jail's
+# RLIMIT_FSIZE — .NET 8's W^X JIT else ftruncates a 2 TB sparse file and SIGXFSZ-dies),
+# and with the EXACT compile/run envs the jail uses — incl. LC_ALL=C.UTF-8 on the run
+# (the determinism pin, which triggers the ICU load the no-libicu base can't satisfy
+# without DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1) — exercising .ToUpper()
+# (globalization). So a wrong SDK path/version/offline/rlimit/globalization/permission
+# assumption FAILS THE BUILD LOUDLY. (65536 KiB = 64 MiB = RUNNER_MAX_FILE_SIZE_MB.)
 RUN set -eux; \
     mkdir -p /opt/cs; \
     for f in /opt/dotnet/packs/Microsoft.NETCore.App.Ref/*/ref/net8.0/*.dll; do echo "-r:$f"; done > /opt/cs/refs.rsp; \
     rtver="$(basename "$(ls -d /opt/dotnet/shared/Microsoft.NETCore.App/*/)")"; \
     printf '{"runtimeOptions":{"tfm":"net8.0","framework":{"name":"Microsoft.NETCore.App","version":"%s"}}}\n' "$rtver" > /opt/cs/Main.runtimeconfig.json; \
-    chmod -R a+rX /opt/cs; \
+    chmod -R a+rX /opt/dotnet /opt/cs; \
     test -s /opt/cs/refs.rsp; \
     csc="$(echo /opt/dotnet/sdk/*/Roslyn/bincore/csc.dll)"; \
-    printf 'System.Console.WriteLine("csharp-ok".ToUpper());\n' > /tmp/Main.cs; \
+    proof="$(mktemp -d)"; chmod 777 "$proof"; \
+    printf 'System.Console.WriteLine("csharp-ok".ToUpper());\n' > "$proof/Main.cs"; chmod a+r "$proof/Main.cs"; \
     CENV="PATH=/usr/local/bin:/usr/bin:/bin TMPDIR=/tmp DOTNET_ROOT=/opt/dotnet HOME=/tmp DOTNET_CLI_HOME=/tmp DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_EnableDiagnostics=0 DOTNET_EnableWriteXorExecute=0 DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1"; \
     RENV="LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC PATH=/usr/local/bin:/usr/bin:/bin DOTNET_ROOT=/opt/dotnet HOME=/tmp TMPDIR=/tmp DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_EnableDiagnostics=0 DOTNET_EnableWriteXorExecute=0 DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1"; \
-    ( ulimit -f 65536; \
-      env -i $CENV /opt/dotnet/dotnet exec "$csc" -nologo -optimize+ -nostdlib @/opt/cs/refs.rsp -out:/tmp/Main.dll /tmp/Main.cs; \
-      cp /opt/cs/Main.runtimeconfig.json /tmp/Main.runtimeconfig.json; \
-      test "$(env -i $RENV /opt/dotnet/dotnet exec /tmp/Main.dll)" = "CSHARP-OK" ); \
-    rm -f /tmp/Main.cs /tmp/Main.dll /tmp/Main.runtimeconfig.json
+    runuser -u nobody -- sh -c "ulimit -f 65536; env -i $CENV /opt/dotnet/dotnet exec $csc -nologo -optimize+ -nostdlib @/opt/cs/refs.rsp -out:$proof/Main.dll $proof/Main.cs && cp /opt/cs/Main.runtimeconfig.json $proof/Main.runtimeconfig.json"; \
+    test "$(runuser -u nobody -- sh -c "ulimit -f 65536; env -i $RENV /opt/dotnet/dotnet exec $proof/Main.dll")" = "CSHARP-OK"; \
+    rm -rf "$proof"
 # Determinism pin (G7), belt-and-suspenders: the jail sets these explicitly in
 # every run env (an explicit minimal cmd.Env means this ENV does NOT reach the
 # child), so this line only pins the daemon itself and any image-level tooling.
