@@ -61,6 +61,16 @@ func TestCSharpSpec(t *testing.T) {
 	if !strings.Contains(runEnv, "DOTNET_ROOT=/opt/dotnet") || !strings.Contains(runEnv, "DOTNET_EnableDiagnostics=0") {
 		t.Fatalf("csharp run env must set DOTNET_ROOT and disable the diagnostic IPC: %v", csharpSpec.runEnv)
 	}
+	// W^X must be disabled on BOTH phases: .NET 8's W^X JIT ftruncates a 2 TB sparse
+	// file that trips the jail's RLIMIT_FSIZE (SIGXFSZ), so csc AND the run JIT die
+	// without this. A regression here reintroduces a bogus compile_error/runtime_error.
+	compileEnv := strings.Join(csharpSpec.compileEnv, " ")
+	if !strings.Contains(compileEnv, "DOTNET_EnableWriteXorExecute=0") {
+		t.Fatalf("csharp compile env must disable W^X (2 TB ftruncate trips RLIMIT_FSIZE): %v", csharpSpec.compileEnv)
+	}
+	if !strings.Contains(runEnv, "DOTNET_EnableWriteXorExecute=0") {
+		t.Fatalf("csharp run env must disable W^X (the run JIT trips RLIMIT_FSIZE too): %v", csharpSpec.runEnv)
+	}
 	if csharpSpec.parseVersion == nil || csharpSpec.parseVersion("8.0.422\n") != "8.0.422" {
 		t.Fatal("csharp version parse must extract the bare dotnet version")
 	}

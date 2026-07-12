@@ -384,6 +384,13 @@ var csharpSpec = compiledLangSpec{
 	compileEnv: []string{
 		"DOTNET_ROOT=/opt/dotnet", "HOME=/tmp", "DOTNET_CLI_HOME=/tmp",
 		"DOTNET_CLI_TELEMETRY_OPTOUT=1", "DOTNET_NOLOGO=1", "DOTNET_EnableDiagnostics=0",
+		// .NET 8's W^X JIT double-maps its code heap through a FILE it ftruncates to 2 TB
+		// (a sparse file). RLIMIT_FSIZE (the jail's per-file cap) counts logical size, so
+		// ANY cap blocks it -> SIGXFSZ -> a bogus compile_error (verified: exit 153).
+		// Disable W^X: the JIT falls back to ordinary pages. The in-process hardening is
+		// redundant here — the jail already contains the process (ro rootfs, empty netns,
+		// seccomp denylist, cgroup). Both csc AND the run JIT need this, so it is on both.
+		"DOTNET_EnableWriteXorExecute=0",
 	},
 	// Run env: the shared determinism pin + DOTNET_ROOT (locate the shared framework),
 	// writable HOME/TMPDIR on the jail's /tmp, telemetry/first-run off, and
@@ -393,6 +400,8 @@ var csharpSpec = compiledLangSpec{
 		"PATH=/usr/local/bin:/usr/bin:/bin", "DOTNET_ROOT=/opt/dotnet",
 		"HOME=/tmp", "TMPDIR=/tmp", "DOTNET_CLI_TELEMETRY_OPTOUT=1", "DOTNET_NOLOGO=1",
 		"DOTNET_EnableDiagnostics=0",
+		// See compileEnv: the run JIT also file-backs W^X and would trip RLIMIT_FSIZE.
+		"DOTNET_EnableWriteXorExecute=0",
 	),
 	runFullRootfs:     true,                   // the CoreCLR is dynamically linked — full rootfs (like the JVM)
 	capAddressSpace:   false,                  // the CLR reserves a large virtual space; RLIMIT_AS kills startup

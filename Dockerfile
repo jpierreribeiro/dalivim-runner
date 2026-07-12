@@ -208,8 +208,12 @@ ENV PATH="/opt/dotnet:${PATH}"
 #     the per-run compile prelude just copies it next to the freshly-compiled Main.dll.
 # The runtime version is globbed from the shared framework dir (no hardcoded patch
 # version). Then a BUILD-TIME PROOF compiles + runs a hello-world through the exact
-# per-run path, so a wrong SDK path / version / offline assumption FAILS THE BUILD
-# LOUDLY here rather than at request time. World-readable for the jail uid.
+# per-run path — crucially UNDER `ulimit -f` (the jail's RLIMIT_FSIZE) and with the
+# SAME env the jail uses (esp. DOTNET_EnableWriteXorExecute=0, without which .NET 8's
+# W^X JIT ftruncates a 2 TB sparse file and SIGXFSZ-dies under the file-size cap). So a
+# wrong SDK path/version/offline/rlimit assumption FAILS THE BUILD LOUDLY here rather
+# than at request time. World-readable for the jail uid. (65536 KiB = 64 MiB =
+# RUNNER_MAX_FILE_SIZE_MB default.)
 RUN set -eux; \
     mkdir -p /opt/cs; \
     for f in /opt/dotnet/packs/Microsoft.NETCore.App.Ref/*/ref/net8.0/*.dll; do echo "-r:$f"; done > /opt/cs/refs.rsp; \
@@ -219,10 +223,11 @@ RUN set -eux; \
     test -s /opt/cs/refs.rsp; \
     csc="$(echo /opt/dotnet/sdk/*/Roslyn/bincore/csc.dll)"; \
     printf 'System.Console.WriteLine("csharp-ok");\n' > /tmp/Main.cs; \
-    DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_EnableDiagnostics=0 HOME=/tmp \
+    export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_EnableDiagnostics=0 DOTNET_EnableWriteXorExecute=0 HOME=/tmp; \
+    ( ulimit -f 65536; \
       /opt/dotnet/dotnet exec "$csc" -nologo -optimize+ -nostdlib @/opt/cs/refs.rsp -out:/tmp/Main.dll /tmp/Main.cs; \
-    cp /opt/cs/Main.runtimeconfig.json /tmp/Main.runtimeconfig.json; \
-    test "$(DOTNET_EnableDiagnostics=0 DOTNET_CLI_TELEMETRY_OPTOUT=1 HOME=/tmp /opt/dotnet/dotnet exec /tmp/Main.dll)" = "csharp-ok"; \
+      cp /opt/cs/Main.runtimeconfig.json /tmp/Main.runtimeconfig.json; \
+      test "$(/opt/dotnet/dotnet exec /tmp/Main.dll)" = "csharp-ok" ); \
     rm -f /tmp/Main.cs /tmp/Main.dll /tmp/Main.runtimeconfig.json
 # Determinism pin (G7), belt-and-suspenders: the jail sets these explicitly in
 # every run env (an explicit minimal cmd.Env means this ENV does NOT reach the

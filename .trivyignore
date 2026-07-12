@@ -1,0 +1,14 @@
+# Trivy CVE ignores — each entry MUST carry a justification and a re-evaluation
+# trigger. This gate fails on fixable HIGH/CRITICAL CVEs (ci.yml: image CVE scan);
+# an ignore here is a deliberate, scoped exception, not a blanket suppression.
+
+# CVE-2025-26646 — MSBuild (Microsoft.Build.Tasks.Core) spoofing vulnerability, shipped
+# inside the pinned .NET SDK used by the `csharp` language (G15). The runner NEVER
+# invokes MSBuild: C# compiles via csc-direct (`dotnet exec .../Roslyn/bincore/csc.dll`)
+# and runs via `dotnet exec`, with no `dotnet build`, no NuGet restore, and no network
+# (empty netns). MSBuild is present-but-unreachable in the image, so this spoofing CVE
+# is not exploitable in the runner's usage. The .NET 8 SDK line ships MSBuild 17.11.x,
+# whose fix landed only in 17.12+ (a .NET 9 SDK) — bumping the whole toolchain for an
+# unreachable component is not warranted. RE-EVALUATE when the csharp SDK moves to a
+# .NET version whose bundled MSBuild is >= a fixed release (drop this line then).
+CVE-2025-26646
