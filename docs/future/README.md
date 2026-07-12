@@ -66,13 +66,31 @@ judge). Specs are written; none is implemented yet.
 | Phase | Theme | Value | Size | Breaks contract? | Status |
 |---|---|---|---|---|---|
 | **[G9](G9-test-runner.md)** | Test-runner grading mode (pytest / go test / node --test / JUnit) | 🔴 high | large | no (additive `mode`) | ✅ done (all 4 langs) |
-| **[G10](G10-sql-sqlite.md)** | SQL execution (SQLite; PostgreSQL later shape) | 🟡 high | S–M (P1) | no (new language) | 📋 spec |
+| **[G10](G10-sql-sqlite.md)** | SQL execution (SQLite; PostgreSQL later shape) | 🟡 high | S–M (P1) | no (new language) | ✅ done (SQLite P1) |
 | **[G11](G11-determinism-completion.md)** | Determinism completion (`PYTHONHASHSEED`, per-lang non-guarantees) | 🟢 hygiene | **XS** | no | ✅ done |
 | **[G12](G12-languages-endpoint.md)** | `GET /languages` capability discovery | 🟢 medium | XS/S | no (additive route) | ✅ done |
 
 Recommended order: **G11** (XS quick win) → **G12** (XS/S, unblocks the frontend) →
 **G9** (the big product unlock) → **G10** (SQLite first). G9 and G10 each force the
 same output-contract decisions, so doing G9 first informs G10.
+
+**Wave 4 — language breadth (planned).** Fill the real language gaps
+(TypeScript, C#, Rust), each mapped onto one of the three existing runtime shapes
+(`ADDING-A-LANGUAGE.md`) so no new sandbox is invented — every one is an additive
+entry in the closed registry, offline, with mandatory on-target containment proof.
+
+| Phase | Theme | Shape | Value | Size | Breaks contract? | Status |
+|---|---|---|---|---|---|---|
+| **[G13](G13-rust.md)** | Rust | B (static, like C/Go) | 🟡 high | M | no (new language) | 📋 spec |
+| **[G14](G14-typescript.md)** | TypeScript (`tsc` → Node jail) | C (compile→VM, reuses JS run) | 🔴 high | M | no (new language) | 📋 spec |
+| **[G15](G15-csharp.md)** | C# / .NET | C (VM, like Java) | 🟡 high | L | no (new language) | 📋 spec |
+
+Recommended order (locked with the owner): **G13 Rust** (most contained, reuses the
+C/Go static posture, no VM, no cache pre-warm) → **G14 TypeScript** (`tsc` type-check
+→ the existing Node run jail; one pinned dep) → **G15 C#** (heaviest: a large pinned
+.NET SDK + the offline/no-restore hardening). Decisions locked: Rust = musl-static +
+pinned rustup toolchain; TS = `tsc` type-check (type error → `compile_error`); C# =
+.NET SDK.
 
 **Security hardening** is tracked **separately** in [`security/`](security/README.md)
 — S1 (fuzz the validators), S2 (seccomp allowlist for interpreters), S3 (SBOM +
