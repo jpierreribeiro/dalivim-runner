@@ -48,7 +48,7 @@ FROM debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8
 ARG NSJAIL_VERSION=3.6
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates=20230311+deb12u1 git=1:2.39.5-0+deb12u3 autoconf=2.71-3 bison=2:3.8.2+dfsg-1+b1 flex=2.6.4-8.2 gcc=4:12.2.0-3 g++=4:12.2.0-3 libtool=2.4.7-7~deb12u1 make=4.3-4.1 pkg-config=1.8.1-1 \
-      libprotobuf-dev=3.21.12-3 libnl-route-3-dev=3.7.0-0.2+b1 protobuf-compiler=3.21.12-3 \
+      libprotobuf-dev=3.21.12-3+deb12u1 libnl-route-3-dev=3.7.0-0.2+b1 protobuf-compiler=3.21.12-3+deb12u1 \
  && rm -rf /var/lib/apt/lists/*
 RUN git clone --depth 1 --branch "${NSJAIL_VERSION}" https://github.com/google/nsjail /nsjail \
  && make -C /nsjail \
@@ -71,10 +71,10 @@ FROM python:3.12-slim-bookworm@sha256:8a7e7cc04fd3e2bd787f7f24e22d5d119aa590d429
 # interpreters). openjdk-17 comes from bookworm main so its native libs are ABI-
 # matched to this base. The jail execve's resolved abs paths.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      libprotobuf32=3.21.12-3 libnl-route-3-200=3.7.0-0.2+b1 \
+      libprotobuf32=3.21.12-3+deb12u1 libnl-route-3-200=3.7.0-0.2+b1 \
       nodejs=18.20.4+dfsg-1~deb12u2 \
       lua5.4=5.4.4-3+deb12u1 \
-      sqlite3=3.40.1-2+deb12u1 \
+      sqlite3=3.40.1-2+deb12u2 \
       gcc=4:12.2.0-3 g++=4:12.2.0-3 libc6-dev=2.36-9+deb12u14 \
       openjdk-17-jdk-headless=17.0.19+10-1~deb12u2 \
  && rm -rf /var/lib/apt/lists/*
