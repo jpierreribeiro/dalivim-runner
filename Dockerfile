@@ -65,18 +65,36 @@ RUN git clone --depth 1 --branch "${NSJAIL_VERSION}" https://github.com/google/n
 FROM rust:1.83.0-slim-bookworm AS rust-build
 RUN rustup target add x86_64-unknown-linux-musl
 
-# ---- dotnet stage: pinned .NET SDK, copied into the final image (G15) ----
+# ---- dotnet stage: pinned .NET SDK, SLIMMED to only what csc-direct needs (G15) ----
 # The official SDK image is Debian-bookworm-based (the -bookworm-slim tag), so its
-# CoreCLR + shared framework are ABI-matched to the runtime base below. We copy the
-# whole SDK (/usr/share/dotnet) into the final image and compile C# OFFLINE with
-# csc-direct — no NuGet restore, no MSBuild — against the shared framework's ref
-# assemblies (see /opt/cs/refs.rsp, baked below). Pinned to an exact SDK version for
-# reproducibility (bump deliberately). Validated end-to-end against this exact SDK
-# (8.0.422 / runtime 8.0.28) before shipping.
+# CoreCLR + shared framework are ABI-matched to the runtime base below. We compile C#
+# OFFLINE with csc-direct — no NuGet restore, no MSBuild — against the shared
+# framework's ref assemblies (see /opt/cs/refs.rsp, baked below). Pinned to an exact
+# SDK version for reproducibility (bump deliberately). Validated end-to-end against
+# this exact SDK (8.0.422 / runtime 8.0.28) before shipping.
 # TODO(pin-by-digest): capture `docker inspect` digest of
 # mcr.microsoft.com/dotnet/sdk:8.0.422-bookworm-slim and pin it here like the other
 # bases, once CI resolves it.
+#
+# SLIM to the minimal set (~157 MB, from ~490 MB): the host/muxer, the NETCore.App
+# runtime (to run + host csc), the NETCore.App ref pack (to compile), and Roslyn/bincore
+# (csc itself). This DROPS all the SDK tooling the runner never executes — dotnet-format
+# / dotnet-watch, MSBuild, NuGet, FSharp, the AspNetCore shared framework, templates —
+# whose EVER-GROWING CVE surface would otherwise fail the trivy gate on every new
+# advisory (CVE-2025-55247 in dotnet-format, CVE-2026-26171/33116 in
+# System.Security.Cryptography.Xml, all in dropped components). Removing the surface
+# structurally beats whack-a-mole .trivyignore entries. Verified: csc-direct compiles +
+# `dotnet exec` runs on this slim tree as the non-root jail uid.
 FROM mcr.microsoft.com/dotnet/sdk:8.0.422-bookworm-slim AS dotnet-build
+RUN set -eux; \
+    cd /usr/share/dotnet; \
+    ver="$(basename "$(ls -d sdk/*/)")"; \
+    mkdir -p /slim/shared /slim/packs /slim/sdk/"$ver"/Roslyn; \
+    cp -a dotnet host /slim/; \
+    cp -a shared/Microsoft.NETCore.App /slim/shared/; \
+    cp -a packs/Microsoft.NETCore.App.Ref /slim/packs/; \
+    cp -a sdk/"$ver"/Roslyn/bincore /slim/sdk/"$ver"/Roslyn/; \
+    test -f /slim/sdk/"$ver"/Roslyn/bincore/csc.dll
 
 # ---- runtime stage: interpreters + nsjail + non-root user ----
 # Bookworm base so the nsjail runtime libs (copied from the build stage above)
@@ -191,15 +209,13 @@ RUN set -eux; \
     chmod -R a+rX /opt/typescript /opt/ts-types; \
     test -f /opt/typescript/bin/tsc; \
     test -f /opt/ts-types/node/index.d.ts
-# .NET SDK (G15) for the `csharp` compile jail. Copy the whole SDK from the pinned
-# build stage (like the Go/Rust toolchains) and run C# OFFLINE: csc-direct compiles
-# Main.cs -> Main.dll, then the CoreCLR runs it via `dotnet exec`. The SDK is heavy
-# (~350 MB, the largest single toolchain here); an SDK-for-compile / runtime-for-run
-# split is a deferred size follow-up (like Java's JRE/JDK note). Bound into the
-# COMPILE jail only (full rootfs); made world-readable by the `chmod -R a+rX` below
-# (COPY --from preserves the SDK's non-world-traversable dir modes, which the non-root
-# jail uid cannot enter — see the RUN comment).
-COPY --from=dotnet-build /usr/share/dotnet /opt/dotnet
+# .NET runtime + Roslyn (G15) for the `csharp` compile jail — the SLIMMED tree built
+# in the dotnet-build stage (~157 MB), copied like the Go/Rust toolchains. C# runs
+# OFFLINE: csc-direct compiles Main.cs -> Main.dll, then the CoreCLR runs it via
+# `dotnet exec`. Bound into the COMPILE jail only (full rootfs); made world-readable by
+# the `chmod -R a+rX` below (COPY --from preserves the SDK's non-world-traversable dir
+# modes, which the non-root jail uid cannot enter — see the RUN comment).
+COPY --from=dotnet-build /slim /opt/dotnet
 ENV DOTNET_ROOT=/opt/dotnet
 ENV PATH="/opt/dotnet:${PATH}"
 # Bake the two PROGRAM-INDEPENDENT compile inputs once, from the copied SDK:
