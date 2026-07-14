@@ -397,6 +397,20 @@ var csharpSpec = compiledLangSpec{
 		// ICU dependency AND collapses every culture to the invariant one, which is exactly
 		// the culture-independence the runner already pins (C.UTF-8, G7). On both phases.
 		"DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1",
+		// Roslyn's csc runs Server GC by default (one heap per core, each reserving a
+		// large segment). Under the compile jail's tight budget it cannot lay those
+		// heaps out and CoreCLR aborts before csc's Main even runs: "GC heap
+		// initialization failed with error 0x8007000E" (E_OUTOFMEMORY). Force
+		// Workstation GC (a single heap) so csc starts. The env var overrides the
+		// value baked into csc.runtimeconfig.json.
+		"DOTNET_gcServer=0",
+		// nsjail sets --disable_proc, so /proc/meminfo is not visible; without it the
+		// GC cannot autosize its heap and, with no cgroup (CI/Railway), over-reserves
+		// address space — csc limps far enough to fault loading System.Console instead
+		// (a misleading FileNotFoundException). Pin an explicit hard limit (384 MiB,
+		// well inside RUNNER_COMPILE_MEMORY_MB=512) so heap sizing is deterministic and
+		// /proc-independent; ample for a single-file compile.
+		"DOTNET_GCHeapHardLimit=0x18000000",
 	},
 	// Run env: the shared determinism pin + DOTNET_ROOT (locate the shared framework),
 	// writable HOME/TMPDIR on the jail's /tmp, telemetry/first-run off, and
@@ -412,6 +426,12 @@ var csharpSpec = compiledLangSpec{
 		// culture-independence guarantee). The run env DOES set LC_ALL=C.UTF-8 (the
 		// determinism pin), which is precisely what would trigger the ICU load.
 		"DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1",
+		// See compileEnv: Workstation GC (single heap) so the CoreCLR starts under the
+		// jail's constrained, /proc-less memory view instead of aborting at GC heap
+		// init. The run heap stays bounded by the cgroup memory.max (or nsjail's default
+		// RLIMIT_AS as the no-cgroup fallback → OutOfMemoryException), not a hard limit,
+		// so memory_mb still governs the run and the mem-bomb classifies as expected.
+		"DOTNET_gcServer=0",
 	),
 	runFullRootfs:     true,                   // the CoreCLR is dynamically linked — full rootfs (like the JVM)
 	capAddressSpace:   false,                  // the CLR reserves a large virtual space; RLIMIT_AS kills startup

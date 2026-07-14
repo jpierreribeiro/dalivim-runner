@@ -80,6 +80,20 @@ func TestCSharpSpec(t *testing.T) {
 	if !strings.Contains(runEnv, "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1") {
 		t.Fatalf("csharp run env must set invariant globalization (LC_ALL triggers the ICU load): %v", csharpSpec.runEnv)
 	}
+	// Workstation GC on BOTH phases: csc defaults to Server GC (a per-core heap), which
+	// cannot initialize under the constrained, /proc-less compile jail — CoreCLR aborts
+	// at "GC heap initialization failed with error 0x8007000E" before csc runs. A
+	// regression here reintroduces that compile_error. The compile phase also pins an
+	// explicit heap hard limit so sizing is /proc-independent (nsjail --disable_proc).
+	if !strings.Contains(compileEnv, "DOTNET_gcServer=0") {
+		t.Fatalf("csharp compile env must force Workstation GC (Server GC fails GC heap init in the jail): %v", csharpSpec.compileEnv)
+	}
+	if !strings.Contains(runEnv, "DOTNET_gcServer=0") {
+		t.Fatalf("csharp run env must force Workstation GC (CLR startup under a /proc-less, cgroup-less jail): %v", csharpSpec.runEnv)
+	}
+	if !strings.Contains(compileEnv, "DOTNET_GCHeapHardLimit=") {
+		t.Fatalf("csharp compile env must pin an explicit GC heap hard limit (/proc-independent sizing): %v", csharpSpec.compileEnv)
+	}
 	if csharpSpec.parseVersion == nil || csharpSpec.parseVersion("8.0.422\n") != "8.0.422" {
 		t.Fatal("csharp version parse must extract the bare dotnet version")
 	}

@@ -249,8 +249,8 @@ RUN set -eux; \
     csc="$(echo /opt/dotnet/sdk/*/Roslyn/bincore/csc.dll)"; \
     proof="$(mktemp -d)"; chmod 777 "$proof"; \
     printf 'System.Console.WriteLine("csharp-ok".ToUpper());\n' > "$proof/Main.cs"; chmod a+r "$proof/Main.cs"; \
-    CENV="PATH=/usr/local/bin:/usr/bin:/bin TMPDIR=/tmp DOTNET_ROOT=/opt/dotnet HOME=/tmp DOTNET_CLI_HOME=/tmp DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_EnableDiagnostics=0 DOTNET_EnableWriteXorExecute=0 DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1"; \
-    RENV="LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC PATH=/usr/local/bin:/usr/bin:/bin DOTNET_ROOT=/opt/dotnet HOME=/tmp TMPDIR=/tmp DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_EnableDiagnostics=0 DOTNET_EnableWriteXorExecute=0 DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1"; \
+    CENV="PATH=/usr/local/bin:/usr/bin:/bin TMPDIR=/tmp DOTNET_ROOT=/opt/dotnet HOME=/tmp DOTNET_CLI_HOME=/tmp DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_EnableDiagnostics=0 DOTNET_EnableWriteXorExecute=0 DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 DOTNET_gcServer=0 DOTNET_GCHeapHardLimit=0x18000000"; \
+    RENV="LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC PATH=/usr/local/bin:/usr/bin:/bin DOTNET_ROOT=/opt/dotnet HOME=/tmp TMPDIR=/tmp DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_EnableDiagnostics=0 DOTNET_EnableWriteXorExecute=0 DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 DOTNET_gcServer=0"; \
     runuser -u nobody -- sh -c "ulimit -f 65536; env -i $CENV /opt/dotnet/dotnet exec $csc -nologo -optimize+ -nostdlib @/opt/cs/refs.rsp -out:$proof/Main.dll $proof/Main.cs && cp /opt/cs/Main.runtimeconfig.json $proof/Main.runtimeconfig.json"; \
     test "$(runuser -u nobody -- sh -c "ulimit -f 65536; env -i $RENV /opt/dotnet/dotnet exec $proof/Main.dll")" = "CSHARP-OK"; \
     rm -rf "$proof"
