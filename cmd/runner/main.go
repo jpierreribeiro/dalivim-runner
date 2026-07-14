@@ -103,6 +103,7 @@ func main() {
 		NetworkIsolated:     sb.NetworkIsolated(),
 		MemoryAccounting:    sb.MemoryAccounting(),
 		ReadyRequiresNsjail: cfg.ReadyRequiresNsjail,
+		ContainmentReady:    sb.Ready,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

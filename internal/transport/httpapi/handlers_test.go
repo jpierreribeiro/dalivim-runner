@@ -375,6 +375,21 @@ func TestReadyz_ReflectsPosture(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("relaxed requirement must be 200, got %d", rr.Code)
 	}
+
+	// A required control can fail after boot. The callback is live rather than a
+	// boot-time snapshot, so the next probe must remove the instance from service.
+	containmentReady := true
+	dynamic := New(svc, Config{
+		Backend: "nsjail", ReadyRequiresNsjail: true,
+		ContainmentReady: func() bool { return containmentReady },
+	}).Handler()
+	if rec := get(dynamic, "/readyz", ""); rec.Code != http.StatusOK {
+		t.Fatalf("healthy dynamic containment must be ready, got %d", rec.Code)
+	}
+	containmentReady = false
+	if rec := get(dynamic, "/readyz", ""); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("runtime containment failure must degrade readiness, got %d", rec.Code)
+	}
 }
 
 // TestMetrics_GatedAndRecords pins G4.1: /metrics needs the token and, after a

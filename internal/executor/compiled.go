@@ -631,7 +631,7 @@ func (r *compiledRuntime) compile(ctx context.Context, req runnerapi.RunRequest,
 	if r.spec.capAddressSpace {
 		compileAS = r.compileMemoryMB
 	}
-	cmd, acct := r.sandbox.Command(cctx, sandbox.Spec{
+	cmd, acct, err := r.sandbox.Command(cctx, sandbox.Spec{
 		Argv:           argv,
 		WorkDir:        workDir,
 		TimeoutMs:      timeout,
@@ -643,6 +643,9 @@ func (r *compiledRuntime) compile(ctx context.Context, req runnerapi.RunRequest,
 		Writable:       true, // the compiler writes its artifact into /sandbox
 		MinimalRootfs:  false,
 	})
+	if err != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "sandbox containment unavailable"}, false
+	}
 	if acct != nil {
 		defer acct.Close()
 	}
@@ -709,7 +712,7 @@ func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest,
 	if r.spec.capAddressSpace {
 		runAS = req.MemoryMB
 	}
-	cmd, acct := r.sandbox.Command(rctx, sandbox.Spec{
+	cmd, acct, err := r.sandbox.Command(rctx, sandbox.Spec{
 		Argv:           argv,
 		WorkDir:        workDir,
 		TimeoutMs:      req.TimeoutMs,
@@ -724,6 +727,9 @@ func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest,
 		MinimalRootfs: !r.spec.runFullRootfs,
 		Seccomp:       r.runSeccomp, // tight static allowlist when enabled (default: denylist)
 	})
+	if err != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "sandbox containment unavailable"}
+	}
 	if acct != nil {
 		defer acct.Close()
 	}
@@ -834,7 +840,7 @@ func (r *compiledRuntime) executeTest(ctx context.Context, req runnerapi.RunRequ
 	ctx, cancelCause := context.WithCancelCause(ctx)
 	defer cancelCause(nil)
 
-	cmd, acct := r.sandbox.Command(ctx, sandbox.Spec{
+	cmd, acct, err := r.sandbox.Command(ctx, sandbox.Spec{
 		// {mem} => the run's memory budget (Java's -Xmx heap flag); go's argv has no
 		// placeholder, so subst is a no-op there.
 		Argv:      subst(tc.argv, "{mem}", strconv.Itoa(req.MemoryMB)),
@@ -855,6 +861,9 @@ func (r *compiledRuntime) executeTest(ctx context.Context, req runnerapi.RunRequ
 		MinimalRootfs: false, // the toolchain must be present to compile+run
 		Seccomp:       sandbox.SeccompDenylist,
 	})
+	if err != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "sandbox containment unavailable"}
+	}
 	if acct != nil {
 		defer acct.Close()
 	}

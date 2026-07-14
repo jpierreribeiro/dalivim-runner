@@ -240,21 +240,22 @@ type countingSandbox struct {
 	failCompile bool
 }
 
-func (s *countingSandbox) Command(ctx context.Context, spec sandbox.Spec) (*exec.Cmd, sandbox.RunAccounting) {
+func (s *countingSandbox) Command(ctx context.Context, spec sandbox.Spec) (*exec.Cmd, sandbox.RunAccounting, error) {
 	if spec.Writable { // the compile jail is the only writable one
 		s.compiles++
 		if s.failCompile {
-			return exec.CommandContext(ctx, "/bin/sh", "-c", "echo 'synthetic: syntax error' >&2; exit 1"), nil
+			return exec.CommandContext(ctx, "/bin/sh", "-c", "echo 'synthetic: syntax error' >&2; exit 1"), nil, nil
 		}
 		_ = os.WriteFile(filepath.Join(spec.WorkDir, defaultArtifact), []byte("artifact"), 0o755)
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 0"), nil
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 0"), nil, nil
 	}
 	s.runs++
-	return exec.CommandContext(ctx, "/bin/cat"), nil
+	return exec.CommandContext(ctx, "/bin/cat"), nil, nil
 }
 func (s *countingSandbox) NetworkIsolated() bool    { return false }
 func (s *countingSandbox) Backend() string          { return "fake" }
 func (s *countingSandbox) MemoryAccounting() string { return "rlimit-only" }
+func (s *countingSandbox) Ready() bool              { return true }
 
 func countingBatchService(sb *countingSandbox) *Service {
 	return NewService(

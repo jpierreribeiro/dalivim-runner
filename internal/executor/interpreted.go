@@ -169,7 +169,7 @@ func (r *interpretedRuntime) execute(ctx context.Context, req runnerapi.RunReque
 		addressSpaceMB = req.MemoryMB
 	}
 
-	cmd, acct := r.sandbox.Command(ctx, sandbox.Spec{
+	cmd, acct, err := r.sandbox.Command(ctx, sandbox.Spec{
 		Argv:           argv,
 		WorkDir:        workDir,
 		TimeoutMs:      req.TimeoutMs,
@@ -178,6 +178,9 @@ func (r *interpretedRuntime) execute(ctx context.Context, req runnerapi.RunReque
 		MaxProcesses:   r.maxProcesses,
 		MaxFileSizeMB:  r.maxFileSizeMB,
 	})
+	if err != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "sandbox containment unavailable"}
+	}
 	if acct != nil {
 		defer acct.Close()
 	}
@@ -332,7 +335,7 @@ func (r *interpretedRuntime) executeTest(ctx context.Context, req runnerapi.RunR
 
 	argv := append([]string{r.bin}, tc.argvTail(target, tc.reportFile)...)
 
-	cmd, acct := r.sandbox.Command(ctx, sandbox.Spec{
+	cmd, acct, err := r.sandbox.Command(ctx, sandbox.Spec{
 		Argv:      argv,
 		WorkDir:   workDir,
 		TimeoutMs: req.TimeoutMs,
@@ -351,6 +354,9 @@ func (r *interpretedRuntime) executeTest(ctx context.Context, req runnerapi.RunR
 		// rootfs is unchanged; only the ephemeral per-run workdir mount is writable.
 		Writable: true,
 	})
+	if err != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "sandbox containment unavailable"}
+	}
 	if acct != nil {
 		defer acct.Close()
 	}

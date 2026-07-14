@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -53,6 +54,7 @@ func Configure(sandboxPolicy, netPolicy, cgroupPolicy, cgroupMount string) (Sand
 				return nil, cgErr // RUNNER_CGROUP=require but the subtree is unusable
 			}
 			nj.cg = cg
+			nj.cgRequired = normalizePolicy(cgroupPolicy) == "require"
 			slog.Info("nsjail ENABLED: each run is contained by a read-only rootfs, mount/pid/ipc/user/net namespaces, a size-capped tmpfs /tmp, a seccomp denylist, no_new_privs, and per-jail rlimits",
 				"bin", nj.bin, "memory_accounting", cgroupLabel(cg))
 			return nj, nil
@@ -128,6 +130,7 @@ type netnsSandbox struct {
 
 func (s *netnsSandbox) NetworkIsolated() bool { return s.netns }
 func (s *netnsSandbox) Backend() string       { return "netns" }
+func (s *netnsSandbox) Ready() bool           { return true }
 
 // MemoryAccounting: the netns backend has no per-run cgroup, so memory is
 // bounded by RLIMIT_AS / the interpreter heap flag only.
@@ -138,7 +141,7 @@ func (s *netnsSandbox) MemoryAccounting() string { return cgroupLabel(nil) }
 // (address space) and -t (CPU seconds) are applied: the container's /bin/sh is
 // dash, which lacks `ulimit -u`, so the process cap is a per-jail (nsjail)
 // concern. The source is written to a file in WorkDir, never the command line.
-func (s *netnsSandbox) Command(ctx context.Context, spec Spec) (*exec.Cmd, RunAccounting) {
+func (s *netnsSandbox) Command(ctx context.Context, spec Spec) (*exec.Cmd, RunAccounting, error) {
 	// Address-space cap is optional: AddressSpaceMB==0 leaves RLIMIT_AS unset (the
 	// V8/Node path, which a tight cap would break). CPU seconds are always applied.
 	var prefix string
@@ -155,7 +158,7 @@ func (s *netnsSandbox) Command(ctx context.Context, spec Spec) (*exec.Cmd, RunAc
 	cmd.SysProcAttr = s.sysProcAttr()
 	cmd.Cancel = CancelCmd(cmd)
 	// The netns backend has no cgroup accounting; memory stays rlimit-bound.
-	return cmd, nil
+	return cmd, nil, nil
 }
 
 // sysProcAttr builds the per-run attributes: always its own process group (so the
@@ -226,16 +229,19 @@ func probeNetns() bool {
 // read-only rootfs, its own mount/pid/ipc/user/net namespaces, a size-capped
 // tmpfs /tmp, a seccomp denylist, no_new_privs, and per-jail nproc/fsize caps.
 type nsjailSandbox struct {
-	bin string
-	uid int
-	gid int
-	cg  *cgroupManager // nil => rlimit-only memory bound (no delegated cgroup)
+	bin          string
+	uid          int
+	gid          int
+	cg           *cgroupManager // nil => rlimit-only memory bound (no delegated cgroup)
+	cgRequired   bool
+	cgroupFailed atomic.Bool // sticky: a required per-run cgroup failed after boot
 }
 
 // NetworkIsolated is always true: nsjail clones a fresh, empty network namespace
 // for every run (loopback stays down via --iface_no_lo).
 func (s *nsjailSandbox) NetworkIsolated() bool { return true }
 func (s *nsjailSandbox) Backend() string       { return "nsjail" }
+func (s *nsjailSandbox) Ready() bool           { return !s.cgroupFailed.Load() }
 
 // MemoryAccounting reports the resolved per-run memory bound: "cgroup-v2:<parent>"
 // when a delegated cgroup gives each run an authoritative memory.max, else
@@ -252,16 +258,21 @@ func (s *nsjailSandbox) MemoryAccounting() string { return cgroupLabel(s.cg) }
 // When a delegated cgroup is present (F-E/R6), the run also gets a cgroup v2 leaf
 // with memory.max/pids.max, and nsjail is cloned straight into it (CLONE_INTO_
 // CGROUP via UseCgroupFD) so the whole jailed tree is accounted and OOM-bounded
-// there. The returned RunAccounting exposes the OOM verdict + peak; it is nil
-// when no cgroup was attached (no delegation, or begin failed — which degrades to
-// the rlimit bound rather than failing the run).
-func (s *nsjailSandbox) Command(ctx context.Context, spec Spec) (*exec.Cmd, RunAccounting) {
-	cmd := exec.CommandContext(ctx, s.bin, nsjailArgs(s.uid, s.gid, spec)...)
+// there. The returned RunAccounting exposes the OOM verdict + peak. Under
+// RUNNER_CGROUP=require, a per-run setup failure is an infrastructure error: no
+// command is created, the run is refused, and readiness stays degraded until the
+// process is replaced. auto retains its explicit rlimit-only fallback.
+func (s *nsjailSandbox) Command(ctx context.Context, spec Spec) (*exec.Cmd, RunAccounting, error) {
 	attr := &syscall.SysProcAttr{Setpgid: true}
 
 	var acct RunAccounting
 	if s.cg != nil {
 		if rc, err := s.cg.begin(spec.MemoryMB, spec.MaxProcesses); err != nil {
+			if s.cgRequired {
+				s.cgroupFailed.Store(true)
+				slog.Error("required per-run cgroup unavailable; refusing run", "err", err)
+				return nil, nil, fmt.Errorf("required per-run cgroup unavailable: %w", err)
+			}
 			slog.Warn("per-run cgroup unavailable for this run; falling back to rlimit bound", "err", err)
 		} else {
 			attr.UseCgroupFD = true
@@ -270,9 +281,10 @@ func (s *nsjailSandbox) Command(ctx context.Context, spec Spec) (*exec.Cmd, RunA
 		}
 	}
 
+	cmd := exec.CommandContext(ctx, s.bin, nsjailArgs(s.uid, s.gid, spec)...)
 	cmd.SysProcAttr = attr
 	cmd.Cancel = CancelCmd(cmd)
-	return cmd, acct
+	return cmd, acct, nil
 }
 
 // tryNsjail locates the nsjail binary and proves it actually works in this
@@ -308,7 +320,7 @@ func probeNsjail(s *nsjailSandbox) (string, bool) {
 	// Probe the jail itself, never the cgroup (s.cg is nil here — the probe runs
 	// before Configure attaches one), so a cgroup misconfig can't fail the nsjail
 	// boot probe; resolveCgroup handles the cgroup dial separately.
-	cmd, _ := s.Command(ctx, Spec{
+	cmd, _, commandErr := s.Command(ctx, Spec{
 		Argv:           []string{"/bin/true"},
 		WorkDir:        dir,
 		TimeoutMs:      2000,
@@ -316,6 +328,9 @@ func probeNsjail(s *nsjailSandbox) (string, bool) {
 		MaxProcesses:   64,
 		MaxFileSizeMB:  4,
 	})
+	if commandErr != nil {
+		return "could not construct probe command: " + commandErr.Error(), false
+	}
 	cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin"}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Sprintf("probe run failed: %v: %s", err, strings.TrimSpace(string(out))), false
