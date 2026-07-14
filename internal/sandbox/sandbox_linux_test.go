@@ -77,6 +77,21 @@ func TestConfigure_AutoFallsBackToNetns(t *testing.T) {
 	}
 }
 
+// A required cgroup cannot exist on the netns fallback. This closes the gap
+// where production's strict cgroup default could otherwise be bypassed merely
+// because RUNNER_SANDBOX remained auto and nsjail was absent.
+func TestConfigure_CgroupRequireForbidsNetnsFallback(t *testing.T) {
+	if _, err := Configure("off", "off", "require", ""); err == nil {
+		t.Fatal("RUNNER_CGROUP=require must reject an explicitly disabled nsjail backend")
+	}
+	if _, err := probeNsjailAvailable(); err == nil {
+		t.Skip("nsjail is available here; cannot exercise the automatic fallback")
+	}
+	if _, err := Configure("auto", "off", "require", "/definitely/not/a/cgroup"); err == nil {
+		t.Fatal("RUNNER_CGROUP=require must fail when auto cannot activate nsjail")
+	}
+}
+
 // TestNsjailCommand_RequiredCgroupFailsClosed pins RUN-01 at the per-run seam:
 // losing the delegated subtree after a successful boot must not construct an
 // executable command, and the failure must make readiness sticky-false.

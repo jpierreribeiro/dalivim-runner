@@ -116,3 +116,41 @@ func TestLoad_RequiresTokenOutsideDev(t *testing.T) {
 		t.Fatalf("development must permit an empty token set: %v", err)
 	}
 }
+
+// TestLoad_CgroupDefaultIsStrictInProduction pins RUN-02: an omitted cgroup
+// policy must not silently select auto for runtimes that cannot use RLIMIT_AS.
+// Development retains the convenient auto default, and an explicit production
+// auto remains an operator-visible availability tradeoff.
+func TestLoad_CgroupDefaultIsStrictInProduction(t *testing.T) {
+	t.Setenv("RUNNER_SERVICE_TOKEN", "test-token")
+	t.Setenv("RUNNER_SERVICE_TOKENS", "")
+	t.Setenv("RUNNER_ENV", "")
+	t.Setenv("RUNNER_CGROUP", "   ")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CgroupPolicy != "require" {
+		t.Fatalf("production empty RUNNER_CGROUP = %q, want require", cfg.CgroupPolicy)
+	}
+
+	t.Setenv("RUNNER_ENV", "development")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CgroupPolicy != "" {
+		t.Fatalf("development empty RUNNER_CGROUP = %q, want empty (auto)", cfg.CgroupPolicy)
+	}
+
+	t.Setenv("RUNNER_ENV", "")
+	t.Setenv("RUNNER_CGROUP", "auto")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CgroupPolicy != "auto" {
+		t.Fatalf("explicit production RUNNER_CGROUP must be preserved, got %q", cfg.CgroupPolicy)
+	}
+}

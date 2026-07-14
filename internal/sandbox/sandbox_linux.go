@@ -36,31 +36,43 @@ const isolationCloneflags = syscall.CLONE_NEWUSER | syscall.CLONE_NEWNET
 // guarantee and is consulted only when nsjail is not the active backend (nsjail
 // always runs each command in its own empty network namespace).
 //
-// cgroupPolicy (RUNNER_CGROUP) is auto|require|off and applies only to the nsjail
-// backend: it governs whether each run gets a cgroup v2 leaf (memory.max/pids.max
-// + OOM-based accounting) from the delegated subtree at cgroupMount
-// (RUNNER_CGROUP_MOUNT). "require" fails closed if that subtree is unusable;
+// cgroupPolicy (RUNNER_CGROUP) is auto|require|off. Per-run cgroups are provided
+// by the nsjail backend; "require" therefore also forbids selecting/falling back
+// to netns. It fails closed if nsjail or the delegated subtree is unusable;
 // "auto" falls back to rlimit-only bounds with a warning; "off" disables it.
 func Configure(sandboxPolicy, netPolicy, cgroupPolicy, cgroupMount string) (Sandbox, error) {
+	cgPolicy := normalizePolicy(cgroupPolicy)
+	switch cgPolicy {
+	case "auto", "require", "off":
+	default:
+		return nil, fmt.Errorf("RUNNER_CGROUP must be auto, require, or off (got %q)", cgPolicy)
+	}
+
 	switch policy := normalizePolicy(sandboxPolicy); policy {
 	case "off":
+		if cgPolicy == "require" {
+			return nil, errors.New("RUNNER_CGROUP=require needs the nsjail backend, but RUNNER_SANDBOX=off")
+		}
 		slog.Info("nsjail DISABLED (RUNNER_SANDBOX=off); using netns-only backend (F-03)")
 		return configureNetns(netPolicy)
 	case "auto", "require":
 		nj, detail, err := tryNsjail()
 		if err == nil {
-			cg, cgErr := resolveCgroup(cgroupPolicy, cgroupMount)
+			cg, cgErr := resolveCgroup(cgPolicy, cgroupMount)
 			if cgErr != nil {
 				return nil, cgErr // RUNNER_CGROUP=require but the subtree is unusable
 			}
 			nj.cg = cg
-			nj.cgRequired = normalizePolicy(cgroupPolicy) == "require"
+			nj.cgRequired = cgPolicy == "require"
 			slog.Info("nsjail ENABLED: each run is contained by a read-only rootfs, mount/pid/ipc/user/net namespaces, a size-capped tmpfs /tmp, a seccomp denylist, no_new_privs, and per-jail rlimits",
 				"bin", nj.bin, "memory_accounting", cgroupLabel(cg))
 			return nj, nil
 		}
 		if policy == "require" {
 			return nil, fmt.Errorf("RUNNER_SANDBOX=require but nsjail is unavailable: %s", detail)
+		}
+		if cgPolicy == "require" {
+			return nil, fmt.Errorf("RUNNER_CGROUP=require needs nsjail, but nsjail is unavailable: %s", detail)
 		}
 		slog.Warn("nsjail unavailable; falling back to netns-only backend (F-03) — set RUNNER_SANDBOX=require to fail closed instead",
 			"detail", detail)

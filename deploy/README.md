@@ -28,8 +28,9 @@ sudo ./deploy.sh setup     # R6: check driver, install + enable the reboot-safe 
 ```
 
 `setup` requires the **cgroupfs** docker driver (it tells you how to switch if not).
-If you don't want R6, set `CGROUP_PARENT=` and `RUNNER_CGROUP=auto` in `runner.env`
-and skip `setup`.
+For local/maintenance use without R6, set `CGROUP_PARENT=` and explicitly set
+`RUNNER_CGROUP=auto` in `runner.env`, then skip `setup`. Keep that instance out of
+production traffic: Go/JS/Java/TypeScript have no per-run RSS ceiling in this mode.
 
 ## Redeploy / upgrade
 
