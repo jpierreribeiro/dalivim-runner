@@ -315,9 +315,9 @@ deploy with `RUNNER_SANDBOX=require` is how you prove it engaged.
 
 | Env | Default | Effect |
 |---|---|---|
-| `RUNNER_SERVICE_TOKEN` | — | Shared secret; callers send `X-Runner-Token`. **Required** unless `RUNNER_ENV=development`. |
+| `RUNNER_SERVICE_TOKEN` | — | Shared secret (minimum 32 bytes outside development); callers send `X-Runner-Token`. **Required** unless `RUNNER_ENV=development`. |
 | `RUNNER_ENV` | (unset → strict) | `development` allows booting without a token. Leave unset in production. |
-| `RUNNER_METRICS_TOKEN` | (service token) | Gates `GET /metrics` (sent as `X-Runner-Token`). Unset → the service token gates it; `/metrics` is never public in production. |
+| `RUNNER_METRICS_TOKEN` | (service token) | Gates `GET /metrics` (sent as `X-Runner-Token`; minimum 32 bytes outside development). Unset → the service token gates it; `/metrics` is never public in production. |
 | `RUNNER_READY_REQUIRES` | `nsjail` | `/readyz` threshold: default requires the nsjail backend active (else `503`). `none` relaxes it (ready whenever the process is up) for intentional netns-only runs. |
 | `RUNNER_SANDBOX` | `auto` | Selects the containment backend. `auto`: use nsjail when its boot probe passes, else fall back to netns. `require`: nsjail only — **fail closed at boot** if unavailable. `off`: netns backend only. |
 | `RUNNER_NETWORK_ISOLATION` | `auto` | Governs the **netns** backend's egress guarantee (ignored when nsjail is active, which always isolates the network). `auto`: empty netns when permitted, else warn + fall back. `require`: fail closed at boot. `off`: disable. |
