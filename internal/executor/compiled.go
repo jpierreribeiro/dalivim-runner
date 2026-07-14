@@ -404,13 +404,15 @@ var csharpSpec = compiledLangSpec{
 		// Workstation GC (a single heap) so csc starts. The env var overrides the
 		// value baked into csc.runtimeconfig.json.
 		"DOTNET_gcServer=0",
-		// nsjail sets --disable_proc, so /proc/meminfo is not visible; without it the
-		// GC cannot autosize its heap and, with no cgroup (CI/Railway), over-reserves
-		// address space — csc limps far enough to fault loading System.Console instead
-		// (a misleading FileNotFoundException). Pin an explicit hard limit (384 MiB,
-		// well inside RUNNER_COMPILE_MEMORY_MB=512) so heap sizing is deterministic and
-		// /proc-independent; ample for a single-file compile.
+		// nsjail sets --disable_proc, so /proc/meminfo is not visible; pin an explicit
+		// GC heap hard limit (384 MiB, well inside RUNNER_COMPILE_MEMORY_MB=512) so heap
+		// sizing is deterministic and /proc-independent; ample for a single-file compile.
 		"DOTNET_GCHeapHardLimit=0x18000000",
+		// DIAGNOSTIC (temporary): csc still faults loading System.Console in the jail
+		// (deterministic, ~337 ms in) though the identical command passes in the build
+		// proof. COREHOST_TRACE dumps the host's framework/TPA resolution to stderr so
+		// the next CI compile_output reveals exactly why the loader misses it. Remove.
+		"COREHOST_TRACE=1", "COREHOST_TRACE_VERBOSITY=3",
 	},
 	// Run env: the shared determinism pin + DOTNET_ROOT (locate the shared framework),
 	// writable HOME/TMPDIR on the jail's /tmp, telemetry/first-run off, and
