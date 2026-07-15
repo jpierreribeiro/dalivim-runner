@@ -41,8 +41,12 @@ func TestNodeTest_Pass(t *testing.T) {
 	if res.ReportFormat != "tap13" {
 		t.Fatalf("expected report_format tap13, got %q", res.ReportFormat)
 	}
-	if !strings.Contains(res.TestReport, "TAP version 13") || !strings.Contains(res.TestReport, "# pass 2") || !strings.Contains(res.TestReport, "# fail 0") {
-		t.Fatalf("report should be TAP with 2 pass / 0 fail, got: %s", res.TestReport)
+	// Node 25 reports an isolated test file as one successful file-level
+	// subtest, while older Node releases count the two nested test() calls. The
+	// exit status and zero-failure TAP summary are the stable contract; the
+	// failing-suite test below proves nested assertions are actually executed.
+	if !strings.Contains(res.TestReport, "TAP version 13") || !strings.Contains(res.TestReport, "# fail 0") || !strings.Contains(res.TestReport, "# pass ") {
+		t.Fatalf("report should be successful TAP with zero failures, got: %s", res.TestReport)
 	}
 }
 
