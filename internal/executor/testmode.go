@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 
@@ -337,18 +338,53 @@ func classifyTestExit(exitCode, testsFailedExit int, reportProduced bool) string
 // a non-empty report was actually produced — the authoritative "the suite ran"
 // signal — and caps the report at maxBytes independently of the stdout limit,
 // flagging a cut. Shared by the interpreted and compiled test paths.
+//
+// File-backed reports are attacker-writable: student code and the framework run
+// under the same jail uid with /sandbox writable. Never use os.ReadFile on a path
+// from that tree. A malicious test could replace report.xml with a symlink to
+// /proc/self/environ; once the jail exits, a host-side path lookup would follow it
+// in the RUNNER process namespace and disclose RUNNER_SERVICE_TOKEN. os.Root keeps
+// every lookup beneath workDir, Lstat rejects a final symlink/special file, and the
+// SameFile check closes the lookup/open replacement race. The bounded reader also
+// prevents a max-file-size report from being allocated before truncation.
 func readTestReport(workDir, reportFile, stdout string, maxBytes int) (report string, produced, truncated bool) {
-	var raw string
 	if reportFile == "" {
-		raw = stdout
-		produced = raw != ""
-	} else if b, err := os.ReadFile(filepath.Join(workDir, reportFile)); err == nil && len(b) > 0 {
-		raw = string(b)
-		produced = true
+		if maxBytes > 0 && len(stdout) > maxBytes {
+			return stdout[:maxBytes], true, true
+		}
+		return stdout, stdout != "", false
 	}
-	if maxBytes > 0 && len(raw) > maxBytes {
-		raw = raw[:maxBytes]
-		truncated = true
+
+	root, err := os.OpenRoot(workDir)
+	if err != nil {
+		return "", false, false
 	}
-	return raw, produced, truncated
+	defer root.Close()
+
+	before, err := root.Lstat(reportFile)
+	if err != nil || !before.Mode().IsRegular() {
+		return "", false, false
+	}
+	f, err := root.Open(reportFile)
+	if err != nil {
+		return "", false, false
+	}
+	defer f.Close()
+	after, err := f.Stat()
+	if err != nil || !after.Mode().IsRegular() || !os.SameFile(before, after) {
+		return "", false, false
+	}
+
+	var reader io.Reader = f
+	if maxBytes > 0 {
+		reader = io.LimitReader(f, int64(maxBytes)+1)
+	}
+	b, err := io.ReadAll(reader)
+	if err != nil || len(b) == 0 {
+		return "", false, false
+	}
+	if maxBytes > 0 && len(b) > maxBytes {
+		return string(b[:maxBytes]), true, true
+	}
+	return string(b), true, false
 }
