@@ -49,19 +49,22 @@ func TestNetworkIsolation_DeniesEgress(t *testing.T) {
 	}
 }
 
-// TestNetworkIsolation_LoopbackOnly confirms the isolated namespace exposes no
-// routable interface: the child sees only loopback.
-func TestNetworkIsolation_LoopbackOnly(t *testing.T) {
+// TestNetworkIsolation_HasNoRoutes confirms the isolated namespace exposes no
+// route off-host. Reading the namespace-aware /proc route table is portable to
+// outer CI sandboxes that forbid even the socket syscall used by if_nameindex.
+func TestNetworkIsolation_HasNoRoutes(t *testing.T) {
 	rt := isolatedPython(t)
 	res := rt.Run(context.Background(), runnerapi.RunRequest{
-		SourceCode: "import socket; print(sorted(n for _, n in socket.if_nameindex()))",
-		TimeoutMs:  5000,
-		MemoryMB:   128,
+		SourceCode: "from pathlib import Path\n" +
+			"rows = Path('/proc/net/route').read_text().splitlines()[1:]\n" +
+			"print('ROUTES', len([row for row in rows if row.strip()]))\n",
+		TimeoutMs: 5000,
+		MemoryMB:  128,
 	})
 	if res.Status != runnerapi.StatusSuccess {
 		t.Fatalf("expected success, got %q (stderr=%q)", res.Status, res.Stderr)
 	}
-	if strings.Contains(res.Stdout, "eth") {
-		t.Fatalf("isolated run must not see an ethernet interface, got %q", res.Stdout)
+	if !strings.Contains(res.Stdout, "ROUTES 0") {
+		t.Fatalf("isolated run must have an empty route table, got %q", res.Stdout)
 	}
 }
