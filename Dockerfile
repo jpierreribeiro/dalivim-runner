@@ -20,7 +20,7 @@
 # ---------------------------------------------------------------------------
 
 # ---- build stage: compile a static Go binary ----
-FROM golang:1.26-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS build
+FROM golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS build
 WORKDIR /app
 # No external dependencies yet. When go.sum appears, add it here and run
 # `go mod download` before copying source to keep the module cache layer cached.

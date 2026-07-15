@@ -31,7 +31,7 @@ func testServer(t *testing.T, token string) http.Handler {
 	}
 	svc := executor.NewService(
 		executor.Limits{
-			DefaultTimeout: 3000, MaxTimeoutMs: 10000, DefaultMemory: 128, MaxMemoryMB: 512,
+			DefaultTimeout: 3000, MaxTimeoutMs: 10000, DefaultMemory: 128, MaxMemoryMB: 512, MaxOutputBytes: 64 * 1024,
 			Files: executor.FileCaps{MaxFiles: 50, MaxFileBytes: 262_144, MaxFilesBytes: 1_048_576, MaxPathBytes: 180, MaxPathDepth: 8},
 		},
 		executor.NewPython(sb, 64*1024, 256, 64, 4_000_000),
@@ -86,6 +86,7 @@ func TestLanguages_Endpoint(t *testing.T) {
 		Limits struct {
 			MaxTimeoutMs   int `json:"max_timeout_ms"`
 			MaxMemoryMB    int `json:"max_memory_mb"`
+			MaxOutputBytes int `json:"max_output_bytes"`
 			MaxSourceBytes int `json:"max_source_bytes"`
 			MaxBatch       int `json:"max_batch"`
 		} `json:"limits"`
@@ -99,7 +100,7 @@ func TestLanguages_Endpoint(t *testing.T) {
 	if resp.Languages[0].Kind != "interpreted" || !resp.Languages[0].MultiFile || !resp.Languages[0].Batch {
 		t.Fatalf("python capability flags wrong: %+v", resp.Languages[0])
 	}
-	if resp.Limits.MaxTimeoutMs != 10000 || resp.Limits.MaxMemoryMB != 512 ||
+	if resp.Limits.MaxTimeoutMs != 10000 || resp.Limits.MaxMemoryMB != 512 || resp.Limits.MaxOutputBytes != 64*1024 ||
 		resp.Limits.MaxSourceBytes != 200_000 || resp.Limits.MaxBatch != 100 {
 		t.Fatalf("effective limits wrong: %+v", resp.Limits)
 	}
@@ -259,6 +260,27 @@ func TestRun_StdinCap(t *testing.T) {
 	}
 }
 
+// TestRun_OutputLimitFieldHonored drives the engine's JSON field through HTTP
+// decoding, service clamping and the real runtime buffer.
+func TestRun_OutputLimitFieldHonored(t *testing.T) {
+	requirePython(t)
+	h := testServer(t, "")
+	rec := post(h, "/run", "", `{"language":"python","source_code":"print('x' * 8192)","timeout_ms":5000,"memory_mb":128,"output_limit_bytes":1024}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected run outcome, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var res runnerapi.RunResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if res.Status != runnerapi.StatusOutputLimitExceeded || !res.StdoutTruncated {
+		t.Fatalf("wire output cap was not enforced: %+v", res)
+	}
+	if max := 1024 + len("\n[output truncated]"); len(res.Stdout) > max {
+		t.Fatalf("stdout %d bytes exceeds wire cap %d", len(res.Stdout), max)
+	}
+}
+
 func TestRun_TokenRequired(t *testing.T) {
 	h := testServer(t, "sekret")
 	body := `{"language":"python","source_code":"print(1)","timeout_ms":1000,"memory_mb":128}`
@@ -374,6 +396,21 @@ func TestReadyz_ReflectsPosture(t *testing.T) {
 	relaxed.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if rr.Code != http.StatusOK {
 		t.Fatalf("relaxed requirement must be 200, got %d", rr.Code)
+	}
+
+	// A required control can fail after boot. The callback is live rather than a
+	// boot-time snapshot, so the next probe must remove the instance from service.
+	containmentReady := true
+	dynamic := New(svc, Config{
+		Backend: "nsjail", ReadyRequiresNsjail: true,
+		ContainmentReady: func() bool { return containmentReady },
+	}).Handler()
+	if rec := get(dynamic, "/readyz", ""); rec.Code != http.StatusOK {
+		t.Fatalf("healthy dynamic containment must be ready, got %d", rec.Code)
+	}
+	containmentReady = false
+	if rec := get(dynamic, "/readyz", ""); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("runtime containment failure must degrade readiness, got %d", rec.Code)
 	}
 }
 

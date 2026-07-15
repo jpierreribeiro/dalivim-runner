@@ -112,6 +112,26 @@ func TestPythonTest_ImportErrorIsRuntimeError(t *testing.T) {
 	}
 }
 
+// TestPythonTest_CleanExitBeforeReportIsRuntimeError is the hostile-student
+// regression: importing the submitted module can terminate pytest itself with a
+// clean exit before collection or hidden tests run. Exit code 0 alone must never
+// be promoted to success when the framework produced no completed report.
+func TestPythonTest_CleanExitBeforeReportIsRuntimeError(t *testing.T) {
+	requirePytest(t)
+	res := runTestMode(t, newPython(t), testReq([]runnerapi.RunFile{
+		{Path: "test_bypass.py", Content: "import os\nos._exit(0)\ndef test_must_run():\n    assert False\n"},
+	}))
+	if res.ExitCode != 0 {
+		t.Fatalf("exploit fixture must terminate the harness cleanly, got exit %d", res.ExitCode)
+	}
+	if res.TestReport != "" {
+		t.Fatalf("exploit fixture unexpectedly produced a report: %q", res.TestReport)
+	}
+	if res.Status != runnerapi.StatusRuntimeError {
+		t.Fatalf("clean exit without a report must fail closed as runtime_error, got %q", res.Status)
+	}
+}
+
 var testcaseName = regexp.MustCompile(`<testcase[^>]*\bname="([^"]*)"`)
 
 // TestPythonTest_DeterministicOrder pins the determinism guarantee at the level

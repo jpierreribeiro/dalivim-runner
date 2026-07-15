@@ -41,7 +41,8 @@ hardening (nsjail, cgroups, seccomp) plugs in.
   "source_code": "print('hello')",
   "stdin": "",
   "timeout_ms": 3000,
-  "memory_mb": 128
+  "memory_mb": 128,
+  "output_limit_bytes": 32768
 }
 ```
 
@@ -144,7 +145,8 @@ one raw `RunResult` per input, index-aligned (`results[i]` ran against
 
 `output_limit_exceeded` means the run wrote past the output cap and was **killed**
 for it (rather than truncated and left to burn its timeout): `stdout`/`stderr`
-still carry the captured first `RUNNER_MAX_OUTPUT_BYTES` (with the truncation
+still carry the captured first `output_limit_bytes` (or
+`RUNNER_MAX_OUTPUT_BYTES` when omitted, and never more than that ceiling), with the truncation
 marker) and `duration_ms` is well under the timeout. It is additive — a caller
 that does not special-case it sees an unsuccessful run with partial output.
 
@@ -315,13 +317,13 @@ deploy with `RUNNER_SANDBOX=require` is how you prove it engaged.
 
 | Env | Default | Effect |
 |---|---|---|
-| `RUNNER_SERVICE_TOKEN` | — | Shared secret; callers send `X-Runner-Token`. **Required** unless `RUNNER_ENV=development`. |
+| `RUNNER_SERVICE_TOKEN` | — | Shared secret (minimum 32 bytes outside development); callers send `X-Runner-Token`. **Required** unless `RUNNER_ENV=development`. |
 | `RUNNER_ENV` | (unset → strict) | `development` allows booting without a token. Leave unset in production. |
-| `RUNNER_METRICS_TOKEN` | (service token) | Gates `GET /metrics` (sent as `X-Runner-Token`). Unset → the service token gates it; `/metrics` is never public in production. |
+| `RUNNER_METRICS_TOKEN` | (service token) | Gates `GET /metrics` (sent as `X-Runner-Token`; minimum 32 bytes outside development). Unset → the service token gates it; `/metrics` is never public in production. |
 | `RUNNER_READY_REQUIRES` | `nsjail` | `/readyz` threshold: default requires the nsjail backend active (else `503`). `none` relaxes it (ready whenever the process is up) for intentional netns-only runs. |
 | `RUNNER_SANDBOX` | `auto` | Selects the containment backend. `auto`: use nsjail when its boot probe passes, else fall back to netns. `require`: nsjail only — **fail closed at boot** if unavailable. `off`: netns backend only. |
 | `RUNNER_NETWORK_ISOLATION` | `auto` | Governs the **netns** backend's egress guarantee (ignored when nsjail is active, which always isolates the network). `auto`: empty netns when permitted, else warn + fall back. `require`: fail closed at boot. `off`: disable. |
-| `RUNNER_CGROUP` | `auto` | Per-run **cgroup v2** memory/pids accounting under the nsjail backend (F-E/R6). `auto`: use the delegated subtree when usable, else fall back to `RLIMIT_AS`/heap-flag bounds. `require`: **fail closed at boot** if no usable cgroup. `off`: rlimit-only. When on, `memory.max`/`pids.max` bound each run and `memory_exceeded` is read from the kernel OOM event, not stderr. |
+| `RUNNER_CGROUP` | production: `require`; development: `auto` | Per-run **cgroup v2** memory/pids accounting under the nsjail backend (F-E/R6). `require`: **fail closed at boot and per run** if the cgroup is unusable. `auto`: use the delegated subtree when usable, else fall back to `RLIMIT_AS`/heap-flag bounds; this must be explicit outside development because Go/JS/Java/TypeScript cannot use `RLIMIT_AS`. `off`: rlimit-only. When on, `memory.max`/`pids.max` bound each run and `memory_exceeded` is read from the kernel OOM event, not stderr. |
 | `RUNNER_CGROUP_MOUNT` | `/sys/fs/cgroup/dalivim` | Delegated, writable cgroup v2 subtree the runner creates per-run leaves under (see `docs/DEPLOY.md` → cgroup delegation). Only consulted under `RUNNER_CGROUP=auto\|require`. |
 | `RUNNER_MAX_CONCURRENT_RUNS` | `8` | Max simultaneous executions; excess requests get `503` + `Retry-After`. `0` disables the limit. |
 | `RUNNER_MAX_PROCESSES` | `256` | Per-run process cap (`RLIMIT_NPROC`) applied by the nsjail backend against a jail-private uid; never applied process-wide (see Security → Fork bombs). |

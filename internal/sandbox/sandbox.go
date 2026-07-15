@@ -131,7 +131,8 @@ const (
 // out-of-band — today, cgroup v2 memory accounting under the nsjail backend. It
 // is returned alongside the command and consulted AFTER the run completes:
 //
-//	cmd, acct := sb.Command(ctx, spec)
+//	cmd, acct, err := sb.Command(ctx, spec)
+//	if err != nil { /* infrastructure failure: do not execute */ }
 //	if acct != nil { defer acct.Close() }
 //	... run cmd ...
 //	if acct != nil && acct.OOMKilled() { /* memory_exceeded, authoritatively */ }
@@ -162,7 +163,12 @@ type Sandbox interface {
 	// takes down the whole tree; it does not touch Stdin/Env/Stdout/Stderr. The
 	// returned RunAccounting is non-nil only when the backend attached out-of-band
 	// accounting (a per-run cgroup) to this command; callers must nil-check it.
-	Command(ctx context.Context, spec Spec) (*exec.Cmd, RunAccounting)
+	Command(ctx context.Context, spec Spec) (*exec.Cmd, RunAccounting, error)
+
+	// Ready reports whether the backend can still uphold the containment posture
+	// it promised at boot. A required per-run control that fails after startup
+	// makes this false so /readyz removes the instance from service.
+	Ready() bool
 
 	// NetworkIsolated reports whether runs execute with egress denied by THIS
 	// process (empty network namespace), independent of the deploy network.

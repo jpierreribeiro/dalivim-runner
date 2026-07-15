@@ -2,6 +2,7 @@ package config
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -101,12 +102,14 @@ func TestLoad_RequiresTokenOutsideDev(t *testing.T) {
 		t.Fatal("Load must fail closed when no token is set outside development")
 	}
 
-	t.Setenv("RUNNER_SERVICE_TOKENS", "t1, t2")
+	token1 := strings.Repeat("a", minTokenBytes)
+	token2 := strings.Repeat("b", minTokenBytes)
+	t.Setenv("RUNNER_SERVICE_TOKENS", token1+", "+token2)
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("a plural-only token set must satisfy the requirement: %v", err)
 	}
-	if cfg.ServiceToken != "t1" || len(cfg.ServiceTokens) != 2 {
+	if cfg.ServiceToken != token1 || len(cfg.ServiceTokens) != 2 {
 		t.Fatalf("primary/set not resolved from RUNNER_SERVICE_TOKENS: %q %v", cfg.ServiceToken, cfg.ServiceTokens)
 	}
 
@@ -114,5 +117,74 @@ func TestLoad_RequiresTokenOutsideDev(t *testing.T) {
 	t.Setenv("RUNNER_ENV", "development")
 	if _, err := Load(); err != nil {
 		t.Fatalf("development must permit an empty token set: %v", err)
+	}
+}
+
+func TestLoad_RejectsWeakProductionTokens(t *testing.T) {
+	t.Run("service token", func(t *testing.T) {
+		t.Setenv("RUNNER_ENV", "")
+		t.Setenv("RUNNER_SERVICE_TOKEN", "change-me")
+		t.Setenv("RUNNER_SERVICE_TOKENS", "")
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "RUNNER_SERVICE_TOKEN") {
+			t.Fatalf("weak production service token must fail closed, got %v", err)
+		}
+	})
+
+	t.Run("dedicated metrics token", func(t *testing.T) {
+		t.Setenv("RUNNER_ENV", "")
+		t.Setenv("RUNNER_SERVICE_TOKEN", strings.Repeat("s", minTokenBytes))
+		t.Setenv("RUNNER_SERVICE_TOKENS", "")
+		t.Setenv("RUNNER_METRICS_TOKEN", "metrics")
+		t.Setenv("RUNNER_METRICS_TOKENS", "")
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "RUNNER_METRICS_TOKEN") {
+			t.Fatalf("weak production metrics token must fail closed, got %v", err)
+		}
+	})
+
+	t.Run("development may use a short local token", func(t *testing.T) {
+		t.Setenv("RUNNER_ENV", "development")
+		t.Setenv("RUNNER_SERVICE_TOKEN", "local")
+		t.Setenv("RUNNER_METRICS_TOKEN", "local-metrics")
+		if _, err := Load(); err != nil {
+			t.Fatalf("development short tokens should remain convenient: %v", err)
+		}
+	})
+}
+
+// TestLoad_CgroupDefaultIsStrictInProduction pins RUN-02: an omitted cgroup
+// policy must not silently select auto for runtimes that cannot use RLIMIT_AS.
+// Development retains the convenient auto default, and an explicit production
+// auto remains an operator-visible availability tradeoff.
+func TestLoad_CgroupDefaultIsStrictInProduction(t *testing.T) {
+	t.Setenv("RUNNER_SERVICE_TOKEN", strings.Repeat("t", minTokenBytes))
+	t.Setenv("RUNNER_SERVICE_TOKENS", "")
+	t.Setenv("RUNNER_ENV", "")
+	t.Setenv("RUNNER_CGROUP", "   ")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CgroupPolicy != "require" {
+		t.Fatalf("production empty RUNNER_CGROUP = %q, want require", cfg.CgroupPolicy)
+	}
+
+	t.Setenv("RUNNER_ENV", "development")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CgroupPolicy != "" {
+		t.Fatalf("development empty RUNNER_CGROUP = %q, want empty (auto)", cfg.CgroupPolicy)
+	}
+
+	t.Setenv("RUNNER_ENV", "")
+	t.Setenv("RUNNER_CGROUP", "auto")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CgroupPolicy != "auto" {
+		t.Fatalf("explicit production RUNNER_CGROUP must be preserved, got %q", cfg.CgroupPolicy)
 	}
 }

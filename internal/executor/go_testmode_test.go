@@ -77,9 +77,9 @@ func TestGoTestCommand_ModPrep(t *testing.T) {
 }
 
 // TestClassifyTestExit pins the shared exit→status mapping used by every test-mode
-// language: 0=success, the framework's tests-failed code (with a report)=
-// tests_failed, everything else defers to the caller (runtime_error / a language
-// override like go's build-fail → compile_error).
+// language: 0 + a completed report=success, the framework's tests-failed code
+// (with a report)=tests_failed, everything else defers to the caller
+// (runtime_error / a language override like go's build-fail → compile_error).
 func TestClassifyTestExit(t *testing.T) {
 	cases := []struct {
 		exit, failExit int
@@ -87,7 +87,7 @@ func TestClassifyTestExit(t *testing.T) {
 		want           string
 	}{
 		{0, 1, true, runnerapi.StatusSuccess},
-		{0, 1, false, runnerapi.StatusSuccess}, // exit 0 is success even without a report
+		{0, 1, false, ""}, // exit 0 but no report → harness ended before proving a pass
 		{1, 1, true, runnerapi.StatusTestsFailed},
 		{1, 1, false, ""}, // exit 1 but no report → not a clean test-fail
 		{2, 1, true, ""},  // pytest collection error / other → caller decides

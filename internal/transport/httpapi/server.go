@@ -59,6 +59,9 @@ type Config struct {
 	// whether the RLIMIT_AS-incompatible runtimes are contained on a memory bomb here.
 	MemoryAccounting    string
 	ReadyRequiresNsjail bool // /readyz returns 503 unless nsjail is the active backend
+	// ContainmentReady is evaluated on every /readyz request. nil means no dynamic
+	// failure signal (used by tests/local callers); production wires Sandbox.Ready.
+	ContainmentReady func() bool
 }
 
 // defaultShutdownGrace is the drain window when Config.ShutdownGrace is unset
@@ -84,6 +87,7 @@ func New(svc *executor.Service, cfg Config) *Server {
 		networkIsolated:     cfg.NetworkIsolated,
 		memoryAccounting:    cfg.MemoryAccounting,
 		readyRequiresNsjail: cfg.ReadyRequiresNsjail,
+		containmentReady:    cfg.ContainmentReady,
 	}
 
 	// The valid service-token set is the union of the singular Token and the plural

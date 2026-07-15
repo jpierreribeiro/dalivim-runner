@@ -23,6 +23,7 @@ type limitsInfo struct {
 	MaxTimeoutMs            int `json:"max_timeout_ms"`
 	DefaultMemoryMB         int `json:"default_memory_mb"`
 	MaxMemoryMB             int `json:"max_memory_mb"`
+	MaxOutputBytes          int `json:"max_output_bytes"`
 	DefaultCompileTimeoutMs int `json:"default_compile_timeout_ms"`
 	MaxCompileTimeoutMs     int `json:"max_compile_timeout_ms"`
 	MaxSourceBytes          int `json:"max_source_bytes"`
@@ -49,6 +50,7 @@ func (h *handler) languages(w http.ResponseWriter, _ *http.Request) {
 			MaxTimeoutMs:            lim.MaxTimeoutMs,
 			DefaultMemoryMB:         lim.DefaultMemory,
 			MaxMemoryMB:             lim.MaxMemoryMB,
+			MaxOutputBytes:          lim.MaxOutputBytes,
 			DefaultCompileTimeoutMs: lim.DefaultCompileTimeout,
 			MaxCompileTimeoutMs:     lim.MaxCompileTimeoutMs,
 			MaxSourceBytes:          h.maxSourceBytes,

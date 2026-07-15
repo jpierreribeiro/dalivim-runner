@@ -123,6 +123,23 @@ func TestPython_OutputFloodKilled(t *testing.T) {
 	}
 }
 
+// TestPython_RequestOutputLimitHonored proves a per-request budget reaches the
+// actual stream buffer when a Runtime is invoked directly.
+func TestPython_RequestOutputLimitHonored(t *testing.T) {
+	requirePython(t)
+	const requested = 1024
+	res := run(t, newPython(t), runnerapi.RunRequest{
+		SourceCode: "print('x' * 8192)", TimeoutMs: 5000, MemoryMB: 128,
+		OutputLimitBytes: requested,
+	})
+	if res.Status != runnerapi.StatusOutputLimitExceeded || !res.StdoutTruncated {
+		t.Fatalf("requested output cap must kill and truncate, got status=%q truncated=%v", res.Status, res.StdoutTruncated)
+	}
+	if max := requested + len("\n[output truncated]"); len(res.Stdout) > max {
+		t.Fatalf("stdout %d bytes exceeds requested cap %d", len(res.Stdout), max)
+	}
+}
+
 // TestPython_MemoryExceededHeuristic pins the current, fragile classification:
 // memory_exceeded is inferred purely from the substring "MemoryError" in stderr,
 // not from a real memory signal. This characterizes today's behavior so its

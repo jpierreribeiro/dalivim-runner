@@ -32,7 +32,10 @@ type flooredStub struct {
 func (s *flooredStub) LimitFloors() Floors { return s.floors }
 
 func newService(rt Runtime) *Service {
-	return NewService(Limits{DefaultTimeout: 3000, MaxTimeoutMs: 10000, DefaultMemory: 128, MaxMemoryMB: 512}, rt)
+	return NewService(Limits{
+		DefaultTimeout: 3000, MaxTimeoutMs: 10000,
+		DefaultMemory: 128, MaxMemoryMB: 512, MaxOutputBytes: 64 * 1024,
+	}, rt)
 }
 
 func TestService_UnsupportedLanguage(t *testing.T) {
@@ -47,7 +50,7 @@ func TestService_ClampsLimitsToCeiling(t *testing.T) {
 	stub := &stubRuntime{lang: "python"}
 	svc := newService(stub)
 	_, err := svc.Run(context.Background(), runnerapi.RunRequest{
-		Language: "python", SourceCode: "x", TimeoutMs: 999999, MemoryMB: 999999,
+		Language: "python", SourceCode: "x", TimeoutMs: 999999, MemoryMB: 999999, OutputLimitBytes: 999999,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -57,6 +60,22 @@ func TestService_ClampsLimitsToCeiling(t *testing.T) {
 	}
 	if stub.got.MemoryMB != 512 {
 		t.Fatalf("memory not clamped to max, got %d", stub.got.MemoryMB)
+	}
+	if stub.got.OutputLimitBytes != 64*1024 {
+		t.Fatalf("output limit not clamped to max, got %d", stub.got.OutputLimitBytes)
+	}
+}
+
+func TestService_HonorsSmallerOutputLimit(t *testing.T) {
+	stub := &stubRuntime{lang: "python"}
+	svc := newService(stub)
+	if _, err := svc.Run(context.Background(), runnerapi.RunRequest{
+		Language: "python", SourceCode: "x", OutputLimitBytes: 2048,
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stub.got.OutputLimitBytes != 2048 {
+		t.Fatalf("smaller caller output limit must be honored, got %d", stub.got.OutputLimitBytes)
 	}
 }
 

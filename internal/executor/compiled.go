@@ -631,7 +631,7 @@ func (r *compiledRuntime) compile(ctx context.Context, req runnerapi.RunRequest,
 	if r.spec.capAddressSpace {
 		compileAS = r.compileMemoryMB
 	}
-	cmd, acct := r.sandbox.Command(cctx, sandbox.Spec{
+	cmd, acct, err := r.sandbox.Command(cctx, sandbox.Spec{
 		Argv:           argv,
 		WorkDir:        workDir,
 		TimeoutMs:      timeout,
@@ -643,6 +643,9 @@ func (r *compiledRuntime) compile(ctx context.Context, req runnerapi.RunRequest,
 		Writable:       true, // the compiler writes its artifact into /sandbox
 		MinimalRootfs:  false,
 	})
+	if err != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "sandbox containment unavailable"}, false
+	}
 	if acct != nil {
 		defer acct.Close()
 	}
@@ -651,9 +654,10 @@ func (r *compiledRuntime) compile(ctx context.Context, req runnerapi.RunRequest,
 	// GOCACHE/GOPATH; extraCompileEnv adds the multi-file-only offline module policy.
 	cmd.Env = append([]string{"PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin", "TMPDIR=/tmp"}, r.spec.compileEnv...)
 	cmd.Env = append(cmd.Env, plan.extraCompileEnv...)
-	stderr := &limitedBuffer{limit: r.outputLimit}
+	outputLimit := effectiveOutputLimit(req.OutputLimitBytes, r.outputLimit)
+	stderr := &limitedBuffer{limit: outputLimit}
 	cmd.Stderr = stderr
-	cmd.Stdout = &limitedBuffer{limit: r.outputLimit}
+	cmd.Stdout = &limitedBuffer{limit: outputLimit}
 
 	runErr := cmd.Run()
 
@@ -709,7 +713,7 @@ func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest,
 	if r.spec.capAddressSpace {
 		runAS = req.MemoryMB
 	}
-	cmd, acct := r.sandbox.Command(rctx, sandbox.Spec{
+	cmd, acct, err := r.sandbox.Command(rctx, sandbox.Spec{
 		Argv:           argv,
 		WorkDir:        workDir,
 		TimeoutMs:      req.TimeoutMs,
@@ -724,6 +728,9 @@ func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest,
 		MinimalRootfs: !r.spec.runFullRootfs,
 		Seccomp:       r.runSeccomp, // tight static allowlist when enabled (default: denylist)
 	})
+	if err != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "sandbox containment unavailable"}
+	}
 	if acct != nil {
 		defer acct.Close()
 	}
@@ -737,8 +744,9 @@ func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest,
 	}
 
 	onFlood := func() { cancelCause(errOutputLimit) }
-	stdout := &limitedBuffer{limit: r.outputLimit, onLimit: onFlood}
-	stderr := &limitedBuffer{limit: r.outputLimit, onLimit: onFlood}
+	outputLimit := effectiveOutputLimit(req.OutputLimitBytes, r.outputLimit)
+	stdout := &limitedBuffer{limit: outputLimit, onLimit: onFlood}
+	stderr := &limitedBuffer{limit: outputLimit, onLimit: onFlood}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
@@ -834,7 +842,7 @@ func (r *compiledRuntime) executeTest(ctx context.Context, req runnerapi.RunRequ
 	ctx, cancelCause := context.WithCancelCause(ctx)
 	defer cancelCause(nil)
 
-	cmd, acct := r.sandbox.Command(ctx, sandbox.Spec{
+	cmd, acct, err := r.sandbox.Command(ctx, sandbox.Spec{
 		// {mem} => the run's memory budget (Java's -Xmx heap flag); go's argv has no
 		// placeholder, so subst is a no-op there.
 		Argv:      subst(tc.argv, "{mem}", strconv.Itoa(req.MemoryMB)),
@@ -855,6 +863,9 @@ func (r *compiledRuntime) executeTest(ctx context.Context, req runnerapi.RunRequ
 		MinimalRootfs: false, // the toolchain must be present to compile+run
 		Seccomp:       sandbox.SeccompDenylist,
 	})
+	if err != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "sandbox containment unavailable"}
+	}
 	if acct != nil {
 		defer acct.Close()
 	}
@@ -862,14 +873,15 @@ func (r *compiledRuntime) executeTest(ctx context.Context, req runnerapi.RunRequ
 	cmd.Env = tc.env
 
 	onFlood := func() { cancelCause(errOutputLimit) }
+	outputLimit := effectiveOutputLimit(req.OutputLimitBytes, r.outputLimit)
 	// The report rides stdout (go test -json), so size that buffer to the report
 	// cap, not the smaller stdout cap; stderr keeps the ordinary output cap.
 	reportLimit := r.maxReportBytes
 	if reportLimit <= 0 {
-		reportLimit = r.outputLimit
+		reportLimit = outputLimit
 	}
 	stdout := &limitedBuffer{limit: reportLimit, onLimit: onFlood}
-	stderr := &limitedBuffer{limit: r.outputLimit, onLimit: onFlood}
+	stderr := &limitedBuffer{limit: outputLimit, onLimit: onFlood}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 

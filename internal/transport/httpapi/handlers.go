@@ -25,11 +25,14 @@ type handler struct {
 	maxBatch           int // most stdins[] elements a batch request may carry (G6)
 	maxBatchStdinBytes int // summed stdin bytes across a batch (G6)
 
-	// readiness posture (G4.3), resolved once at boot.
+	// readiness posture (G4.3). Backend/network labels are resolved at boot;
+	// containmentReady is live so a required control failing mid-process removes
+	// the instance from service.
 	backend             string // active sandbox backend ("nsjail"/"netns"/"none")
 	networkIsolated     bool
 	memoryAccounting    string // "cgroup-v2:<parent>" or "rlimit-only"
 	readyRequiresNsjail bool
+	containmentReady    func() bool
 }
 
 // run handles POST /run: the generic, language-dispatched entry point. The
@@ -305,15 +308,17 @@ func (h *handler) health(w http.ResponseWriter, _ *http.Request) {
 // untrusted code less contained. Reports the resolved posture (no secrets), so it
 // may be public. Distinct from /healthz, which only answers "is the process up".
 func (h *handler) ready(w http.ResponseWriter, _ *http.Request) {
-	ok := !h.readyRequiresNsjail || h.backend == "nsjail"
+	containmentOK := h.containmentReady == nil || h.containmentReady()
+	ok := (!h.readyRequiresNsjail || h.backend == "nsjail") && containmentOK
 	w.Header().Set("Content-Type", "application/json")
 	if !ok {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"ready":            ok,
-		"backend":          h.backend,
-		"network_isolated": h.networkIsolated,
+		"ready":             ok,
+		"backend":           h.backend,
+		"network_isolated":  h.networkIsolated,
+		"containment_ready": containmentOK,
 		// The per-run memory-bound posture: "cgroup-v2:<parent>" means each run has
 		// an authoritative memory.max (so the RLIMIT_AS-incompatible runtimes —
 		// Go/JS/Java — are contained on a memory bomb and classified memory_exceeded

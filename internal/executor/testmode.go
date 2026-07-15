@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 
@@ -310,19 +311,20 @@ func supportsTestMode(lang string) bool {
 // classification switch, evaluated after timeout/memory/output but before the
 // generic runtime_error default:
 //
-//   - exit == 0                          → success (all tests passed)
+//   - exit == 0 && report               → success (all tests passed)
 //   - exit == testsFailedExit && report  → tests_failed (ran, some failed)
 //   - anything else                      → "" (caller falls through to runtime_error)
 //
-// The report-produced guard is the authoritative signal — the runner tells "tests
-// failed" from "harness crashed" by the presence of a completed report, not by
-// guessing from stderr. A collection/import error (pytest exit 2) never matches
-// testsFailedExit, so it stays runtime_error even though pytest also emits a
-// report for it. (A go BUILD failure also exits 1, so the compiled path checks its
+// The report-produced guard applies to BOTH pass and fail: untrusted student code
+// runs inside the framework process and can terminate it with exit(0) before any
+// test executes. An exit code without a completed report is a harness crash, never
+// proof that tests passed. A collection/import error (pytest exit 2) never matches
+// testsFailedExit, so it stays runtime_error even though pytest also emits a report
+// for it. (A go BUILD failure also exits 1, so the compiled path checks its
 // buildFailMarker BEFORE calling this — see the compiled executeTest.)
 func classifyTestExit(exitCode, testsFailedExit int, reportProduced bool) string {
 	switch {
-	case exitCode == 0:
+	case exitCode == 0 && reportProduced:
 		return runnerapi.StatusSuccess
 	case exitCode == testsFailedExit && reportProduced:
 		return runnerapi.StatusTestsFailed
@@ -337,18 +339,53 @@ func classifyTestExit(exitCode, testsFailedExit int, reportProduced bool) string
 // a non-empty report was actually produced — the authoritative "the suite ran"
 // signal — and caps the report at maxBytes independently of the stdout limit,
 // flagging a cut. Shared by the interpreted and compiled test paths.
+//
+// File-backed reports are attacker-writable: student code and the framework run
+// under the same jail uid with /sandbox writable. Never use os.ReadFile on a path
+// from that tree. A malicious test could replace report.xml with a symlink to
+// /proc/self/environ; once the jail exits, a host-side path lookup would follow it
+// in the RUNNER process namespace and disclose RUNNER_SERVICE_TOKEN. os.Root keeps
+// every lookup beneath workDir, Lstat rejects a final symlink/special file, and the
+// SameFile check closes the lookup/open replacement race. The bounded reader also
+// prevents a max-file-size report from being allocated before truncation.
 func readTestReport(workDir, reportFile, stdout string, maxBytes int) (report string, produced, truncated bool) {
-	var raw string
 	if reportFile == "" {
-		raw = stdout
-		produced = raw != ""
-	} else if b, err := os.ReadFile(filepath.Join(workDir, reportFile)); err == nil && len(b) > 0 {
-		raw = string(b)
-		produced = true
+		if maxBytes > 0 && len(stdout) > maxBytes {
+			return stdout[:maxBytes], true, true
+		}
+		return stdout, stdout != "", false
 	}
-	if maxBytes > 0 && len(raw) > maxBytes {
-		raw = raw[:maxBytes]
-		truncated = true
+
+	root, err := os.OpenRoot(workDir)
+	if err != nil {
+		return "", false, false
 	}
-	return raw, produced, truncated
+	defer root.Close()
+
+	before, err := root.Lstat(reportFile)
+	if err != nil || !before.Mode().IsRegular() {
+		return "", false, false
+	}
+	f, err := root.Open(reportFile)
+	if err != nil {
+		return "", false, false
+	}
+	defer f.Close()
+	after, err := f.Stat()
+	if err != nil || !after.Mode().IsRegular() || !os.SameFile(before, after) {
+		return "", false, false
+	}
+
+	var reader io.Reader = f
+	if maxBytes > 0 {
+		reader = io.LimitReader(f, int64(maxBytes)+1)
+	}
+	b, err := io.ReadAll(reader)
+	if err != nil || len(b) == 0 {
+		return "", false, false
+	}
+	if maxBytes > 0 && len(b) > maxBytes {
+		return string(b[:maxBytes]), true, true
+	}
+	return string(b), true, false
 }

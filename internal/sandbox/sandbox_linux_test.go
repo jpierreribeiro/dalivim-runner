@@ -1,6 +1,8 @@
 package sandbox
 
 import (
+	"context"
+	"path/filepath"
 	"syscall"
 	"testing"
 )
@@ -72,6 +74,59 @@ func TestConfigure_AutoFallsBackToNetns(t *testing.T) {
 	}
 	if sb.Backend() != "netns" {
 		t.Fatalf("want netns fallback, got %q", sb.Backend())
+	}
+}
+
+// A required cgroup cannot exist on the netns fallback. This closes the gap
+// where production's strict cgroup default could otherwise be bypassed merely
+// because RUNNER_SANDBOX remained auto and nsjail was absent.
+func TestConfigure_CgroupRequireForbidsNetnsFallback(t *testing.T) {
+	if _, err := Configure("off", "off", "require", ""); err == nil {
+		t.Fatal("RUNNER_CGROUP=require must reject an explicitly disabled nsjail backend")
+	}
+	if _, err := probeNsjailAvailable(); err == nil {
+		t.Skip("nsjail is available here; cannot exercise the automatic fallback")
+	}
+	if _, err := Configure("auto", "off", "require", "/definitely/not/a/cgroup"); err == nil {
+		t.Fatal("RUNNER_CGROUP=require must fail when auto cannot activate nsjail")
+	}
+}
+
+// TestNsjailCommand_RequiredCgroupFailsClosed pins RUN-01 at the per-run seam:
+// losing the delegated subtree after a successful boot must not construct an
+// executable command, and the failure must make readiness sticky-false.
+func TestNsjailCommand_RequiredCgroupFailsClosed(t *testing.T) {
+	s := &nsjailSandbox{
+		bin:        "/bin/true",
+		cg:         &cgroupManager{parent: filepath.Join(t.TempDir(), "missing")},
+		cgRequired: true,
+	}
+	cmd, acct, err := s.Command(context.Background(), Spec{
+		Argv: []string{"/bin/true"}, WorkDir: t.TempDir(), MemoryMB: 64, MaxProcesses: 8,
+	})
+	if err == nil || cmd != nil || acct != nil {
+		t.Fatalf("required cgroup failure must return (nil,nil,error), got (%v,%v,%v)", cmd, acct, err)
+	}
+	if s.Ready() {
+		t.Fatal("required cgroup failure must degrade readiness")
+	}
+}
+
+// auto is an explicit availability tradeoff: it may retain the old rlimit-only
+// fallback, and a transient begin failure must not mark the instance unhealthy.
+func TestNsjailCommand_AutoCgroupMayFallback(t *testing.T) {
+	s := &nsjailSandbox{
+		bin: "/bin/true",
+		cg:  &cgroupManager{parent: filepath.Join(t.TempDir(), "missing")},
+	}
+	cmd, acct, err := s.Command(context.Background(), Spec{
+		Argv: []string{"/bin/true"}, WorkDir: t.TempDir(), MemoryMB: 64, MaxProcesses: 8,
+	})
+	if err != nil || cmd == nil || acct != nil {
+		t.Fatalf("auto cgroup failure should fall back to a command without accounting, got (%v,%v,%v)", cmd, acct, err)
+	}
+	if !s.Ready() {
+		t.Fatal("auto fallback must not trip required-containment readiness")
 	}
 }
 

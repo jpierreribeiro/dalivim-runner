@@ -169,7 +169,7 @@ func (r *interpretedRuntime) execute(ctx context.Context, req runnerapi.RunReque
 		addressSpaceMB = req.MemoryMB
 	}
 
-	cmd, acct := r.sandbox.Command(ctx, sandbox.Spec{
+	cmd, acct, err := r.sandbox.Command(ctx, sandbox.Spec{
 		Argv:           argv,
 		WorkDir:        workDir,
 		TimeoutMs:      req.TimeoutMs,
@@ -178,6 +178,9 @@ func (r *interpretedRuntime) execute(ctx context.Context, req runnerapi.RunReque
 		MaxProcesses:   r.maxProcesses,
 		MaxFileSizeMB:  r.maxFileSizeMB,
 	})
+	if err != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "sandbox containment unavailable"}
+	}
 	if acct != nil {
 		defer acct.Close()
 	}
@@ -187,8 +190,9 @@ func (r *interpretedRuntime) execute(ctx context.Context, req runnerapi.RunReque
 	// Both streams share one kill signal so a flood on either (stdout OR stderr)
 	// stops the run; the child is SIGKILLed as soon as one crosses the cap.
 	onFlood := func() { cancelCause(errOutputLimit) }
-	stdout := &limitedBuffer{limit: r.outputLimit, onLimit: onFlood}
-	stderr := &limitedBuffer{limit: r.outputLimit, onLimit: onFlood}
+	outputLimit := effectiveOutputLimit(req.OutputLimitBytes, r.outputLimit)
+	stdout := &limitedBuffer{limit: outputLimit, onLimit: onFlood}
+	stderr := &limitedBuffer{limit: outputLimit, onLimit: onFlood}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
@@ -332,7 +336,7 @@ func (r *interpretedRuntime) executeTest(ctx context.Context, req runnerapi.RunR
 
 	argv := append([]string{r.bin}, tc.argvTail(target, tc.reportFile)...)
 
-	cmd, acct := r.sandbox.Command(ctx, sandbox.Spec{
+	cmd, acct, err := r.sandbox.Command(ctx, sandbox.Spec{
 		Argv:      argv,
 		WorkDir:   workDir,
 		TimeoutMs: req.TimeoutMs,
@@ -351,6 +355,9 @@ func (r *interpretedRuntime) executeTest(ctx context.Context, req runnerapi.RunR
 		// rootfs is unchanged; only the ephemeral per-run workdir mount is writable.
 		Writable: true,
 	})
+	if err != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "sandbox containment unavailable"}
+	}
 	if acct != nil {
 		defer acct.Close()
 	}
@@ -359,8 +366,9 @@ func (r *interpretedRuntime) executeTest(ctx context.Context, req runnerapi.RunR
 	cmd.Env = tc.env
 
 	onFlood := func() { cancelCause(errOutputLimit) }
-	stdout := &limitedBuffer{limit: r.outputLimit, onLimit: onFlood}
-	stderr := &limitedBuffer{limit: r.outputLimit, onLimit: onFlood}
+	outputLimit := effectiveOutputLimit(req.OutputLimitBytes, r.outputLimit)
+	stdout := &limitedBuffer{limit: outputLimit, onLimit: onFlood}
+	stderr := &limitedBuffer{limit: outputLimit, onLimit: onFlood}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 

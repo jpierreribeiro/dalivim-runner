@@ -153,11 +153,12 @@ exactly as before.
 > `deploy.sh verify` fails closed if `/readyz` is not `cgroup-v2`, so a rlimit-only
 > deploy cannot pass off the weaker guarantee as R6.
 
-**Ship prod now with `RUNNER_CGROUP=auto`** (or leave it unset — `auto` is the
-default). If no delegated cgroup is present it silently falls back to rlimits, and
-your `--memory=1g` on the container is already a coarse OOM ceiling. Turning on the
-full per-run accounting below is a maintenance-window task; don't block the launch
-on it.
+Production resolves an omitted `RUNNER_CGROUP` to **`require`** and refuses to
+start or execute a run if the delegated cgroup is unavailable. This is necessary
+for Go/JS/Java/TypeScript, which cannot use `RLIMIT_AS` and otherwise lack a
+per-run RSS ceiling. `auto` is still available only as an explicit maintenance or
+development tradeoff; do not accept untrusted runs in those runtimes while the
+instance reports `memory_accounting=rlimit-only`.
 
 ### The one gotcha: the runner's cgroup must live INSIDE the delegated subtree
 
@@ -258,9 +259,10 @@ container is still outside the subtree (check `--cgroup-parent` and the driver).
 ### Cut the real runner over
 
 Once the throwaway shows `cgroup memory accounting ENABLED` + `memory_exceeded`,
-re-run the **section 7** `docker run` for the real `runner` with these additions.
-Start with `RUNNER_CGROUP=auto` — it uses the cgroup when present and falls back to
-rlimits otherwise, so it is safe even before persistence is set up.
+make the delegated subtree reboot-safe (next section), then re-run the **section
+7** `docker run` for the real `runner` with these additions. Use
+`RUNNER_CGROUP=require`; an explicit `auto` is only suitable for a maintenance
+bootstrap before the runner receives untrusted traffic.
 
 If a runner is **already live** (you are hardening an existing box, not a fresh
 install), capture its token from the running container **before** you `docker rm`
@@ -278,13 +280,13 @@ The additions to the section 7 `docker run`:
   --cgroup-parent=/dalivim \
   --cgroupns=host \
   -v /sys/fs/cgroup/dalivim:/sys/fs/cgroup/dalivim \
-  -e RUNNER_CGROUP=auto \
+  -e RUNNER_CGROUP=require \
   -e RUNNER_CGROUP_MOUNT=/sys/fs/cgroup/dalivim \
 ```
 
-Switch that `auto` to `require` **only after** the reboot-safe step below — with
-`require`, a missing subtree fails the boot closed, which downs the runner on the
-next reboot unless the subtree is recreated automatically.
+Complete the reboot-safe step below **before** this production cutover. With
+`require` (also the production default when the variable is omitted), a missing
+subtree fails the boot closed instead of serving an unbounded runtime.
 
 ### Make it reboot-safe — REQUIRED before you switch to `require`
 
@@ -293,8 +295,8 @@ next reboot unless the subtree is recreated automatically.
 > reboot means: subtree gone → Docker restarts the runner → the R6 boot probe
 > finds no delegated cgroup → **fail-closed → the runner does not come back up**
 > until you re-create the subtree by hand. So `require` without the unit below is
-> an availability time bomb, not hardening. Stay on `RUNNER_CGROUP=auto` until the
-> subtree is recreated automatically on every boot.
+> an availability time bomb. If `auto` is used temporarily while installing the
+> unit, keep the runner out of rotation until the subtree is recreated reliably.
 
 Recreate the delegated subtree **before Docker starts**, with a systemd oneshot:
 
@@ -321,10 +323,10 @@ sudo reboot                          # then, after it's back:
 stat /sys/fs/cgroup/dalivim && ls -ld /sys/fs/cgroup/dalivim   # exists, owned by 1000
 ```
 
-**Only after** the subtree is recreated automatically on boot, flip the real
-runner to `-e RUNNER_CGROUP=require` — now the fail-closed behaviour is a feature
-(it refuses to run untrusted code without the memory ceiling) rather than a
-reboot trap, because the cgroup is guaranteed present.
+**Only after** the subtree is recreated automatically on boot, start the real
+runner with `-e RUNNER_CGROUP=require` (or omit it in production, which resolves
+to the same policy). The runner then refuses untrusted code without the memory
+ceiling without becoming a reboot trap.
 
 The container runs as non-root uid 1000 with no added caps throughout.
 

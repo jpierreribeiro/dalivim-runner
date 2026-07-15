@@ -25,7 +25,7 @@ type Config struct {
 	Development   bool   // RUNNER_ENV=development relaxes the token requirement
 	SandboxPolicy string // RUNNER_SANDBOX: auto|require|off (empty => auto) — nsjail selection
 	NetworkPolicy string // RUNNER_NETWORK_ISOLATION: auto|require|off (empty => auto) — netns backend
-	CgroupPolicy  string // RUNNER_CGROUP: auto|require|off (empty => auto) — per-run cgroup v2 accounting
+	CgroupPolicy  string // RUNNER_CGROUP: auto|require|off (empty => require in production, auto in development)
 	CgroupMount   string // RUNNER_CGROUP_MOUNT: delegated writable cgroup v2 subtree for per-run leaves
 	MaxProcesses  int    // per-run RLIMIT_NPROC applied by the nsjail backend (fork-bomb cap)
 	MaxFileSizeMB int    // per-run RLIMIT_FSIZE applied by the nsjail backend
@@ -96,6 +96,11 @@ type Config struct {
 	StaticSeccomp string
 }
 
+// minTokenBytes matches the gateway's production PSK requirement. The runner is
+// the RCE boundary, so accepting a merely non-empty secret here would let a
+// misconfigured deployment bypass the stronger check in the caller.
+const minTokenBytes = 32
+
 // maxTokens caps how many valid tokens a set may carry. A rotation needs only
 // two live at once (old + new); the cap keeps a fat-fingered env from turning
 // the constant-time per-candidate compare into an unbounded loop.
@@ -105,6 +110,7 @@ const maxTokens = 8
 // exiting) so the caller owns process lifecycle.
 func Load() (Config, error) {
 	serviceTokens := tokenSet(os.Getenv("RUNNER_SERVICE_TOKEN"), os.Getenv("RUNNER_SERVICE_TOKENS"))
+	development := strings.EqualFold(strings.TrimSpace(os.Getenv("RUNNER_ENV")), "development")
 	primary := ""
 	if len(serviceTokens) > 0 {
 		primary = serviceTokens[0]
@@ -113,10 +119,10 @@ func Load() (Config, error) {
 		Addr:                ":" + port(),
 		ServiceToken:        primary,
 		ServiceTokens:       serviceTokens,
-		Development:         strings.EqualFold(strings.TrimSpace(os.Getenv("RUNNER_ENV")), "development"),
+		Development:         development,
 		SandboxPolicy:       os.Getenv("RUNNER_SANDBOX"),
 		NetworkPolicy:       os.Getenv("RUNNER_NETWORK_ISOLATION"),
-		CgroupPolicy:        os.Getenv("RUNNER_CGROUP"),
+		CgroupPolicy:        cgroupPolicy(development),
 		CgroupMount:         cgroupMount(),
 		MaxProcesses:        envInt("RUNNER_MAX_PROCESSES", 256),
 		MaxFileSizeMB:       envInt("RUNNER_MAX_FILE_SIZE_MB", 64),
@@ -161,7 +167,37 @@ func Load() (Config, error) {
 	if len(cfg.ServiceTokens) == 0 && !cfg.Development {
 		return Config{}, fmt.Errorf("RUNNER_SERVICE_TOKEN(S) is required outside development; set RUNNER_SERVICE_TOKEN (or a comma/space-separated RUNNER_SERVICE_TOKENS for zero-downtime rotation), and send X-Runner-Token from the gateway, or set RUNNER_ENV=development for local use")
 	}
+	if !cfg.Development {
+		if err := requireStrongTokens("RUNNER_SERVICE_TOKEN(S)", cfg.ServiceTokens); err != nil {
+			return Config{}, err
+		}
+		if err := requireStrongTokens("RUNNER_METRICS_TOKEN(S)", cfg.MetricsTokens); err != nil {
+			return Config{}, err
+		}
+	}
 	return cfg, nil
+}
+
+func requireStrongTokens(name string, tokens []string) error {
+	for _, token := range tokens {
+		if len(token) < minTokenBytes {
+			return fmt.Errorf("%s entries must be at least %d bytes outside development", name, minTokenBytes)
+		}
+	}
+	return nil
+}
+
+// cgroupPolicy makes an omitted RUNNER_CGROUP fail closed outside development.
+// Several enabled runtimes (Go, JavaScript, Java and TypeScript) cannot tolerate
+// RLIMIT_AS, so the former implicit auto fallback could leave them without a
+// per-run RSS ceiling. Operators may still choose auto explicitly as an
+// availability tradeoff; an omission in production is never that choice.
+func cgroupPolicy(development bool) string {
+	policy := strings.TrimSpace(os.Getenv("RUNNER_CGROUP"))
+	if policy == "" && !development {
+		return "require"
+	}
+	return policy
 }
 
 // tokenSet parses one or more env sources into a deduplicated, order-preserving
