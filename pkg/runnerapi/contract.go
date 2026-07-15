@@ -48,6 +48,10 @@ type RunRequest struct {
 	Stdin     string `json:"stdin,omitempty"`
 	TimeoutMs int    `json:"timeout_ms,omitempty"`
 	MemoryMB  int    `json:"memory_mb,omitempty"`
+	// OutputLimitBytes caps each captured stdout/stderr stream for this request.
+	// Zero uses the service ceiling; a value above it is clamped down. Callers may
+	// therefore tighten the output budget but can never relax operator policy.
+	OutputLimitBytes int `json:"output_limit_bytes,omitempty"`
 
 	// Stdins is the batch form (G6): the program is prepared once (for compiled
 	// languages, compiled once) and executed once per element, each execution in

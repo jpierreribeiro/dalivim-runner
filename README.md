@@ -41,7 +41,8 @@ hardening (nsjail, cgroups, seccomp) plugs in.
   "source_code": "print('hello')",
   "stdin": "",
   "timeout_ms": 3000,
-  "memory_mb": 128
+  "memory_mb": 128,
+  "output_limit_bytes": 32768
 }
 ```
 
@@ -144,7 +145,8 @@ one raw `RunResult` per input, index-aligned (`results[i]` ran against
 
 `output_limit_exceeded` means the run wrote past the output cap and was **killed**
 for it (rather than truncated and left to burn its timeout): `stdout`/`stderr`
-still carry the captured first `RUNNER_MAX_OUTPUT_BYTES` (with the truncation
+still carry the captured first `output_limit_bytes` (or
+`RUNNER_MAX_OUTPUT_BYTES` when omitted, and never more than that ceiling), with the truncation
 marker) and `duration_ms` is well under the timeout. It is additive — a caller
 that does not special-case it sees an unsuccessful run with partial output.
 

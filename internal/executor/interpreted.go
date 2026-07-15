@@ -190,8 +190,9 @@ func (r *interpretedRuntime) execute(ctx context.Context, req runnerapi.RunReque
 	// Both streams share one kill signal so a flood on either (stdout OR stderr)
 	// stops the run; the child is SIGKILLed as soon as one crosses the cap.
 	onFlood := func() { cancelCause(errOutputLimit) }
-	stdout := &limitedBuffer{limit: r.outputLimit, onLimit: onFlood}
-	stderr := &limitedBuffer{limit: r.outputLimit, onLimit: onFlood}
+	outputLimit := effectiveOutputLimit(req.OutputLimitBytes, r.outputLimit)
+	stdout := &limitedBuffer{limit: outputLimit, onLimit: onFlood}
+	stderr := &limitedBuffer{limit: outputLimit, onLimit: onFlood}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
@@ -365,8 +366,9 @@ func (r *interpretedRuntime) executeTest(ctx context.Context, req runnerapi.RunR
 	cmd.Env = tc.env
 
 	onFlood := func() { cancelCause(errOutputLimit) }
-	stdout := &limitedBuffer{limit: r.outputLimit, onLimit: onFlood}
-	stderr := &limitedBuffer{limit: r.outputLimit, onLimit: onFlood}
+	outputLimit := effectiveOutputLimit(req.OutputLimitBytes, r.outputLimit)
+	stdout := &limitedBuffer{limit: outputLimit, onLimit: onFlood}
+	stderr := &limitedBuffer{limit: outputLimit, onLimit: onFlood}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 

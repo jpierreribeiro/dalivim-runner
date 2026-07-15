@@ -11,6 +11,17 @@ import (
 // output_limit_exceeded rather than timeout.
 var errOutputLimit = errors.New("output limit exceeded")
 
+// effectiveOutputLimit lets a caller tighten the capture budget while keeping
+// the configured runner ceiling authoritative. The service normally resolves
+// this before dispatch; runtimes repeat the clamp because several package-level
+// tests and embedders invoke a Runtime directly.
+func effectiveOutputLimit(requested, ceiling int) int {
+	if requested <= 0 || requested > ceiling {
+		return ceiling
+	}
+	return requested
+}
+
 // limitedBuffer caps captured output so a print-loop in submitted code cannot
 // exhaust the runner's memory: bytes past the limit are counted and discarded
 // (never buffered), and a marker is appended once when truncation occurred.

@@ -24,6 +24,7 @@ type Limits struct {
 	MaxTimeoutMs   int // ms, hard ceiling
 	DefaultMemory  int // MB, applied when the request omits a memory limit
 	MaxMemoryMB    int // MB, hard ceiling
+	MaxOutputBytes int // per stream; omitted requests default to this hard ceiling
 
 	// Test-mode (G9) run budget, a SEPARATE and larger ceiling than the run-mode
 	// timeout: a whole test suite legitimately runs longer than one program, so a
@@ -283,6 +284,9 @@ func (s *Service) clampLimits(req runnerapi.RunRequest, rt Runtime) runnerapi.Ru
 	}
 	req.TimeoutMs = clamp(req.TimeoutMs, defTimeout, maxTimeout)
 	req.MemoryMB = clamp(req.MemoryMB, s.limits.DefaultMemory, s.limits.MaxMemoryMB)
+	if s.limits.MaxOutputBytes > 0 {
+		req.OutputLimitBytes = clamp(req.OutputLimitBytes, s.limits.MaxOutputBytes, s.limits.MaxOutputBytes)
+	}
 	req.CompileTimeoutMs = clamp(req.CompileTimeoutMs, s.limits.DefaultCompileTimeout, s.limits.MaxCompileTimeoutMs)
 	if lf, ok := rt.(limitFloorer); ok {
 		// Per-language floors raise an undersized budget so the runtime can

@@ -654,9 +654,10 @@ func (r *compiledRuntime) compile(ctx context.Context, req runnerapi.RunRequest,
 	// GOCACHE/GOPATH; extraCompileEnv adds the multi-file-only offline module policy.
 	cmd.Env = append([]string{"PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin", "TMPDIR=/tmp"}, r.spec.compileEnv...)
 	cmd.Env = append(cmd.Env, plan.extraCompileEnv...)
-	stderr := &limitedBuffer{limit: r.outputLimit}
+	outputLimit := effectiveOutputLimit(req.OutputLimitBytes, r.outputLimit)
+	stderr := &limitedBuffer{limit: outputLimit}
 	cmd.Stderr = stderr
-	cmd.Stdout = &limitedBuffer{limit: r.outputLimit}
+	cmd.Stdout = &limitedBuffer{limit: outputLimit}
 
 	runErr := cmd.Run()
 
@@ -743,8 +744,9 @@ func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest,
 	}
 
 	onFlood := func() { cancelCause(errOutputLimit) }
-	stdout := &limitedBuffer{limit: r.outputLimit, onLimit: onFlood}
-	stderr := &limitedBuffer{limit: r.outputLimit, onLimit: onFlood}
+	outputLimit := effectiveOutputLimit(req.OutputLimitBytes, r.outputLimit)
+	stdout := &limitedBuffer{limit: outputLimit, onLimit: onFlood}
+	stderr := &limitedBuffer{limit: outputLimit, onLimit: onFlood}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
@@ -871,14 +873,15 @@ func (r *compiledRuntime) executeTest(ctx context.Context, req runnerapi.RunRequ
 	cmd.Env = tc.env
 
 	onFlood := func() { cancelCause(errOutputLimit) }
+	outputLimit := effectiveOutputLimit(req.OutputLimitBytes, r.outputLimit)
 	// The report rides stdout (go test -json), so size that buffer to the report
 	// cap, not the smaller stdout cap; stderr keeps the ordinary output cap.
 	reportLimit := r.maxReportBytes
 	if reportLimit <= 0 {
-		reportLimit = r.outputLimit
+		reportLimit = outputLimit
 	}
 	stdout := &limitedBuffer{limit: reportLimit, onLimit: onFlood}
-	stderr := &limitedBuffer{limit: r.outputLimit, onLimit: onFlood}
+	stderr := &limitedBuffer{limit: outputLimit, onLimit: onFlood}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 

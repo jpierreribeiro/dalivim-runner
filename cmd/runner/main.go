@@ -63,6 +63,7 @@ func main() {
 			MaxTimeoutMs:          cfg.MaxTimeoutMs,
 			DefaultMemory:         cfg.DefaultMemoryMB,
 			MaxMemoryMB:           cfg.MaxMemoryMB,
+			MaxOutputBytes:        cfg.MaxOutputBytes,
 			DefaultCompileTimeout: cfg.CompileTimeoutMs,
 			MaxCompileTimeoutMs:   cfg.MaxCompileTimeoutMs,
 			MaxBatchTotalMs:       cfg.MaxBatchTotalMs,
