@@ -311,19 +311,20 @@ func supportsTestMode(lang string) bool {
 // classification switch, evaluated after timeout/memory/output but before the
 // generic runtime_error default:
 //
-//   - exit == 0                          → success (all tests passed)
+//   - exit == 0 && report               → success (all tests passed)
 //   - exit == testsFailedExit && report  → tests_failed (ran, some failed)
 //   - anything else                      → "" (caller falls through to runtime_error)
 //
-// The report-produced guard is the authoritative signal — the runner tells "tests
-// failed" from "harness crashed" by the presence of a completed report, not by
-// guessing from stderr. A collection/import error (pytest exit 2) never matches
-// testsFailedExit, so it stays runtime_error even though pytest also emits a
-// report for it. (A go BUILD failure also exits 1, so the compiled path checks its
+// The report-produced guard applies to BOTH pass and fail: untrusted student code
+// runs inside the framework process and can terminate it with exit(0) before any
+// test executes. An exit code without a completed report is a harness crash, never
+// proof that tests passed. A collection/import error (pytest exit 2) never matches
+// testsFailedExit, so it stays runtime_error even though pytest also emits a report
+// for it. (A go BUILD failure also exits 1, so the compiled path checks its
 // buildFailMarker BEFORE calling this — see the compiled executeTest.)
 func classifyTestExit(exitCode, testsFailedExit int, reportProduced bool) string {
 	switch {
-	case exitCode == 0:
+	case exitCode == 0 && reportProduced:
 		return runnerapi.StatusSuccess
 	case exitCode == testsFailedExit && reportProduced:
 		return runnerapi.StatusTestsFailed
