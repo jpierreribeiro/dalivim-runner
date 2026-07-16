@@ -22,7 +22,7 @@
 #       /readyz (memory_accounting) instead of assuming:
 #         * python/c/cpp/lua get a hard RLIMIT_AS, so a bomb is contained
 #           DETERMINISTICALLY regardless of cgroup — asserted here in EVERY run.
-#         * go/js/java/typescript opt OUT of RLIMIT_AS (they reserve a huge virtual cage a
+#         * go/js/java/typescript/csharp opt OUT of RLIMIT_AS (they reserve a huge virtual cage a
 #           tight RLIMIT_AS refuses) and are bounded by the delegated cgroup
 #           memory.max / -Xmx instead. Their bomb is contained as memory_exceeded
 #           ONLY when a delegated cgroup is engaged (memory_accounting=cgroup-v2).
@@ -35,7 +35,7 @@
 #
 #       COVERAGE MATRIX (mem-bomb):
 #         python/c/cpp/lua/rust  RLIMIT_AS  contained everywhere (asserted every run)
-#         go/js/java/ts  cgroup memory.max  memory_exceeded — asserted where cgroup
+#         go/js/java/ts/cs  cgroup memory.max memory_exceeded — asserted where cgroup
 #                                           is engaged (VPS deploy verify +
 #                                           runner-smoke-cgroup); explicitly skipped
 #                                           (with a printed reason) where it is not.
@@ -61,7 +61,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # The full language set. Override with ESCAPE_LANGS to run a subset (e.g. when a
 # toolchain is absent in a stripped image).
-LANGS=(${ESCAPE_LANGS:-python javascript c cpp go java lua rust typescript})
+LANGS=(${ESCAPE_LANGS:-python javascript c cpp go java lua rust typescript csharp})
 
 auth=()
 if [ -n "${RUNNER_SERVICE_TOKEN:-}" ]; then
@@ -204,6 +204,17 @@ function probe(host: string): Promise<string> {
 })();
 TS
     ;;
+    csharp) cat <<'CS'
+using System;
+using System.Net.Sockets;
+static string Probe(string host) {
+    try { using var c = new TcpClient(); c.Connect(host, 80); return "OPEN"; }
+    catch { return "blocked"; }
+}
+Console.WriteLine("egress=" + Probe("1.1.1.1"));
+Console.WriteLine("metadata=" + Probe("169.254.169.254"));
+CS
+    ;;
     java) cat <<'JAVA'
 import java.net.InetSocketAddress;
 import java.net.Socket;
@@ -324,6 +335,17 @@ for (const p of ["/usr/pwned", "/bin/pwned", "/app/pwned", "/sandbox/pwned"]) {
 console.log(out.join(" "));
 TS
     ;;
+    csharp) cat <<'CS'
+using System;
+using System.IO;
+var outp = new System.Collections.Generic.List<string>();
+foreach (var p in new[] {"/usr/pwned", "/bin/pwned", "/app/pwned", "/sandbox/pwned"}) {
+    try { File.WriteAllText(p, "x"); outp.Add(p + "=WRITTEN"); }
+    catch { outp.Add(p + "=denied"); }
+}
+Console.WriteLine(string.Join(" ", outp));
+CS
+    ;;
     java) cat <<'JAVA'
 import java.io.FileWriter;
 
@@ -417,6 +439,15 @@ try { readFileSync("/etc/shadow"); } catch { shadow = "denied"; }
 console.log("shadow=" + shadow);
 TS
     ;;
+    csharp) cat <<'CS'
+using System;
+using System.IO;
+string shadow;
+try { File.ReadAllText("/etc/shadow"); shadow = "readable"; }
+catch { shadow = "denied"; }
+Console.WriteLine("shadow=" + shadow);
+CS
+    ;;
     java) cat <<'JAVA'
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -449,6 +480,7 @@ src_spin() {
     go)         printf 'package main\n\nfunc main() { for {} }\n' ;;
     rust)       printf 'fn main() { loop {} }\n' ;;
     typescript) printf 'while (true) {}\n' ;;
+    csharp)     printf 'while (true) {}\n' ;;
     java)       printf 'public class Main { public static void main(String[] a) { while (true) {} } }\n' ;;
     lua)        printf 'while true do end\n' ;;
     *) echo "UNSUPPORTED_LANG:$1" >&2; return 1 ;;
@@ -529,6 +561,19 @@ for (;;) {
   keep.push(Buffer.alloc(64 * 1024 * 1024, 1));
 }
 TS
+    ;;
+    # C#: retain touched 64 MiB byte[] chunks. The CLR opts out of RLIMIT_AS
+    # (capAddressSpace:false), so RSS climbs until the cgroup memory.max OOM-kills it
+    # (or the CLR throws OutOfMemoryException — the memErrSubstr fallback) — memory_exceeded.
+    csharp) cat <<'CS'
+using System.Collections.Generic;
+var keep = new List<byte[]>();
+while (true) {
+    var b = new byte[64 * 1024 * 1024];
+    for (int i = 0; i < b.Length; i += 4096) b[i] = 1;
+    keep.Add(b);
+}
+CS
     ;;
     # Java: retain 64 MiB byte[] chunks past the -Xmx heap. The allocation exceeds
     # the heap (OutOfMemoryError, classified via the memErrSubstr fallback) and/or
@@ -643,7 +688,8 @@ for lang in "${LANGS[@]}"; do
     " python "|" c "|" cpp "|" lua "|" rust ") run_membomb "$lang" ;;
     # RLIMIT_AS-incompatible languages: memory_exceeded ONLY under a live cgroup.
     # typescript runs on the Node jail (capAddressSpace:false), so it joins this group.
-    " go "|" javascript "|" java "|" typescript ")
+    # csharp runs on the CoreCLR (capAddressSpace:false), so it joins it too.
+    " go "|" javascript "|" java "|" typescript "|" csharp ")
       if [ "$CG_ENGAGED" = 1 ]; then
         run_membomb_cgroup "$lang"
       else

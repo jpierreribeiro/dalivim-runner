@@ -1,0 +1,13 @@
+# Trivy CVE ignores — each entry MUST carry a justification and a re-evaluation
+# trigger. This gate fails on fixable HIGH/CRITICAL CVEs (ci.yml: image CVE scan);
+# an ignore here is a deliberate, scoped exception, not a blanket suppression.
+
+# CVE-2025-26646 — MSBuild (Microsoft.Build.Tasks.Core) spoofing vulnerability from the
+# .NET SDK used by the `csharp` language (G15). This is now a RESIDUAL safety net: the
+# Dockerfile SLIMS the SDK to only the NETCore.App runtime + ref pack + Roslyn/bincore
+# (csc), DROPPING MSBuild/NuGet/dotnet-format/AspNetCore entirely — so this component
+# (and the CVEs in the other dropped tooling: CVE-2025-55247, CVE-2026-26171,
+# CVE-2026-33116) is no longer in the image at all. The runner never invokes MSBuild
+# regardless (csc-direct, no `dotnet build`/restore, empty netns). Kept only in case a
+# Roslyn deps.json transitively re-references it; drop when the csharp SDK is bumped.
+CVE-2025-26646

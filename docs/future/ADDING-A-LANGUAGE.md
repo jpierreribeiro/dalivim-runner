@@ -92,7 +92,7 @@ reference — see [G2.1](G2-language-coverage.md).
 
 ---
 
-## Shape C — VM-compiled (landed reference: `java`, `typescript`; next: C#, Kotlin)
+## Shape C — VM-compiled (landed reference: `java`, `typescript`, `csharp`; next: Kotlin)
 
 This shape uses the **generalised compiled runtime**: the run step is a
 spec-provided argv (`runBin` + `run` template with `{dir}`/`{mem}`), not "exec the

@@ -162,8 +162,8 @@ arbitrary/binary output round-trips without loss. `source_code`/`files` stay tex
 an unknown encoding → `400`.
 
 **Languages:** `python`, `javascript`, `lua`, `sql` (interpreted), `c`, `cpp`,
-`go`, `rust` (static compiled), `java`, `typescript` (VM compiled). C is linked
-against libm, so ordinary `<math.h>`
+`go`, `rust` (static compiled), `java`, `typescript`, `csharp` (VM compiled). C is
+linked against libm, so ordinary `<math.h>`
 (`sqrt`, `pow`, …) works. `go` compiles a single `main.go` with `CGO_ENABLED=0`
 (static binary, no `go.mod` needed — modules are a later phase); it runs on the
 seccomp denylist and is bounded by the cgroup rather than `RLIMIT_AS` (the Go
@@ -177,8 +177,11 @@ musl** binary (like C/Go, minimal-rootfs run jail) — no `cargo`, no crates, st
 only. `typescript` type-checks a single `main.ts` with `tsc` (`--strict`; a type
 error is `compile_error`, nothing runs) and runs the emitted JavaScript on the same
 Node jail as `javascript`; the pinned compiler config and bundled `@types/node` are
-runner guarantees (no caller `tsconfig.json`). A compiled request may set
-`compile_timeout_ms` (bounds
+runner guarantees (no caller `tsconfig.json`). `csharp` compiles a single `Main.cs`
+with Roslyn `csc` to an IL `Main.dll` **offline** (no NuGet restore) and runs it on
+the CoreCLR (`dotnet exec`) in the same full-rootfs denylist jail as `java`; top-level
+statements (C# 9+) are fine and the entrypoint convention mirrors Java. A compiled
+request may set `compile_timeout_ms` (bounds
 the compile phase, separate from `timeout_ms`; lowers the compile bound within the
 ceiling, never raises it); a failed compile returns `status: compile_error` with
 the compiler diagnostics in `compile_output`, and nothing is executed. `signal`

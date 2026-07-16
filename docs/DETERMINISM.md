@@ -37,6 +37,7 @@ The per-language envs, in full:
 | c / cpp | pin + `GLIBC_TUNABLES=glibc.pthread.rseq=0` |
 | go | pin + `GOMAXPROCS=1` |
 | java | pin only |
+| csharp | pin + `PATH`, `DOTNET_ROOT`, `HOME=/tmp`, `DOTNET_CLI_TELEMETRY_OPTOUT=1`, `DOTNET_NOLOGO=1`, `DOTNET_EnableDiagnostics=0`, `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1` (culture-invariant, reinforcing the C.UTF-8 pin) |
 
 Other pinned properties that contribute to run-to-run stability:
 
@@ -64,7 +65,8 @@ Language-level nondeterminism remains the submission's (or the backend's)
 concern:
 
 - Go map-iteration order (randomized by the runtime by design, not seedable);
-  `HashMap`/table iteration order in Java/Lua; and Rust's `std::collections::HashMap`
+  `HashMap`/table iteration order in Java/Lua; C#'s `Dictionary<,>` enumeration order
+  (unspecified — use `SortedDictionary`/explicit ordering for stable output); and Rust's `std::collections::HashMap`
   (SipHash seeded per-map from `getrandom` — like Go, **not seedable**, no
   `PYTHONHASHSEED`-style knob; use `BTreeMap` or sort for stable output). **Python is
   the exception** — its `set`/`dict` iteration order **is** pinned via

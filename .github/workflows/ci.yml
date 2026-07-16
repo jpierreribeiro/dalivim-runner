@@ -766,6 +766,28 @@ jobs:
       - name: G14 typescript — reads stdin (proves @types/node resolves)
         run: SMOKE_STDIN='abc' ./scripts/smoke-run.sh typescript $'import { readFileSync } from "fs";\nprocess.stdout.write(readFileSync(0, "utf8").trim().toUpperCase());' 'ABC'
 
+      # ---- G15 C# (.NET, csc-direct -> CoreCLR, Shape C) on the shipped image ----
+      # csc compiles a single-file Main.cs to an IL Main.dll OFFLINE (no NuGet restore),
+      # then `dotnet exec` runs it on the CoreCLR in the full-rootfs denylist jail (like
+      # Java). The image's build-time proof already compiled+ran a hello-world through
+      # this exact path; egress / host-write / cpu-spin / mem-bomb containment for csharp
+      # is proven by the escape corpus step above (csharp is in LANGS). These cover the
+      # functional classification. Top-level statements (C# 9+) — no class boilerplate.
+      - name: G15 csharp — success (top-level Console.WriteLine)
+        run: ./scripts/smoke-run.sh csharp 'System.Console.WriteLine(2 + 2);' $'4\n'
+
+      # A type error stops at compile_error with csc's diagnostics — nothing runs
+      # (no Main.dll emitted). C# uses no `: ` type-annotation syntax, so the source is
+      # YAML-safe as a plain scalar.
+      - name: G15 csharp — type error => compile_error (nothing executed)
+        run: ./scripts/smoke-run.sh csharp 'int x = "nope"; System.Console.WriteLine(x);' '' compile_error
+
+      - name: G15 csharp — unhandled exception => runtime_error
+        run: ./scripts/smoke-run.sh csharp 'throw new System.Exception("boom");' '' runtime_error
+
+      - name: G15 csharp — reads stdin (CoreCLR hosts the IL via dotnet exec)
+        run: SMOKE_STDIN='abc' ./scripts/smoke-run.sh csharp 'System.Console.Write(System.Console.In.ReadToEnd().Trim().ToUpper());' 'ABC'
+
       # G7: execution determinism. LANG/LC_ALL/TZ are pinned identically in every
       # language's run env, so a fixed epoch formatted as LOCAL time (TZ=UTC) and
       # the reported LANG are IDENTICAL across all six runtimes. Each snippet must

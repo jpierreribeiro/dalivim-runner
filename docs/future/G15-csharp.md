@@ -1,5 +1,32 @@
 # G15 — C# (.NET, VM-compiled, Shape C)
 
+> **Status — ✅ implemented (2026-07-12).** `csharp` compiles a single-file `Main.cs`
+> with Roslyn `csc` **directly** (option (a) below — no MSBuild, no NuGet restore) to
+> an IL `Main.dll`, then runs it on the CoreCLR via `dotnet exec` in the full-rootfs
+> denylist jail — Java's VM run posture reused whole (`csharpSpec`/`NewCSharp`,
+> `internal/executor/compiled.go`). **Validated end-to-end against the real SDK**
+> (8.0.422 / runtime 8.0.28, pulled from `mcr.microsoft.com/dotnet/sdk:8.0.422-bookworm-slim`)
+> before shipping: csc compiles in ~0.7 s (well under budget); a type error emits no
+> assembly → `compile_error`; an unhandled exception aborts (SIGABRT) → `runtime_error`;
+> stdin/`Console` work; the CLR runs under a minimal env (only `DOTNET_ROOT` required).
+> **The offline crux is solved by csc-direct**: the compiler references the shared
+> framework's ref assemblies via a response file (`/opt/cs/refs.rsp`) baked once at
+> image build, and a PROGRAM-INDEPENDENT `Main.runtimeconfig.json` (also baked once)
+> is copied beside the assembly by the `/bin/sh` compile prelude so `dotnet exec` can
+> host it — no restore, no network, ever. The Dockerfile does a **build-time
+> compile+run proof** so a wrong SDK path/version fails the build loudly. csharp joins
+> the escape corpus (`scripts/smoke-escape.sh` LANGS + 5 snippets, cgroup mem-bomb
+> bucket) and has a G15 functional block in `ci.yml`; the `Dictionary<,>` order
+> non-guarantee is documented (`docs/DETERMINISM.md`). **Deviations from this spec,
+> discovered in implementation:** (1) csc is invoked as `dotnet exec <sdk>/Roslyn/bincore/csc.dll`
+> (no standalone `csc` on PATH); (2) NO file policy — a `files[]` request is a clean
+> 400 (the SQL/TS precedent), better than a policy-without-multi-file 500;
+> (3) memory is cgroup-only (no `DOTNET_GCHeapHardLimit` — the compiledRuntime cannot
+> substitute `{mem}` into env, and the cgroup is authoritative like Go), with
+> `OutOfMemoryException` as the no-cgroup fallback marker and a 128 MB floor for CLR
+> non-heap overhead; (4) `DOTNET_EnableDiagnostics=0` disables the /tmp diagnostic IPC
+> socket. Multi-file (multi-class/namespace `.cs`, G3) is a follow-up.
+
 C# is the second VM-compiled language after Java (`ADDING-A-LANGUAGE.md:95` names it
 next). It slots into **Shape C**: compile the source to IL, run the IL on a VM (the
 CoreCLR, `dotnet`), reusing the generalised compiled runtime
