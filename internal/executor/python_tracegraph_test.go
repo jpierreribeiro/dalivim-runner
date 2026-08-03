@@ -210,3 +210,18 @@ func TestTraceHarness_FunctionBox(t *testing.T) {
 		t.Fatal("an IMPORTED function must stay filtered — only the student's own is drawn")
 	}
 }
+
+// TestTraceHarness_ReturnValue pins the "Return value" row. On a return event
+// `arg` IS the value the frame handed back, and it was being discarded — the
+// student watched a function finish and never saw its result, which is the half
+// of a call that stepping exists to make concrete.
+func TestTraceHarness_ReturnValue(t *testing.T) {
+	if !strings.Contains(traceHarnessPython, `event == "return"`) || !strings.Contains(traceHarnessPython, `step["retval"]`) {
+		t.Fatal("the harness must record the return value on a return event")
+	}
+	// It goes through the SAME bounded serializer as any other value: a huge or
+	// cyclic return must not get a private, uncapped path.
+	if !strings.Contains(traceHarnessPython, `step["retval"] = _value_ref(arg, idmap, heap, queue)`) {
+		t.Fatal("the return value must use the bounded graph serializer, not a raw repr")
+	}
+}

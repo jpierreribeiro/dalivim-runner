@@ -492,6 +492,19 @@ def _record(frame, event, arg):
             "stack": top,
             "heap": heap,
         }
+        # The RETURN VALUE, on the step where the frame returns. Python Tutor
+        # shows it as a "Return value" row, and it is what closes the mental loop
+        # of a call: without it the student watches a function finish and never
+        # sees what it handed back. `arg` on a return event IS that value; it was
+        # being discarded. It goes through the same bounded serializer as any
+        # other value, so a huge/cyclic/hostile return is handled like the rest.
+        if event == "return":
+            try:
+                step["retval"] = _value_ref(arg, idmap, heap, queue)
+                _drain_heap(idmap, heap, queue)
+                step["heap"] = heap
+            except Exception:
+                pass
         if event == "exception" and isinstance(arg, tuple) and len(arg) >= 2:
             exc_type, exc_val = arg[0], arg[1]
             step["exc"] = {
