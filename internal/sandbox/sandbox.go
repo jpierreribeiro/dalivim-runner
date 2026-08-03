@@ -134,6 +134,18 @@ type Spec struct {
 	// Interpreted runs and the compile phase need the full rootfs, so leave false.
 	MinimalRootfs bool
 
+	// TracerProcfs keeps a procfs mounted in the jail instead of the usual
+	// --disable_proc. It exists for one reason: a debugger cannot work without it.
+	// Measured — with /proc absent, gdb cannot read /proc/<pid>/maps, so it never
+	// learns a PIE binary's load offset and every breakpoint lands in the dynamic
+	// loader instead of the student's code (docs/future/B2-TRACER-SPIKE.md).
+	//
+	// The exposure is NOT the host's /proc: the jail already has a fresh PID
+	// namespace, so this procfs shows only the jail's own handful of processes
+	// (measured: 4). Still, it is strictly more surface than --disable_proc, so it
+	// is opt-in and used ONLY by the trace jail of a compiled language.
+	TracerProcfs bool
+
 	// Seccomp selects the syscall policy. The default (zero value) is the shared
 	// DENYLIST that fits the huge syscall surface of interpreters and the compiler.
 	// A static compiled artifact makes very few syscalls, so the F-D run jail can
@@ -157,6 +169,12 @@ const (
 	// still runs but is logged, so the enforced set can be tuned on the target
 	// before it is switched to kill.
 	SeccompStaticComplain
+	// SeccompTracer is the denylist MINUS ptrace/process_vm_readv/process_vm_writev,
+	// for the step-through tutor of a COMPILED language (B.2): a native binary has
+	// no interpreter hook, so stepping it means a debugger, and a debugger means
+	// ptrace. Everything else in the denylist stays. Pair it with TracerProcfs —
+	// a debugger needs both — and use it ONLY for mode=trace. See tracerPolicy.
+	SeccompTracer
 )
 
 // RunAccounting exposes authoritative per-run resource facts a backend gathered

@@ -362,3 +362,59 @@ func TestShJoin_QuotesEveryToken(t *testing.T) {
 		t.Fatalf("shJoin single-quote escaping = %q", got)
 	}
 }
+
+// TestNsjailArgs_ProcfsDefaultOff pins that /proc stays out of the jail unless a
+// run explicitly asks for it — the default for every interpreted run, every
+// compile and every test-mode run.
+func TestNsjailArgs_ProcfsDefaultOff(t *testing.T) {
+	if !hasArg(nsjailArgs(1000, 1000, sampleSpec()), "--disable_proc") {
+		t.Fatal("a jail must have NO /proc by default")
+	}
+	spec := sampleSpec()
+	spec.TracerProcfs = true
+	if hasArg(nsjailArgs(1000, 1000, spec), "--disable_proc") {
+		t.Fatal("TracerProcfs must keep a procfs (a debugger cannot resolve a PIE load base without it)")
+	}
+}
+
+// TestTracerPolicy_OnlyLiftsTheTracerSyscalls is the security contract of the
+// B.2 trace profile: it permits ptrace and the two cross-process memory reads a
+// debugger needs, and NOTHING else — every other kill in the shared denylist
+// must still be there. A regression here silently widens the sandbox for the
+// one mode that runs a debugger next to student code.
+func TestTracerPolicy_OnlyLiftsTheTracerSyscalls(t *testing.T) {
+	tracer := seccompPolicyFor(SeccompTracer)
+	lifted := []string{"ptrace", "process_vm_readv", "process_vm_writev"}
+	for _, s := range lifted {
+		if strings.Contains(tracer, s) {
+			t.Fatalf("the trace profile must allow %s (a debugger needs it)", s)
+		}
+	}
+	// Everything the denylist kills, minus the three above, must survive.
+	for _, s := range []string{
+		"mount", "umount", "pivot_root", "chroot",
+		"kexec_load", "init_module", "finit_module", "delete_module",
+		"bpf", "setns", "unshare",
+		"add_key", "keyctl", "request_key",
+		"reboot", "swapon", "swapoff",
+		"open_by_handle_at", "name_to_handle_at", "perf_event_open",
+		"io_uring_setup", "io_uring_enter", "io_uring_register", "userfaultfd",
+	} {
+		if !strings.Contains(tracer, s) {
+			t.Fatalf("the trace profile must still KILL %s — it lifts the tracer syscalls only", s)
+		}
+	}
+	if !strings.Contains(tracer, "DEFAULT ALLOW") {
+		t.Fatal("the trace profile is a denylist, like the shared one")
+	}
+}
+
+// TestNsjailArgs_TracerProfileIsOptIn pins that no run gets the tracer policy by
+// accident: the zero value is the full denylist, ptrace included.
+func TestNsjailArgs_TracerProfileIsOptIn(t *testing.T) {
+	args := nsjailArgs(1000, 1000, sampleSpec()) // Seccomp zero value
+	policy := argValue(args, "--seccomp_string")
+	if !strings.Contains(policy, "ptrace") {
+		t.Fatal("the DEFAULT profile must still kill ptrace")
+	}
+}

@@ -1,10 +1,24 @@
 # B.2 — spike: passo a passo para linguagem compilada (Odin)
 
-Status: **spike de pesquisa concluído. NÃO é feature, não tem data.** O portão
-que o [estudo](./../TUTOR-EVOLUTION-STUDY.md) definiu era a revisão de segurança
-do tracer dentro do jail; ela foi feita e está abaixo, com medições em vez de
-suposições. A recomendação final é **não graduar ainda** — por um motivo que não
-é o esperado (não é o sandbox).
+Status: **spike concluído e GRADUADO para feature** (decisão do time, 2026-08-03,
+ciente da ressalva do §3). O portão que o [estudo](./../TUTOR-EVOLUTION-STUDY.md)
+definiu era a revisão de segurança do tracer dentro do jail; ela foi feita e está
+abaixo, com medições em vez de suposições.
+
+O que shipou, e onde: perfil de jail `SeccompTracer` + `TracerProcfs`
+(`internal/sandbox`), driver `internal/executor/trace_driver_gdb.py`, recipe
+`odin` na trace registry (`internal/executor/tracemode.go`) e o par
+compile-com-`-debug` → gdb no jail de trace (`compiledRuntime.runTrace`).
+Validado on-target: `mode:"trace"` em `odin` devolve `dalivim-trace-json@2` com a
+struct do aluno como caixa de heap, e a saída do programa limpa.
+
+**Requisito de deploy que a validação revelou:** o container precisa de
+`--security-opt systempaths=unconfined` (`NATIVE_TRACE=1` no `deploy.sh`). O
+kernel recusa montar um procfs novo dentro de um user namespace enquanto o
+`/proc` do container está mascarado pelo Docker — sem isso, todo `mode=trace` em
+odin falha com `Failed to mount mandatory point: '/proc'`. O que isso afrouxa é o
+`/proc` DO CONTAINER; o jail continua com procfs próprio, mostrando só os
+processos dele.
 
 Tudo aqui foi medido em máquina real (kernel 6.8, Odin `dev-2026-07-nightly`,
 gdb 15.0.50). Os artefatos do spike estão em `docs/future/b2-spike/`.
@@ -101,7 +115,7 @@ de fato empurra para o Valgrind: **zero exceção de ptrace** e 2 pacotes contra
 O preço é inverter o custo — implementação barata/execução barata (gdb) vira
 implementação cara/execução cara (Valgrind).
 
-## 3. O motivo real para NÃO graduar ainda: semântica, não contenção
+## 3. A ressalva que decidiu o desenho: semântica, não contenção
 
 O spike expôs um problema que nenhuma das duas abordagens resolve de graça e que
 o estudo não listou:
@@ -134,17 +148,33 @@ Outros dois, menores, já resolvidos no protótipo:
   defensivamente e nunca desreferencia ponteiro — vira `opaque`. O requisito de
   hostilidade do estudo é atendível, e é obrigatório.
 
-## 4. Recomendação
+## 4. O que foi decidido e o que ficou implementado
 
-1. **Não graduar para feature agora.** A contenção — que era o poste alto — é
-   tratável e está medida. O que falta é a camada de fidelidade pedagógica (§3),
-   que é onde mora o risco de ensinar coisa errada.
-2. **Se graduar, decidir gdb vs Valgrind com §2.4 na mão**, não pelo conforto de
-   implementação. gdb entrega mais rápido; Valgrind evita abrir ptrace.
-3. **Pré-requisito de qualquer versão real**: perfil de jail "trace" separado
-   (ptrace + procfs próprio) usado só em `mode:"trace"`, com o resto do denylist
-   intacto — nunca afrouxar o perfil padrão.
-4. **Forçar `-debug`** (o runner controla a linha de compilação, então isso é de
-   graça) e manter programas de um thread só, como o estudo já pedia.
+1. **Graduou.** A contenção — que era o poste alto — se mostrou tratável e está
+   medida. O risco que sobrou é pedagógico (§3), e foi **resolvido no driver**:
+   ele esconde a variável até a execução PASSAR da linha que a declara, e os
+   argumentos até o prólogo terminar. Comprovado on-target:
 
-Sem data, como combinado.
+   ```
+   linha 8   {}                        <- antes de `n := 3`, nada é mostrado
+   linha 9   {'n': '3'}                <- só depois
+   linha 10  {'n': '3', 'p': 'ref->1'} <- struct virou caixa de heap
+   ```
+
+2. **gdb, não Valgrind.** §2.4 mostrava Valgrind mais barato em contenção (sem
+   ptrace) e mais caro em implementação (tool sob medida) e em execução (10-50×).
+   Como a objeção do ptrace caiu (§2.1) e o jail separado resolve o resto, gdb
+   ganhou. Se algum dia o ptrace precisar sumir do jail, o §2.4 é o caminho.
+3. **Perfil separado, como exigido**: `SeccompTracer` + `TracerProcfs` só em
+   `mode:"trace"` de linguagem compilada. O perfil padrão continua matando
+   ptrace, e há teste que quebra se alguém afrouxar (`TestTracerPolicy_…`).
+4. **`-debug` é forçado** pelo runner (`compileExtra`), não pedido.
+
+### Ainda aberto
+
+- **Um thread só.** O driver percorre a thread parada; programa concorrente não
+  foi validado e provavelmente confunde o passo a passo.
+- **Multi-arquivo** (`files[]`) não é suportado no trace de Odin — o filtro de
+  frames é por nome de arquivo único.
+- **Custo da imagem**: gdb são 42 pacotes apt. Se isso incomodar o gate de CVE,
+  §2.4 (Valgrind: 2 pacotes) é a alternativa já medida.

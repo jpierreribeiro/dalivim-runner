@@ -594,6 +594,25 @@ type compiledRuntime struct {
 	maxArtifactBytes int                    // reject artifacts larger than this (compile bombs)
 	runSeccomp       sandbox.SeccompProfile // seccomp profile for the run jail
 	maxReportBytes   int                    // cap on the returned test report (mode=test, G9)
+	// mode=trace (B.2), set only for a language whose trace recipe is the compiled
+	// shape. tracerBin is the resolved absolute debugger path (nsjail execve's
+	// argv[0] directly, like compilerBin); the two caps mirror the interpreted
+	// trace's and come from the same config.
+	tracerBin           string
+	maxTraceSteps       int
+	maxTraceReportBytes int
+}
+
+// WithTraceLimits sets the mode=trace caps (B.2), mirroring the interpreted
+// runtime's builder so cmd/runner wires both the same way.
+func (r *compiledRuntime) WithTraceLimits(reportBytes, steps int) *compiledRuntime {
+	if reportBytes > 0 {
+		r.maxTraceReportBytes = reportBytes
+	}
+	if steps > 0 {
+		r.maxTraceSteps = steps
+	}
+	return r
 }
 
 // CompiledConfig carries the compile-phase knobs (execution knobs are shared with
@@ -635,6 +654,14 @@ func newCompiled(spec compiledLangSpec, sb sandbox.Sandbox, cfg CompiledConfig) 
 	if len(spec.runBin) > 0 {
 		runBin = resolveBin(spec.runBin) // VM launcher (java); nsjail does no PATH search
 	}
+	// The debugger, for a language whose trace recipe is the compiled shape (B.2).
+	// Resolved here like every other binary — absolute, since nsjail does no PATH
+	// search. Absent toolchain degrades to the bare name and mode=trace fails at
+	// request time, exactly like a missing compiler; boot is never blocked.
+	var tracerBin string
+	if tc, ok := traceCommands[spec.name]; ok && tc.isCompiledTrace() {
+		tracerBin = resolveBin(tc.tracerBin)
+	}
 	return &compiledRuntime{
 		spec:             spec,
 		sandbox:          sb,
@@ -649,6 +676,7 @@ func newCompiled(spec compiledLangSpec, sb sandbox.Sandbox, cfg CompiledConfig) 
 		maxArtifactBytes: cfg.MaxArtifactBytes,
 		runSeccomp:       runSeccomp,
 		maxReportBytes:   cfg.MaxReportBytes,
+		tracerBin:        tracerBin,
 	}
 }
 
@@ -710,6 +738,11 @@ func (r *compiledRuntime) Run(ctx context.Context, req runnerapi.RunRequest) run
 		// mode=test (G9) is a single-toolchain-jail shape (compile+run in one jail),
 		// wholly separate from the two-jail compile→run below, which stays unchanged.
 		return r.runTest(ctx, req)
+	}
+	if req.Mode == modeTrace {
+		// mode=trace (B.2): compile with DWARF, then step the artifact under a
+		// debugger in the trace jail. Also two jails, but neither is run mode's.
+		return r.runTrace(ctx, req)
 	}
 	workDir, err := os.MkdirTemp("", "dalivim-build-*")
 	if err != nil {
@@ -1229,3 +1262,165 @@ var signalNames = map[syscall.Signal]string{
 	syscall.SIGXCPU: "SIGXCPU",
 	syscall.SIGXFSZ: "SIGXFSZ",
 }
+
+// runTrace is the compiled-language mode=trace entry point (B.2). Unlike the
+// interpreted path — one jail, an interpreter over the student's source — a
+// native program has no interpreter hook, so this is TWO jails with a different
+// shape from run mode's:
+//
+//  1. the normal compile jail, plus the language's debug flag (-debug): without
+//     DWARF there are no line tables and no locals, so the tutor has nothing to
+//     read. The runner owns the compile line, so this is guaranteed, not asked
+//     for (the study's "force -debug");
+//  2. the TRACE jail — the one place in the runner where ptrace is permitted,
+//     paired with a procfs of the jail's own PID namespace. Both are required by
+//     a debugger and neither is granted anywhere else. See executeTrace.
+//
+// A compile failure is returned as-is (compile_error with the diagnostics), the
+// same as run mode: a program that does not build has nothing to step through.
+func (r *compiledRuntime) runTrace(ctx context.Context, req runnerapi.RunRequest) runnerapi.RunResult {
+	tc, ok := traceCommands[r.spec.name]
+	if !ok || !tc.isCompiledTrace() {
+		// Defensive: the service only routes a trace-supported language here.
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "trace mode not supported for this language"}
+	}
+	workDir, err := os.MkdirTemp("", "dalivim-trace-*")
+	if err != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "could not create build dir"}
+	}
+	defer os.RemoveAll(workDir)
+
+	plan, err := r.plan(workDir, req)
+	if err != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: err.Error()}
+	}
+	// The debug flags go BEFORE the templated tokens are resolved, so {src}/{out}
+	// substitution is untouched; they are fixed runner-owned tokens, never input.
+	plan.compileArgv = append(append([]string{}, plan.compileArgv...), tc.compileExtra...)
+
+	compileStart := time.Now()
+	res, ok := r.compile(ctx, req, workDir, plan)
+	compileMs := int(time.Since(compileStart).Milliseconds())
+	if !ok {
+		res.CompileMs = compileMs
+		return res
+	}
+
+	// The driver is runner-fixed and written with a name no submission can shadow.
+	if werr := os.WriteFile(filepath.Join(workDir, tc.harnessName), []byte(tc.harness), 0o600); werr != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "could not write trace driver"}
+	}
+	out := r.executeTrace(ctx, req, workDir, tc)
+	out.CompileMs = compileMs
+	return out
+}
+
+// executeTrace runs the tracer over the compiled artifact in the TRACE jail
+// (B.2). This is the only Spec in the runner that sets SeccompTracer +
+// TracerProcfs, and it is reached only from runTrace, i.e. only for mode=trace
+// on a compiled language whose recipe opted in. Everything else about the jail
+// is the run-mode posture: read-only host rootfs, empty netns, jail-private uid,
+// no_new_privs, cgroup memory.max, per-run rlimits.
+func (r *compiledRuntime) executeTrace(ctx context.Context, req runnerapi.RunRequest, workDir string, tc traceCommand) runnerapi.RunResult {
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(req.TimeoutMs)*time.Millisecond)
+	defer cancel()
+	ctx, cancelCause := context.WithCancelCause(ctx)
+	defer cancelCause(nil)
+
+	argv := append([]string{r.tracerBin}, tc.argvTail...)
+
+	cmd, acct, err := r.sandbox.Command(ctx, sandbox.Spec{
+		Argv:      argv,
+		WorkDir:   workDir,
+		TimeoutMs: req.TimeoutMs,
+		// No hard RLIMIT_AS: the tracer holds the growing trace in memory on top of
+		// the student program, and gdb itself is not small. The cgroup memory.max is
+		// the authoritative bound — the same posture the interpreted trace uses.
+		AddressSpaceMB:        0,
+		UnlimitedAddressSpace: r.spec.unlimitedAddressSpace,
+		MaxOpenFiles:          r.spec.maxOpenFiles,
+		MemoryMB:              req.MemoryMB,
+		MaxProcesses:          r.maxProcesses,
+		MaxFileSizeMB:         r.maxFileSizeMB,
+		// The driver writes its JSON trace into /sandbox for the host to read back.
+		Writable: true,
+		// gdb and the artifact are both dynamically linked: full rootfs.
+		MinimalRootfs: false,
+		// The two concessions a debugger cannot work without, granted here and
+		// nowhere else. See sandbox.SeccompTracer / Spec.TracerProcfs.
+		Seccomp:      sandbox.SeccompTracer,
+		TracerProcfs: true,
+	})
+	if err != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "sandbox containment unavailable"}
+	}
+	if acct != nil {
+		defer acct.Close()
+	}
+	cmd.Stdin = strings.NewReader(req.Stdin)
+	cmd.Env = tc.env(plannedTraceTarget(r.spec), "", tc.reportFile, r.maxTraceSteps, r.maxTraceReportBytes)
+
+	// These capture GDB's own streams, not the student's (see below). They stay
+	// bounded so a chatty debugger cannot flood memory, and the flood cause still
+	// cancels the run.
+	onFlood := func() { cancelCause(errOutputLimit) }
+	outputLimit := effectiveOutputLimit(req.OutputLimitBytes, r.outputLimit)
+	stdout := &limitedBuffer{limit: outputLimit, onLimit: onFlood}
+	stderr := &limitedBuffer{limit: outputLimit, onLimit: onFlood}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+
+	start := time.Now()
+	runErr := cmd.Run()
+	duration := int(time.Since(start).Milliseconds())
+
+	// The STUDENT's output comes from the files the driver redirected the inferior
+	// into, not from the process streams — those belong to gdb, and carry its stop
+	// announcements and every stepped source line. Same traversal-resistant reader
+	// as the report. If the driver never got that far (a tracer failure), fall back
+	// to gdb's own stderr so the failure is visible instead of silent.
+	progOut, _, outTrunc := readTestReport(workDir, traceStdoutFile, "", outputLimit)
+	progErr, _, errTrunc := readTestReport(workDir, traceStderrFile, "", outputLimit)
+	if progErr == "" && runErr != nil {
+		progErr = stderr.String()
+		errTrunc = stderr.truncated
+	}
+
+	res := runnerapi.RunResult{
+		Stdout:          encodeStream(req.Encoding, progOut),
+		Stderr:          encodeStream(req.Encoding, progErr),
+		StdoutTruncated: outTrunc,
+		StderrTruncated: errTrunc,
+		DurationMs:      duration,
+		MemoryKB:        memoryKB(acct, cmd),
+		TraceFormat:     tc.traceFormat,
+	}
+	if cmd.ProcessState != nil {
+		res.ExitCode = cmd.ProcessState.ExitCode()
+	}
+
+	// Same traversal-resistant reader as the test report — the file sits under the
+	// attacker-writable /sandbox bind.
+	report, _, reportTrunc := readTestReport(workDir, tc.reportFile, "", r.maxTraceReportBytes)
+	res.TraceReport = report
+	res.TraceReportTruncated = reportTrunc
+
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		res.Status = runnerapi.StatusTimeout
+	case acct != nil && acct.OOMKilled():
+		res.Status = runnerapi.StatusMemoryExceeded
+	case errors.Is(context.Cause(ctx), errOutputLimit):
+		res.Status = runnerapi.StatusOutputLimitExceeded
+	case runErr != nil:
+		res.Status = runnerapi.StatusRuntimeError
+	default:
+		res.Status = runnerapi.StatusSuccess
+	}
+	return res
+}
+
+// plannedTraceTarget is the student source basename the driver filters frames by
+// — the single-file name for this language. Multi-file trace is out of scope for
+// B.2 (the service rejects files[] for odin), so this is the whole story today.
+func plannedTraceTarget(spec compiledLangSpec) string { return spec.sourceFile }
