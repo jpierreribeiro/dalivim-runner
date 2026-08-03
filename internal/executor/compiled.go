@@ -234,6 +234,60 @@ var rustSpec = compiledLangSpec{
 	compileTmpfsMB: 128,
 }
 
+// odinSpec is Odin (https://odin-lang.org), a static-compiled (Shape B) language.
+// Odin compiles native code via LLVM; `odin build <file> -file` builds a single
+// file (package main + a `main :: proc()` entrypoint) to a native binary.
+//
+// UNVERIFIED ON-TARGET (needs the CI Docker smoke, like every compiled spec):
+// this spec is written from Odin's documented CLI, not a local compile — the dev
+// image has no Odin toolchain and the release download is proxy-blocked here. Two
+// posture choices are made CONSERVATIVELY and must be confirmed on the target:
+//   - runFullRootfs:true — a default `odin build` links libc DYNAMICALLY, so the
+//     run jail keeps the full read-only rootfs (like the JVM), not the minimal
+//     static one. A follow-up can pass `-extra-linker-flags:"-static"` to produce
+//     a static binary and tighten to minimal-rootfs, IF Odin's runtime tolerates
+//     a fully static libc link.
+//   - capAddressSpace:true — Odin uses an ordinary OS allocator (no Go/JVM-style
+//     virtual arena), so a hard RLIMIT_AS should bound it like C/Rust. Verify a
+//     hello-world runs under RLIMIT_AS before trusting it; flip to false (cgroup
+//     only) if it aborts at startup.
+//   - denylist (staticAllowlistOK:false) — safest first posture; tune later with
+//     RUNNER_STATIC_SECCOMP=complain per docs/future/ADDING-A-LANGUAGE.md.
+var odinSpec = compiledLangSpec{
+	name:       "odin",
+	sourceFile: "main.odin",
+	// -file builds the single source file (not a package dir); -out names the
+	// artifact. Both {src} and {out} are in-jail /sandbox paths templated by the
+	// compile builder. Optimization left at Odin's default to keep compile fast.
+	compile:       []string{"odin", "build", "{src}", "-file", "-out:{out}"},
+	run:           []string{"{out}"},
+	binNames:      []string{"odin"},
+	runEnv:        determinismEnv(),
+	runFullRootfs: true, // dynamic libc link — see the on-target note above
+	// Odin's allocator is a normal OS heap, so RLIMIT_AS should bound it (verify).
+	capAddressSpace:   true,
+	staticAllowlistOK: false, // denylist first (LLVM runtime syscall surface)
+	versionArgs:       []string{"version"},
+	parseVersion:      parseOdinVersion,
+	// LLVM link intermediates want more scratch than nsjail's few-MB default /tmp.
+	compileTmpfsMB: 128,
+}
+
+// parseOdinVersion turns `odin version` output ("odin version dev-2024-05:abc" or
+// "odin version 0.13.0") into the bare version token after the word "version".
+func parseOdinVersion(out string) string {
+	fields := strings.Fields(out)
+	for i, f := range fields {
+		if f == "version" && i+1 < len(fields) {
+			return fields[i+1]
+		}
+	}
+	if len(fields) > 0 {
+		return fields[len(fields)-1]
+	}
+	return ""
+}
+
 // javaSpec is the VM-compiled shape (G2.2): javac compiles Main.java to bytecode,
 // then the JVM runs it — the run step is `java -cp {dir} Main`, not "exec the
 // artifact". Java is dynamically linked with a huge syscall surface, so it runs on
@@ -595,6 +649,13 @@ func NewGo(sb sandbox.Sandbox, cfg CompiledConfig) *compiledRuntime {
 // RLIMIT_AS (Rust tolerates it, unlike Go) — see rustSpec.
 func NewRust(sb sandbox.Sandbox, cfg CompiledConfig) *compiledRuntime {
 	return newCompiled(rustSpec, sb, cfg)
+}
+
+// NewOdin builds the Odin runtime (Shape B): `odin build -file` compiles the
+// single source to a native binary run on the full-rootfs denylist jail — see
+// odinSpec (posture is conservative and needs on-target validation).
+func NewOdin(sb sandbox.Sandbox, cfg CompiledConfig) *compiledRuntime {
+	return newCompiled(odinSpec, sb, cfg)
 }
 
 // NewJava builds the Java (VM-compiled) runtime: javac to bytecode, then the JVM

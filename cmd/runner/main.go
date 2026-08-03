@@ -89,6 +89,7 @@ func main() {
 		executor.NewRust(sb, compiledConfig(cfg)),
 		executor.NewTypeScript(sb, compiledConfig(cfg)),
 		executor.NewCSharp(sb, compiledConfig(cfg)),
+		executor.NewOdin(sb, compiledConfig(cfg)),
 	)
 
 	srv := httpapi.New(svc, httpapi.Config{
