@@ -180,3 +180,33 @@ func TestPythonTraceGraph_HeapObjectCapBounded(t *testing.T) {
 		}
 	}
 }
+
+// TestTraceHarness_FunctionBox pins the closure diagram (A2). A function used to
+// fall through to `opaque` — a grey box with nothing in it — which made the one
+// topic the tutor most exists to explain invisible: `contador()` returning
+// `incr` is unreadable unless the box shows WHAT incr remembers.
+func TestTraceHarness_FunctionBox(t *testing.T) {
+	if !strings.Contains(traceHarnessPython, `"kind": "function"`) {
+		t.Fatal("the harness must emit a function box, not an opaque leaf")
+	}
+	if !strings.Contains(traceHarnessPython, "co_freevars") || !strings.Contains(traceHarnessPython, "cell_contents") {
+		t.Fatal("a function box must carry the CAPTURED names — that is what makes a closure legible")
+	}
+	// Exact type check: reading __name__/__closure__ off an arbitrary object
+	// would be calling into student code, which this harness never does.
+	if !strings.Contains(traceHarnessPython, "type(v) is _FunctionType") {
+		t.Fatal("function detection must be an exact type check, never duck-typing on student attributes")
+	}
+	// A captured-but-unbound cell is a real state, not an error to swallow.
+	if !strings.Contains(traceHarnessPython, "ainda não definido") {
+		t.Fatal("an empty closure cell must render as itself")
+	}
+	// The v1 variables table keeps its old filtering; only the graph gains the
+	// student's own functions, and only those defined in the traced file.
+	if !strings.Contains(traceHarnessPython, "keep_student_functions") {
+		t.Fatal("only the graph may keep student functions at module level")
+	}
+	if !strings.Contains(traceHarnessPython, "co_filename != TARGET") {
+		t.Fatal("an IMPORTED function must stay filtered — only the student's own is drawn")
+	}
+}
