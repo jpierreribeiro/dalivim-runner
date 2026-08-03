@@ -51,6 +51,7 @@ MAX_ITEMS = 30         # elements rendered per container
 MAX_VARS = 60          # variables recorded per frame
 MAX_STACK = 25         # call-stack frames recorded per step
 MAX_REPR = 512         # hard ceiling on a single value's whole rendered string
+MAX_HEAP_OBJECTS = 200 # object-graph boxes emitted per step (trace v2 / A0)
 
 TARGET = os.environ.get("DALIVIM_TRACE_TARGET", "main.py")
 ROOT = os.path.realpath(os.environ.get("DALIVIM_TRACE_ROOT", "."))
@@ -176,6 +177,141 @@ def type_name(v):
     except Exception:
         return "?"
 
+# ---- object-graph serialization (trace v2 / A0) ------------------------------
+# A faithful Python-Tutor diagram needs OBJECT IDENTITY, not just a repr: two
+# names bound to one list must point at one box, mutation must be visible on the
+# same box across steps, and cycles must be drawable. So alongside the v1
+# {repr,type} rendering we ALSO emit, per step, a reference graph: every frame
+# variable becomes an inline primitive OR a {"ref": id}, and a per-step "heap"
+# maps each id to a typed box (list/dict/object/...). This is purely ADDITIVE —
+# v1 consumers ignore the new fields.
+#
+# SECURITY: this walk keeps the same hostile-value discipline as safe_repr. It
+# NEVER calls a value's __repr__/__str__ to expand a container; it reads
+# STRUCTURE only (type checks, iteration, instance __dict__). Cycles terminate on
+# a seen-set of ids; growth is bounded by MAX_HEAP_OBJECTS (boxes), MAX_ITEMS
+# (cells per container), and MAX_VARS (object fields). Real id() values are
+# remapped to a dense per-trace counter so no raw memory address is exposed.
+
+# Boxable container/collection kinds we expand into the heap. Anything else with
+# no recognized shape becomes an inline opaque "<ClassName>" primitive (never a
+# ref), so we never chase an unknown object's attributes.
+def _remap_id(idmap, real_id):
+    rid = idmap.get(real_id)
+    if rid is None:
+        rid = str(len(idmap) + 1)
+        idmap[real_id] = rid
+    return rid
+
+def _is_prim(v):
+    return v is None or isinstance(v, (bool, int, float, str, bytes, bytearray))
+
+def _prim_value(v):
+    """Inline primitive descriptor {"prim": type, "text": rendered}."""
+    return {"prim": type_name(v), "text": safe_repr(v)}
+
+def _instance_fields(v):
+    # Instance attributes without invoking any descriptor/__getattr__ side effects:
+    # read the raw __dict__ only. Objects using __slots__ (no __dict__) render as
+    # an empty-field box, which is honest rather than risky.
+    try:
+        d = vars(v)
+    except TypeError:
+        return None
+    if not isinstance(d, dict):
+        return None
+    return d
+
+def _value_ref(v, idmap, heap, queue):
+    """Serialize v as an inline primitive, or register it on the heap and return
+    a {"ref": id}. Enqueues newly-seen objects for expansion."""
+    if _is_prim(v):
+        return _prim_value(v)
+    real = id(v)
+    rid = _remap_id(idmap, real)
+    if rid not in heap and len(heap) < MAX_HEAP_OBJECTS:
+        heap[rid] = None            # reserve the slot before expanding (cycle-safe)
+        queue.append((rid, v))
+    return {"ref": rid}
+
+def _expand_object(v, idmap, heap, queue):
+    """Build the typed heap box for v. Children are serialized via _value_ref,
+    so nested objects are enqueued and shared/cyclic refs collapse to one box."""
+    try:
+        if isinstance(v, (list, tuple, set, frozenset)):
+            kind = ("list" if isinstance(v, list)
+                    else "tuple" if isinstance(v, tuple) else "set")
+            items = []
+            truncated = False
+            for i, item in enumerate(v):
+                if i >= MAX_ITEMS:
+                    truncated = True
+                    break
+                items.append(_value_ref(item, idmap, heap, queue))
+            return {"kind": kind, "items": items, "truncated": truncated}
+        if isinstance(v, dict):
+            entries = []
+            truncated = False
+            for i, (k, val) in enumerate(v.items()):
+                if i >= MAX_ITEMS:
+                    truncated = True
+                    break
+                entries.append([_value_ref(k, idmap, heap, queue),
+                                _value_ref(val, idmap, heap, queue)])
+            return {"kind": "dict", "entries": entries, "truncated": truncated}
+        fields = _instance_fields(v)
+        if fields is not None:
+            out = {}
+            truncated = False
+            for i, (name, val) in enumerate(fields.items()):
+                if i >= MAX_VARS:
+                    truncated = True
+                    break
+                if not isinstance(name, str):
+                    continue
+                out[name] = _value_ref(val, idmap, heap, queue)
+            return {"kind": "object", "cls": type_name(v), "fields": out,
+                    "truncated": truncated}
+        # Recognized-but-unexpandable (a module, a function, a __slots__ object
+        # with nothing readable): a labelled leaf box, never chased further.
+        return {"kind": "opaque", "cls": type_name(v)}
+    except Exception:
+        return {"kind": "opaque", "cls": "?"}
+
+def _vars_graph(mapping, idmap, heap, queue, drop_globals=False):
+    """Frame variables as inline-primitive-or-ref, the v2 sibling of _vars_of."""
+    out = {}
+    n = 0
+    try:
+        items = list(mapping.items())
+    except Exception:
+        return out
+    for name, val in items:
+        if n >= MAX_VARS:
+            break
+        try:
+            if not isinstance(name, str):
+                continue
+            if drop_globals and (not _is_recordable_name(name) or _skip_global_value(val)):
+                continue
+            out[name] = _value_ref(val, idmap, heap, queue)
+            n += 1
+        except Exception:
+            continue
+    return out
+
+def _drain_heap(idmap, heap, queue):
+    """Expand every enqueued object until the queue drains or the box cap is hit.
+    A reserved (None) slot beyond the cap is dropped so the heap only holds real
+    boxes; the dangling ref renders as a bounded 'unknown' on the frontend."""
+    while queue:
+        rid, obj = queue.pop(0)
+        if heap.get(rid) is not None:
+            continue
+        heap[rid] = _expand_object(obj, idmap, heap, queue)
+    for rid in [k for k, box in heap.items() if box is None]:
+        del heap[rid]
+
 def _is_recordable_name(name):
     # Skip dunder names in globals (module machinery), keep everything else.
     return not (name.startswith("__") and name.endswith("__"))
@@ -237,8 +373,11 @@ def _is_student_frame(frame):
         return False
     return fn == _TARGET_REAL or fn.startswith(ROOT + os.sep)
 
-def _build_stack(frame):
-    """Outermost-first list of student frames, each with its locals."""
+def _build_stack(frame, idmap=None, heap=None, queue=None):
+    """Outermost-first list of student frames. Each frame carries v1 `locals`
+    ({repr,type}) AND, when an idmap/heap/queue is supplied, the v2 `vars`
+    (inline-primitive-or-ref) that feed the shared per-step object graph — so an
+    alias across two frames collapses to one heap box."""
     chain = []
     f = frame
     while f is not None and len(chain) < MAX_STACK * 4:
@@ -251,12 +390,15 @@ def _build_stack(frame):
     stack = []
     for f in chain:
         is_module = f.f_code.co_name == "<module>"
-        stack.append({
+        entry = {
             "func": f.f_code.co_name,
             "file": _rel(f.f_code.co_filename),
             "line": f.f_lineno,
             "locals": _vars_of(f.f_locals, drop_globals=is_module),
-        })
+        }
+        if idmap is not None:
+            entry["vars"] = _vars_graph(f.f_locals, idmap, heap, queue, drop_globals=is_module)
+        stack.append(entry)
     return stack
 
 # ---- the tracer -------------------------------------------------------------
@@ -277,7 +419,11 @@ def _record(frame, event, arg):
         _stop_tracing()
         return
     try:
-        top = _build_stack(frame)
+        # One object graph per step, shared by every frame so aliases across
+        # frames map to a single box (idmap remaps id() → dense per-trace ids).
+        idmap, heap, queue = {}, {}, []
+        top = _build_stack(frame, idmap, heap, queue)
+        _drain_heap(idmap, heap, queue)
         cur = top[-1] if top else {"func": frame.f_code.co_name, "file": _rel(frame.f_code.co_filename), "line": frame.f_lineno}
         step = {
             "step": len(_state["steps"]),
@@ -287,6 +433,7 @@ def _record(frame, event, arg):
             "func": cur["func"],
             "stdout_len": _stdout.count,
             "stack": top,
+            "heap": heap,
         }
         if event == "exception" and isinstance(arg, tuple) and len(arg) >= 2:
             exc_type, exc_val = arg[0], arg[1]
@@ -367,6 +514,9 @@ def _crash_from(e):
 
 def _emit(crash):
     report = {
+        # version stays 1: the object graph (per-step `heap` + per-frame `vars`)
+        # is ADDITIVE, so v1 consumers keep working unchanged. It formalizes to
+        # dalivim-trace-json@2 only when the v1 {repr,type} `locals` are removed.
         "version": 1,
         "language": "python",
         "steps": _state["steps"],
@@ -378,6 +528,7 @@ def _emit(crash):
         "limits": {
             "max_steps": MAX_STEPS,
             "max_report_bytes": MAX_REPORT_BYTES,
+            "max_heap_objects": MAX_HEAP_OBJECTS,
         },
     }
     if crash is not None:
