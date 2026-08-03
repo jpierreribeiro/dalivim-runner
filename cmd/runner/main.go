@@ -77,7 +77,8 @@ func main() {
 				MaxPathDepth:  cfg.MaxPathDepth,
 			},
 		},
-		executor.NewPython(sb, cfg.MaxOutputBytes, cfg.MaxProcesses, cfg.MaxFileSizeMB, cfg.MaxTestReportBytes),
+		executor.NewPython(sb, cfg.MaxOutputBytes, cfg.MaxProcesses, cfg.MaxFileSizeMB, cfg.MaxTestReportBytes).
+			WithTraceLimits(cfg.MaxTraceReportBytes, cfg.MaxTraceSteps),
 		executor.NewNode(sb, cfg.MaxOutputBytes, cfg.MaxProcesses, cfg.MaxFileSizeMB, cfg.MaxTestReportBytes),
 		executor.NewLua(sb, cfg.MaxOutputBytes, cfg.MaxProcesses, cfg.MaxFileSizeMB, cfg.MaxTestReportBytes),
 		executor.NewSQL(sb, cfg.MaxOutputBytes, cfg.MaxProcesses, cfg.MaxFileSizeMB, cfg.MaxTestReportBytes),

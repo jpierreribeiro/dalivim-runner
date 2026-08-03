@@ -53,6 +53,14 @@ type Config struct {
 	MaxTestTimeoutMs     int // hard ceiling for a mode=test run
 	MaxTestReportBytes   int // cap on the returned test_report
 
+	// Trace mode (G16). A mode=trace request runs the program under a language
+	// tracer (sys.settrace for Python) that transcribes a bounded per-line
+	// execution trace. Tracing is slower than a bare run, so it reuses the larger
+	// TEST timeout envelope; the trace document is capped independently, and the
+	// harness's own step count is capped so an unbounded loop cannot inflate it.
+	MaxTraceReportBytes int // cap on the returned trace_report (bytes)
+	MaxTraceSteps       int // cap on recorded trace steps (per-run)
+
 	// Multi-file submission caps (G3). These bound the attacker-controlled
 	// files[] payload: how many files, how large each is, the summed budget, and
 	// how long/deep a single path may be. Every one is enforced before a byte
@@ -141,6 +149,9 @@ func Load() (Config, error) {
 		DefaultTestTimeoutMs: envInt("RUNNER_TEST_TIMEOUT_MS", 15_000),
 		MaxTestTimeoutMs:     envInt("RUNNER_MAX_TEST_TIMEOUT_MS", 30_000),
 		MaxTestReportBytes:   envInt("RUNNER_MAX_TEST_REPORT_BYTES", 4_000_000),
+
+		MaxTraceReportBytes: envInt("RUNNER_MAX_TRACE_REPORT_BYTES", 2_000_000),
+		MaxTraceSteps:       envInt("RUNNER_MAX_TRACE_STEPS", 2_500),
 
 		MaxFiles:      envInt("RUNNER_MAX_FILES", 50),
 		MaxFileBytes:  envInt("RUNNER_MAX_FILE_BYTES", 262_144),

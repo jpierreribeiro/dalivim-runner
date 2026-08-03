@@ -29,6 +29,12 @@ type interpretedRuntime struct {
 	maxProcesses   int // per-run RLIMIT_NPROC in the jail (fork-bomb cap)
 	maxFileSizeMB  int // per-run RLIMIT_FSIZE in the jail
 	maxReportBytes int // cap on the returned test report (mode=test, G9); 0 = uncapped
+
+	// Trace-mode (G16) caps: the outer bound on the returned trace document and the
+	// per-run recorded-step ceiling handed to the harness. 0 leaves the harness's
+	// own built-in fallbacks in effect.
+	maxTraceReportBytes int
+	maxTraceSteps       int
 }
 
 // NewPython builds the Python runtime.
@@ -72,7 +78,28 @@ func newInterpreted(spec languageSpec, sb sandbox.Sandbox, outputLimit, maxProce
 		maxProcesses:   maxProcesses,
 		maxFileSizeMB:  maxFileSizeMB,
 		maxReportBytes: maxReportBytes,
+		// Trace caps default to the test-report cap for the outer byte bound and to
+		// the harness's own step fallback (0); main.go overrides them from the
+		// dedicated RUNNER_MAX_TRACE_* config via WithTraceLimits for the languages
+		// that support trace mode.
+		maxTraceReportBytes: maxReportBytes,
+		maxTraceSteps:       0,
 	}
+}
+
+// WithTraceLimits sets the mode=trace (G16) caps from config: the outer bound on
+// the returned trace document (bytes) and the per-run recorded-step ceiling the
+// harness enforces. It is the composition-root override (main.go) for a
+// trace-capable language; a non-positive value leaves the constructor default in
+// place. Returns the receiver for fluent wiring.
+func (r *interpretedRuntime) WithTraceLimits(reportBytes, steps int) *interpretedRuntime {
+	if reportBytes > 0 {
+		r.maxTraceReportBytes = reportBytes
+	}
+	if steps > 0 {
+		r.maxTraceSteps = steps
+	}
+	return r
 }
 
 func (r *interpretedRuntime) Language() string { return r.spec.name }
@@ -94,6 +121,12 @@ func (r *interpretedRuntime) Run(ctx context.Context, req runnerapi.RunRequest) 
 		// jail, a report hand-back, tests_failed classification), so it takes its own
 		// path — run mode below is left byte-for-byte unchanged.
 		return r.runTest(ctx, req)
+	}
+	if req.Mode == modeTrace {
+		// mode=trace (G16): run the program under the language trace harness in a
+		// writable jail and hand back a bounded structured trace ALONGSIDE the normal
+		// run outcome. Run mode below is left byte-for-byte unchanged.
+		return r.runTrace(ctx, req)
 	}
 	workDir, err := os.MkdirTemp("", "dalivim-run-*")
 	if err != nil {
@@ -410,6 +443,155 @@ func (r *interpretedRuntime) executeTest(ctx context.Context, req runnerapi.RunR
 		} else {
 			res.Status = runnerapi.StatusRuntimeError
 		}
+	}
+	return res
+}
+
+// runTrace is the mode=trace entry point (G16): write the language trace harness
+// and the student program into a writable jail, run the harness over the
+// entrypoint, and hand back the bounded structured trace ALONGSIDE the normal run
+// outcome. It reuses the identical containment as run mode (empty netns, cgroup,
+// rlimits, denylist); the only differences are the harness argv, the writable
+// /sandbox for the trace hand-back, and the attached TraceReport. The student
+// program's status is classified exactly like run mode.
+func (r *interpretedRuntime) runTrace(ctx context.Context, req runnerapi.RunRequest) runnerapi.RunResult {
+	tc, ok := traceCommands[r.spec.name]
+	if !ok {
+		// Defensive: the service only routes a trace-supported language here.
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "trace mode not supported for this language"}
+	}
+	workDir, err := os.MkdirTemp("", "dalivim-trace-*")
+	if err != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "could not create sandbox dir"}
+	}
+	defer os.RemoveAll(workDir)
+
+	// Write the fixed harness (0600: only the jail uid reads it) and the student
+	// program, then compute the entrypoint + trace root the harness will honour.
+	// The harness filename is runner-fixed and distinct from any student filename.
+	if werr := os.WriteFile(filepath.Join(workDir, tc.harnessName), []byte(tc.harness), 0o600); werr != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "could not write trace harness"}
+	}
+	target, root, err := r.prepareTrace(workDir, req)
+	if err != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: err.Error()}
+	}
+	return r.executeTrace(ctx, req, workDir, target, root, tc)
+}
+
+// prepareTrace materializes the submission for a trace run and returns the
+// entrypoint (relative to the jail cwd) plus the trace root (the directory whose
+// frames the harness records). A single source_code request is written to the
+// run-mode source filename at the workdir root and traced with root "." (the jail
+// cwd); a files[] request is materialized under src/ (validated against the RUN
+// policy — a trace is a normal program, not a test), traced with root "src". Both
+// roots naturally exclude the harness file (it sits at the workdir root, outside
+// src, and is skipped by name for the source_code case).
+func (r *interpretedRuntime) prepareTrace(workDir string, req runnerapi.RunRequest) (target, root string, err error) {
+	if len(req.Files) == 0 {
+		scriptPath := filepath.Join(workDir, r.spec.sourceFile)
+		if werr := os.WriteFile(scriptPath, []byte(req.SourceCode), 0o600); werr != nil {
+			return "", "", errors.New("could not write source")
+		}
+		return r.spec.sourceFile, ".", nil
+	}
+	if _, merr := materializeSource(workDir, req); merr != nil {
+		return "", "", merr
+	}
+	return srcRel(req.Entrypoint), srcRootName, nil
+}
+
+// executeTrace launches the trace harness over the prepared workDir and
+// classifies the outcome (G16). It mirrors execute() but: runs the harness argv
+// (the harness runs the student under the tracer), binds /sandbox WRITABLE so the
+// harness can hand its trace back, and — after the resource-bound checks — reads
+// the bounded trace and classifies the STUDENT program exactly like run mode
+// (success on a clean harness exit, runtime_error otherwise). The trace is
+// attached whenever the harness produced one, regardless of the student outcome.
+func (r *interpretedRuntime) executeTrace(ctx context.Context, req runnerapi.RunRequest, workDir, target, root string, tc traceCommand) runnerapi.RunResult {
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(req.TimeoutMs)*time.Millisecond)
+	defer cancel()
+	ctx, cancelCause := context.WithCancelCause(ctx)
+	defer cancelCause(nil)
+
+	argv := append([]string{r.bin}, tc.argvTail...)
+
+	cmd, acct, err := r.sandbox.Command(ctx, sandbox.Spec{
+		Argv:      argv,
+		WorkDir:   workDir,
+		TimeoutMs: req.TimeoutMs,
+		// No hard RLIMIT_AS in trace mode: the tracer holds the growing trace buffer
+		// in memory on top of the student program, so a tight address-space cap kills
+		// it spuriously. The cgroup memory.max (MemoryMB) is the authoritative RSS
+		// bound and OOM signal instead — the same posture test mode uses.
+		AddressSpaceMB: 0,
+		MemoryMB:       req.MemoryMB,
+		MaxProcesses:   r.maxProcesses,
+		MaxFileSizeMB:  r.maxFileSizeMB,
+		// The harness writes its JSON trace into /sandbox for the host to read back —
+		// the same host-visible hand-back test mode and the compile phase use. The
+		// read-only host rootfs is unchanged; only the per-run workdir mount is writable.
+		Writable: true,
+	})
+	if err != nil {
+		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "sandbox containment unavailable"}
+	}
+	if acct != nil {
+		defer acct.Close()
+	}
+	// Trace mode honours stdin (a traced program may read input), unlike test mode.
+	cmd.Stdin = strings.NewReader(req.Stdin)
+	cmd.Env = tc.env(target, root, tc.reportFile, r.maxTraceSteps, r.maxTraceReportBytes)
+
+	onFlood := func() { cancelCause(errOutputLimit) }
+	outputLimit := effectiveOutputLimit(req.OutputLimitBytes, r.outputLimit)
+	stdout := &limitedBuffer{limit: outputLimit, onLimit: onFlood}
+	stderr := &limitedBuffer{limit: outputLimit, onLimit: onFlood}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+
+	start := time.Now()
+	runErr := cmd.Run()
+	duration := int(time.Since(start).Milliseconds())
+
+	res := runnerapi.RunResult{
+		Stdout:          encodeStream(req.Encoding, stdout.String()),
+		Stderr:          encodeStream(req.Encoding, stderr.String()),
+		StdoutTruncated: stdout.truncated,
+		StderrTruncated: stderr.truncated,
+		DurationMs:      duration,
+		MemoryKB:        memoryKB(acct, cmd),
+		TraceFormat:     tc.traceFormat,
+	}
+	if cmd.ProcessState != nil {
+		res.ExitCode = cmd.ProcessState.ExitCode()
+	}
+
+	// The trace is read back with the SAME traversal-resistant reader as the test
+	// report (attacker-writable file under the writable /sandbox bind). It is
+	// attached whenever produced, independent of the student program's status.
+	report, _, reportTrunc := readTestReport(workDir, tc.reportFile, "", r.maxTraceReportBytes)
+	res.TraceReport = report
+	res.TraceReportTruncated = reportTrunc
+
+	// Classify the STUDENT program exactly like run mode. Resource bounds first (a
+	// crash is never masked), then the harness exit code: the harness exits 0 on a
+	// clean student completion and non-zero when the student raised — so a clean
+	// exit is success and anything else is runtime_error, with the crash site
+	// carried in the trace itself.
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		res.Status = runnerapi.StatusTimeout
+	case acct != nil && acct.OOMKilled():
+		res.Status = runnerapi.StatusMemoryExceeded
+	case r.spec.memErrSubstr != "" && strings.Contains(res.Stderr, r.spec.memErrSubstr):
+		res.Status = runnerapi.StatusMemoryExceeded
+	case errors.Is(context.Cause(ctx), errOutputLimit):
+		res.Status = runnerapi.StatusOutputLimitExceeded
+	case runErr == nil:
+		res.Status = runnerapi.StatusSuccess
+	default:
+		res.Status = runnerapi.StatusRuntimeError
 	}
 	return res
 }
