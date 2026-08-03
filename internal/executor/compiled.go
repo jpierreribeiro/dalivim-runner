@@ -264,8 +264,22 @@ var odinSpec = compiledLangSpec{
 	binNames:      []string{"odin"},
 	runEnv:        determinismEnv(),
 	runFullRootfs: true, // dynamic libc link — see the on-target note above
-	// Odin's allocator is a normal OS heap, so RLIMIT_AS should bound it (verify).
-	capAddressSpace:   true,
+	// FALSE, decided on target — and the reason is the COMPILER, not the program.
+	// The artifact itself tolerates a hard RLIMIT_AS (a hello-world runs fine under
+	// 128 MB), but this flag gates BOTH phases, and `odin build` embeds LLVM: under
+	// the compile jail's cap it dies with
+	//   src/common_memory.cpp(323): Panic: Out of Virtual Memory, oh no...
+	// which surfaced as EVERY odin request returning compile_error. Same shape as
+	// `go build`, which opts out for the same reason. The run is therefore bounded
+	// by the cgroup memory.max (F-E/R6), like Go/JVM/CoreCLR.
+	capAddressSpace: false,
+	// Also decided on target: nsjail's DEFAULT RLIMIT_NOFILE is 32, and the Odin
+	// compiler opens the core collection file by file. Under 32 it fails part-way
+	// through, blaming whichever core file it happened to be on —
+	//   /opt/odin/core/io/util.odin(5:1) Syntax Error: Unknown error whilst reading file
+	// with a DIFFERENT file each run, which reads like a corrupt install and is not
+	// one. Same trap the CoreCLR hit (see csharpSpec.maxOpenFiles).
+	maxOpenFiles:      1024,
 	staticAllowlistOK: false, // denylist first (LLVM runtime syscall surface)
 	versionArgs:       []string{"version"},
 	parseVersion:      parseOdinVersion,

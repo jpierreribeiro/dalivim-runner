@@ -118,7 +118,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       lua5.4=5.4.4-3+deb12u1 \
       sqlite3=3.40.1-2+deb12u2 \
       gcc=4:12.2.0-3 g++=4:12.2.0-3 libc6-dev=2.36-9+deb12u14 \
-      openjdk-17-jdk-headless=17.0.19+10-1~deb12u2 \
+      openjdk-17-jdk-headless=17.0.20+8-1~deb12u1 openjdk-17-jre-headless=17.0.20+8-1~deb12u1 \
  && rm -rf /var/lib/apt/lists/*
 # pytest for the Python test-runner mode (G9): a mode=test request runs
 # `python3 -m pytest` over the submission and returns the JUnit XML report raw.
@@ -253,6 +253,61 @@ RUN set -eux; \
     RENV="LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC PATH=/usr/local/bin:/usr/bin:/bin DOTNET_ROOT=/opt/dotnet HOME=/tmp TMPDIR=/tmp DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_EnableDiagnostics=0 DOTNET_EnableWriteXorExecute=0 DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 DOTNET_gcServer=0"; \
     runuser -u nobody -- sh -c "ulimit -f 65536; env -i $CENV /opt/dotnet/dotnet exec $csc -nologo -optimize+ -nostdlib @/opt/cs/refs.rsp -out:$proof/Main.dll $proof/Main.cs && cp /opt/cs/Main.runtimeconfig.json $proof/Main.runtimeconfig.json"; \
     test "$(runuser -u nobody -- sh -c "ulimit -f 65536; env -i $RENV /opt/dotnet/dotnet exec $proof/Main.dll")" = "CSHARP-OK"; \
+    rm -rf "$proof"
+# ---- Odin toolchain (B.1) for the `odin` compile jail ----
+# clang is NOT optional here, and it is not for compiling: Odin drives the LINK
+# through clang (`sh: clang: not found` → link fails → NO artifact, and `odin`
+# still exits 0, so the failure only surfaces as the runner's "compile produced
+# no artifact"). `-linker:lld` does not avoid it — that path also shells out to
+# clang, and the release ships no lld. Measured cost: ~161 MB / 49 packages.
+# Rejected alternatives, recorded so nobody re-litigates them silently:
+#   - a `clang` shim exec'ing gcc: works (Odin only passes driver-level flags:
+#     -L -lc -lm -o -pie -Wl,-z,{now,relro}), costs 0 MB, but silently redefines
+#     what `clang` means image-wide — a trap for the next reader.
+#   - `-build-mode:obj` + link with the gcc we already ship: also works, but Odin
+#     emits ONE .obj PER PACKAGE (main-fmt.obj, main-runtime.obj, …), so the
+#     compile argv would need a globbing shell prelude and would be sensitive to
+#     Odin's module-splitting. Revisit if the image size or the CVE gate bites.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      clang=1:14.0-55.7~deb12u1 \
+ && rm -rf /var/lib/apt/lists/*
+# The release tarball's top-level dir is odin-linux-amd64-nightly+<date>, which
+# does NOT match the release TAG (dev-2026-07a) — so it cannot be derived from
+# the version and is stripped instead. ADD --checksum pins the bytes (same
+# discipline as the TypeScript tarballs); a URL ADD downloads WITHOUT extracting.
+# If a build network blocks the GitHub release, vendor this tarball and swap the
+# ADD for a COPY — the rest of the stanza is unchanged.
+ADD --checksum=sha256:32a7678abc66f1af7353abb5b0b5da47d94b7e663f6d250df29bc9117e864c10 \
+    https://github.com/odin-lang/Odin/releases/download/dev-2026-07a/odin-linux-amd64-dev-2026-07a.tar.gz \
+    /opt/odin-src/odin.tar.gz
+# vendor/ (55 MB of bindings to raylib/curl/ENet/DirectX/…) is EMPTIED but the
+# DIRECTORY MUST REMAIN: odin registers `vendor` as a library collection at
+# startup, and deleting the dir makes every compile die with
+#   Internal Compiler Error: Cannot find the library collection 'vendor'.
+# An empty dir satisfies the registration and still saves the 55 MB (202 → 147 MB),
+# which also keeps bindings to network/GPU libraries out of a jail that has
+# neither. examples/ is deleted outright — nothing registers it. base/ + core/
+# stay: that is the standard library a student actually imports.
+# Then the BUILD-TIME PROOF, mirroring the jail like the C#/Go stanzas do: compile
+# AND run a hello-world as the NON-ROOT `nobody` uid, resolving `odin` through the
+# /usr/local/bin symlink exactly as the runner's resolveBin does (Odin finds its
+# core/ collection relative to the symlink TARGET, which is what makes the symlink
+# safe). A missing a+rX, a missing clang, or a wrong asset layout fails the BUILD,
+# not a student's request.
+RUN set -eux; \
+    mkdir -p /opt/odin; \
+    tar -xzf /opt/odin-src/odin.tar.gz --strip-components=1 -C /opt/odin; \
+    rm -rf /opt/odin-src /opt/odin/vendor /opt/odin/examples; \
+    mkdir -p /opt/odin/vendor; \
+    ln -s /opt/odin/odin /usr/local/bin/odin; \
+    chmod -R a+rX /opt/odin; \
+    test -x /opt/odin/odin; test -d /opt/odin/core; test -d /opt/odin/base; \
+    proof="$(mktemp -d)"; chmod 777 "$proof"; \
+    printf 'package main\n\nimport "core:fmt"\n\nmain :: proc() {\n\tfmt.println("odin-ok")\n}\n' > "$proof/main.odin"; \
+    chmod a+r "$proof/main.odin"; \
+    runuser -u nobody -- sh -c "cd $proof && env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp TMPDIR=/tmp odin build $proof/main.odin -file -out:$proof/bin"; \
+    test -x "$proof/bin"; \
+    test "$(runuser -u nobody -- env -i LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC "$proof/bin")" = "odin-ok"; \
     rm -rf "$proof"
 # Determinism pin (G7), belt-and-suspenders: the jail sets these explicitly in
 # every run env (an explicit minimal cmd.Env means this ENV does NOT reach the

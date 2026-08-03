@@ -36,6 +36,14 @@ func TestOdinSpec(t *testing.T) {
 	if odinSpec.staticAllowlistOK {
 		t.Fatal("odin must stay on the denylist first (LLVM runtime syscalls)")
 	}
+	// Decided ON TARGET, and about the COMPILER rather than the program: the
+	// artifact tolerates a hard RLIMIT_AS, but this flag gates both phases and
+	// `odin build` embeds LLVM — under the compile jail's cap it panics with
+	// "Out of Virtual Memory", which turned EVERY odin request into a
+	// compile_error. Flipping this back re-breaks the language completely.
+	if odinSpec.capAddressSpace {
+		t.Fatal("odin must NOT cap address space: the LLVM-backed compiler panics under RLIMIT_AS (like `go build`)")
+	}
 	if len(odinSpec.binNames) == 0 || odinSpec.binNames[0] != "odin" {
 		t.Fatalf("odin binNames must resolve `odin`: %v", odinSpec.binNames)
 	}
