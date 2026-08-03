@@ -30,7 +30,10 @@ sudo ./deploy.sh setup     # R6: check driver, install + enable the reboot-safe 
 `setup` requires the **cgroupfs** docker driver (it tells you how to switch if not).
 For local/maintenance use without R6, set `CGROUP_PARENT=` and explicitly set
 `RUNNER_CGROUP=auto` in `runner.env`, then skip `setup`. Keep that instance out of
-production traffic: Go/JS/Java/TypeScript have no per-run RSS ceiling in this mode.
+production traffic: Go/JS/Java/TypeScript/C#/Odin have no per-run RSS ceiling in
+this mode. Odin is the worst of them to run there: it dies with an EMPTY stderr,
+so there is no marker to classify on either — a memory blow-up reads as a plain
+`runtime_error`, not `memory_exceeded`.
 
 ## Redeploy / upgrade
 

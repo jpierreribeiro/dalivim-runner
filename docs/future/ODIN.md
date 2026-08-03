@@ -52,20 +52,23 @@ Duas descobertas que o rascunho abaixo não previa:
 | `compile_error` | **OK** — o diagnóstico real do compilador chega ao aluno |
 | `timeout` | **OK** |
 | egress contido (`core:net` para 1.1.1.1:53) | **OK** — `egress-blocked` |
-| `memory_exceeded` | **ver ressalva abaixo** |
+| `memory_exceeded` | **OK** — validado na VPS, com cgroup delegado |
 
-**Ressalva honesta sobre memória.** O smoke local rodou com
-`RUNNER_CGROUP=auto` numa máquina sem cgroup delegado, e nesse modo o bomb sai
-como `runtime_error` (exit 137, morto pelo limite do CONTAINER, não por um teto
-por-run). Com `capAddressSpace:false` o Odin passa a depender do cgroup — como Go,
-JVM e CoreCLR — e **o stderr do Odin é vazio ao morrer de memória**, ou seja, não
-existe marcador para o fallback `memErrSubstr` sem cgroup. Consequências:
+Rodado em duas condições, porque a diferença importa:
 
-- em produção (`RUNNER_CGROUP=require`, o posture do deploy) a classificação vem
-  do evento OOM do kernel, o mesmo caminho que `deploy.sh verify` já prova para
-  go/js/java;
-- em modo sem cgroup, **Odin não tem teto de memória por run** — ele entra na
-  mesma lista que `deploy/README.md` já documenta para Go/JS/Java/TS.
+- **local, `RUNNER_CGROUP=auto` sem cgroup delegado**: o bomb sai como
+  `runtime_error` (exit 137, morto pelo limite do CONTAINER, não por um teto
+  por-run);
+- **na VPS, `RUNNER_CGROUP=require` com o cgroup delegado do R6** (container
+  isolado na 8091, removido depois): sai como **`memory_exceeded`**, classificado
+  pelo evento OOM do kernel — o mesmo caminho que `deploy.sh verify` prova para
+  go/js/java.
+
+**Consequência a registrar:** com `capAddressSpace:false` o Odin passa a depender
+do cgroup para o teto de memória, e o Odin morre com **stderr vazio**, então não
+existe marcador possível para o fallback `memErrSubstr`. Em modo sem cgroup,
+Odin não tem teto de memória por run — ele entra na mesma lista que
+`deploy/README.md` já documenta para Go/JS/Java/TS.
 
 ## Rascunho original (mantido para histórico)
 
