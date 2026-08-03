@@ -136,6 +136,7 @@ type LanguageInfo struct {
 	MultiFile bool   `json:"multifile"` // accepts a files[] submission (G3)
 	Batch     bool   `json:"batch"`     // accepts a stdins[] batch (G6)
 	Test      bool   `json:"test"`      // accepts a mode=test test-runner request (G9)
+	Trace     bool   `json:"trace"`     // accepts a mode=trace step-through request (G16)
 }
 
 // Catalog returns the registered languages with provenance and capability flags,
@@ -153,6 +154,7 @@ func (s *Service) Catalog() []LanguageInfo {
 			MultiFile: supportsMultiFile(id),
 			Batch:     batch,
 			Test:      supportsTestMode(id),
+			Trace:     supportsTraceMode(id),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -245,6 +247,11 @@ func (s *Service) RunBatch(ctx context.Context, req runnerapi.RunRequest) (runne
 		// batch has no meaning for it. Reject rather than silently ignore (G9).
 		return runnerapi.BatchResult{}, invalid("test_mode_batch", "mode=test does not support a stdins[] batch")
 	}
+	if req.Mode == modeTrace {
+		// Trace mode returns one step-through trace per run — a stdins[] batch has no
+		// meaning for it. Reject rather than silently ignore (G16).
+		return runnerapi.BatchResult{}, invalid("trace_mode_batch", "mode=trace does not support a stdins[] batch")
+	}
 	if err := validateMode(req); err != nil {
 		return runnerapi.BatchResult{}, err
 	}
@@ -274,7 +281,10 @@ func (s *Service) clampLimits(req runnerapi.RunRequest, rt Runtime) runnerapi.Ru
 	// than one program. When the operator leaves the test ceilings unset they fall
 	// back to the run-mode values, so behaviour is unchanged until they are set.
 	defTimeout, maxTimeout := s.limits.DefaultTimeout, s.limits.MaxTimeoutMs
-	if req.Mode == modeTest {
+	if req.Mode == modeTest || req.Mode == modeTrace {
+		// Trace mode reuses the larger test-timeout envelope: line-by-line tracing is
+		// materially slower than a bare run, so a program that finishes inside the
+		// run budget can legitimately need longer when traced.
 		if s.limits.DefaultTestTimeout > 0 {
 			defTimeout = s.limits.DefaultTestTimeout
 		}
@@ -357,8 +367,13 @@ func validateMode(req runnerapi.RunRequest) error {
 			return invalid("unsupported_test_mode", "language %q does not support test mode", req.Language)
 		}
 		return nil
+	case modeTrace:
+		if !supportsTraceMode(req.Language) {
+			return invalid("unsupported_trace_mode", "language %q does not support trace mode", req.Language)
+		}
+		return nil
 	default:
-		return invalid("unsupported_mode", "mode must be \"run\" or \"test\" (got %q)", req.Mode)
+		return invalid("unsupported_mode", "mode must be \"run\", \"test\", or \"trace\" (got %q)", req.Mode)
 	}
 }
 

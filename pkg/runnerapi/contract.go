@@ -85,8 +85,18 @@ type RunRequest struct {
 	// compares nothing, and renders no verdict (the backend grades from the
 	// report). The per-language test command is a CLOSED in-code registry, never
 	// caller-supplied. Test mode ignores stdin/stdins (a suite defines its own
-	// inputs); a stdins[] batch with mode=test is rejected (400). A run-mode
-	// request (mode absent) is byte-for-byte unchanged.
+	// inputs); a stdins[] batch with mode=test is rejected (400).
+	//
+	// "trace" (G16) runs the program under a language tracer and, ALONGSIDE the
+	// normal stdout/stderr/exit of a run, returns a bounded, structured per-line
+	// execution trace (TraceReport) for a Python-Tutor-style step-through
+	// visualizer. It is run mode plus a transcription: the status classifies the
+	// STUDENT program exactly like run mode (success/runtime_error/timeout/...),
+	// and the trace is attached whenever the harness produced one. The per-language
+	// trace harness is a CLOSED in-code registry, never caller-supplied; trace mode
+	// honours stdin but not a stdins[] batch (rejected, 400).
+	//
+	// A run-mode request (mode absent) is byte-for-byte unchanged.
 	Mode string `json:"mode,omitempty"`
 }
 
@@ -142,6 +152,25 @@ type RunResult struct {
 	// same discipline as StdoutTruncated. A backend parsing the report must read
 	// this before trusting the report is complete.
 	TestReportTruncated bool `json:"test_report_truncated,omitempty"`
+
+	// TraceReport is the execution trace the language trace harness produced when
+	// Mode=="trace" (G16): a bounded, structured JSON document (steps, per-frame
+	// locals/globals, call stack, cumulative stdout length, and any crash site),
+	// VERBATIM. It is OPAQUE to the runner — the frontend renders it, named by
+	// TraceFormat — so the runner grows no trace-specific parser and a malformed
+	// trace is a rendering problem, not a new attack surface here. Empty in
+	// run/test mode. Attached ALONGSIDE the normal Stdout/Stderr/ExitCode/Status of
+	// the run, so a trace request yields both. Bounded independently of the stdout
+	// cap; TraceReportTruncated marks a trace cut at the report-size ceiling.
+	TraceReport string `json:"trace_report,omitempty"`
+	TraceFormat string `json:"trace_format,omitempty"` // "dalivim-trace-json@1"
+
+	// TraceReportTruncated reports that TraceReport hit the report-size cap and
+	// holds only its first bytes — the AUTHORITATIVE signal for a truncated trace,
+	// the same discipline as StdoutTruncated/TestReportTruncated. The harness ALSO
+	// sets an internal truncated.{steps,bytes} flag inside the JSON when it stopped
+	// early; this flag is the runner's independent outer cap on the whole document.
+	TraceReportTruncated bool `json:"trace_report_truncated,omitempty"`
 
 	// ResultFormat names the shape of Stdout for a language whose output is a
 	// structured result rather than free text (G10): "json-rows" for sql (SQLite
