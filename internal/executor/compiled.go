@@ -806,22 +806,27 @@ func (r *compiledRuntime) compile(ctx context.Context, req runnerapi.RunRequest,
 	cmd.Env = append([]string{"PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin", "TMPDIR=/tmp"}, r.spec.compileEnv...)
 	cmd.Env = append(cmd.Env, plan.extraCompileEnv...)
 	outputLimit := effectiveOutputLimit(req.OutputLimitBytes, r.outputLimit)
-	stderr := &limitedBuffer{limit: outputLimit}
-	cmd.Stderr = stderr
-	cmd.Stdout = &limitedBuffer{limit: outputLimit}
+	// Compiler diagnostics go to ONE combined buffer, because the stream a compiler
+	// reports on is not universal: gcc/g++/go/javac write to stderr, but Roslyn's csc
+	// writes to STDOUT. Capturing stderr alone handed the C# student an EMPTY
+	// compile_output for a real type error. Sharing one buffer also bounds the pair
+	// once (os/exec serialises writes when Stdout == Stderr, so this is race-free).
+	diag := &limitedBuffer{limit: outputLimit}
+	cmd.Stderr = diag
+	cmd.Stdout = diag
 
 	runErr := cmd.Run()
 
 	if errors.Is(cctx.Err(), context.DeadlineExceeded) {
 		return runnerapi.RunResult{
 			Status:        runnerapi.StatusCompileError,
-			CompileOutput: stderr.String() + "\n[compile timed out]",
+			CompileOutput: diag.String() + "\n[compile timed out]",
 		}, false
 	}
 	if runErr != nil {
 		return runnerapi.RunResult{
 			Status:        runnerapi.StatusCompileError,
-			CompileOutput: stderr.String(),
+			CompileOutput: diag.String(),
 		}, false
 	}
 

@@ -1,11 +1,13 @@
 package executor
 
 import (
+	"context"
 	"os/exec"
 	"strings"
 	"testing"
 
 	"github.com/jpierreribeiro/dalivim-runner/internal/sandbox"
+	"github.com/jpierreribeiro/dalivim-runner/pkg/runnerapi"
 )
 
 // TestSubst pins the {src}/{out} placeholder substitution the compiled argv
@@ -205,5 +207,47 @@ func TestSignalName(t *testing.T) {
 	_ = ok.Run()
 	if got := signalName(ok); got != "" {
 		t.Fatalf("signalName(clean exit) = %q, want empty", got)
+	}
+}
+
+// stdoutDiagSandbox is a compile jail whose compiler reports its diagnostics on
+// STDOUT and says nothing on stderr — Roslyn's csc, and the reason capturing
+// stderr alone was not enough.
+type stdoutDiagSandbox struct{}
+
+func (stdoutDiagSandbox) Command(ctx context.Context, spec sandbox.Spec) (*exec.Cmd, sandbox.RunAccounting, error) {
+	if spec.Writable { // the compile jail is the only writable one
+		return exec.CommandContext(ctx, "/bin/sh", "-c",
+			"echo \"Main.cs(1,38): error CS0029: Cannot implicitly convert type 'string' to 'int'\"; exit 1"), nil, nil
+	}
+	return exec.CommandContext(ctx, "/bin/cat"), nil, nil
+}
+func (stdoutDiagSandbox) NetworkIsolated() bool    { return false }
+func (stdoutDiagSandbox) Backend() string          { return "fake" }
+func (stdoutDiagSandbox) MemoryAccounting() string { return "rlimit-only" }
+func (stdoutDiagSandbox) Ready() bool              { return true }
+
+// TestCompile_CapturesStdoutDiagnostics pins that compile_output carries the
+// compiler's diagnostics whichever stream they arrive on. gcc/g++/go/javac use
+// stderr, but csc uses stdout — capturing only stderr handed the C# student a
+// compile_error with an EMPTY body, which is indistinguishable from a runner bug.
+func TestCompile_CapturesStdoutDiagnostics(t *testing.T) {
+	svc := NewService(
+		Limits{DefaultTimeout: 8000, MaxTimeoutMs: 10000, DefaultMemory: 128, MaxMemoryMB: 512,
+			DefaultCompileTimeout: 10000, MaxCompileTimeoutMs: 20000},
+		NewCSharp(stdoutDiagSandbox{}, CompiledConfig{OutputLimit: 64 * 1024, MaxProcesses: 256, MaxFileSizeMB: 64, CompileMemoryMB: 512}),
+	)
+	res, err := svc.Run(context.Background(), runnerapi.RunRequest{
+		Language:   "csharp",
+		SourceCode: `class P{ static void Main(){ int x = "nope"; } }`,
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Status != runnerapi.StatusCompileError {
+		t.Fatalf("expected compile_error, got %q", res.Status)
+	}
+	if !strings.Contains(res.CompileOutput, "CS0029") {
+		t.Fatalf("stdout diagnostics must reach compile_output, got %q", res.CompileOutput)
 	}
 }
