@@ -71,9 +71,13 @@ RUN rustup target add x86_64-unknown-linux-musl
 # OFFLINE with csc-direct — no NuGet restore, no MSBuild — against the shared
 # framework's ref assemblies (see /opt/cs/refs.rsp, baked below). Pinned to an exact
 # SDK version for reproducibility (bump deliberately). Validated end-to-end against
-# this exact SDK (8.0.422 / runtime 8.0.28) before shipping.
+# this exact SDK (8.0.423 / runtime 8.0.29) before shipping. Bumped from 8.0.422 /
+# runtime 8.0.28 the moment the trivy gate could run again (the openjdk pin fix
+# unblocked the image build) and reported 5 FIXABLE HIGH CVEs in runtime 8.0.28 —
+# CVE-2026-47302, -50524, -50528, -50651, -57108, all fixed in 8.0.29. That is
+# exactly the refresh signal this file's header describes.
 # TODO(pin-by-digest): capture `docker inspect` digest of
-# mcr.microsoft.com/dotnet/sdk:8.0.422-bookworm-slim and pin it here like the other
+# mcr.microsoft.com/dotnet/sdk:8.0.423-bookworm-slim and pin it here like the other
 # bases, once CI resolves it.
 #
 # SLIM to the minimal set (~157 MB, from ~490 MB): the host/muxer, the NETCore.App
@@ -85,7 +89,7 @@ RUN rustup target add x86_64-unknown-linux-musl
 # System.Security.Cryptography.Xml, all in dropped components). Removing the surface
 # structurally beats whack-a-mole .trivyignore entries. Verified: csc-direct compiles +
 # `dotnet exec` runs on this slim tree as the non-root jail uid.
-FROM mcr.microsoft.com/dotnet/sdk:8.0.422-bookworm-slim AS dotnet-build
+FROM mcr.microsoft.com/dotnet/sdk:8.0.423-bookworm-slim AS dotnet-build
 RUN set -eux; \
     cd /usr/share/dotnet; \
     ver="$(basename "$(ls -d sdk/*/)")"; \
@@ -268,8 +272,16 @@ RUN set -eux; \
 #     emits ONE .obj PER PACKAGE (main-fmt.obj, main-runtime.obj, …), so the
 #     compile argv would need a globbing shell prelude and would be sensitive to
 #     Odin's module-splitting. Revisit if the image size or the CVE gate bites.
+# gdb is the step-through tutor for Odin (B.2): a native binary has no
+# sys.settrace, so mode=trace compiles with -debug and steps the artifact under
+# gdb --batch driving internal/executor/trace_driver_gdb.py. gdb is used ONLY on
+# that path — run mode and test mode never see it — and only inside the trace
+# jail, the one jail that permits ptrace (internal/sandbox: SeccompTracer +
+# TracerProcfs). gdb's Python support is what the driver is written against; the
+# bookworm package ships it linked against this image's python3.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       clang=1:14.0-55.7~deb12u1 \
+      gdb=13.1-3 \
  && rm -rf /var/lib/apt/lists/*
 # The release tarball's top-level dir is odin-linux-amd64-nightly+<date>, which
 # does NOT match the release TAG (dev-2026-07a) — so it cannot be derived from
@@ -308,6 +320,21 @@ RUN set -eux; \
     runuser -u nobody -- sh -c "cd $proof && env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp TMPDIR=/tmp odin build $proof/main.odin -file -out:$proof/bin"; \
     test -x "$proof/bin"; \
     test "$(runuser -u nobody -- env -i LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC "$proof/bin")" = "odin-ok"; \
+    rm -rf "$proof"
+# B.2 build-time proof: the STEP-THROUGH must work in this image, not just the
+# compile. gdb has to load its Python support, read the -debug DWARF and stop on
+# main::main — a gdb built without Python, or an Odin build that stopped emitting
+# DWARF, fails the BUILD here instead of returning an empty trace to a student.
+# Runs as `nobody`, like the compile proof. (No nsjail at build time, so this
+# proves the TOOLING; the jail profile itself is covered by the CI smoke.)
+RUN set -eux; \
+    proof="$(mktemp -d)"; chmod 777 "$proof"; \
+    printf 'package main\n\nmain :: proc() {\n\tn := 3\n\tm := n + 1\n\t_ = m\n}\n' > "$proof/main.odin"; \
+    chmod a+r "$proof/main.odin"; \
+    runuser -u nobody -- sh -c "cd $proof && env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp TMPDIR=/tmp odin build $proof/main.odin -file -debug -out:$proof/bin"; \
+    runuser -u nobody -- sh -c "cd $proof && env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp gdb --batch -nx -quiet -ex 'break main::main' -ex run -ex 'info line' $proof/bin" > "$proof/out.txt" 2>&1; \
+    grep -q 'main.odin' "$proof/out.txt"; \
+    grep -qE 'Breakpoint 1.*main::main' "$proof/out.txt"; \
     rm -rf "$proof"
 # Determinism pin (G7), belt-and-suspenders: the jail sets these explicitly in
 # every run env (an explicit minimal cmd.Env means this ENV does NOT reach the
