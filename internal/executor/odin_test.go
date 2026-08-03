@@ -136,3 +136,32 @@ func TestOdinTraceDriver_HidesUndefinedVariables(t *testing.T) {
 		t.Fatal("the driver must drop compiler-injected names (Odin's `context`)")
 	}
 }
+
+// TestOdinTraceDriver_ContainersShowValues pins the rule that makes the Odin
+// canvas teach anything: Odin's composite types are {data,len} STRUCTS in DWARF,
+// so the generic struct path renders them faithfully — and uselessly. A student
+// saw `{data: 0x5555…, len: 3}` where the value is `"ola"` or `[10, 20, 30]`.
+// The driver must recognise them by NAME, before the struct path.
+func TestOdinTraceDriver_ContainersShowValues(t *testing.T) {
+	for _, want := range []string{"_odin_string", "_odin_sequence", "_odin_map"} {
+		if !strings.Contains(traceDriverGDB, want) {
+			t.Fatalf("the driver must render Odin containers by value (%s missing)", want)
+		}
+	}
+	// Recognised BEFORE the generic struct expansion, or the {data,len} shape wins.
+	iName := strings.Index(traceDriverGDB, `tname in ("string", "cstring")`)
+	iStruct := strings.Index(traceDriverGDB, `key = ("s", str(v.address)`)
+	if iName < 0 || iStruct < 0 || iName > iStruct {
+		t.Fatal("container recognition must come BEFORE the generic struct path")
+	}
+	// A length read out of a hostile program drives the read loop, so it is
+	// itself validated — an unchecked `len` is an arbitrary-size memory read.
+	if !strings.Contains(traceDriverGDB, "MAX_SANE_LEN") || !strings.Contains(traceDriverGDB, "def _sane_len") {
+		t.Fatal("the driver must sanity-check a container's len before walking it")
+	}
+	// The map's internals are runtime-private; inventing entries would be a lie
+	// that breaks on the next toolchain bump.
+	if !strings.Contains(traceDriverGDB, "internal and version-specific") {
+		t.Fatal("the map box must stay honest (type + length), not fake its entries")
+	}
+}

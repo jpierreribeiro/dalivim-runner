@@ -30,6 +30,7 @@ import json
 import os
 import runpy
 import sys
+from types import FunctionType as _FunctionType
 
 # ---- bounds (runner-controlled via env; all have safe fallbacks) -------------
 
@@ -234,6 +235,39 @@ def _value_ref(v, idmap, heap, queue):
         queue.append((rid, v))
     return {"ref": rid}
 
+def _expand_function(f, idmap, heap, queue):
+    """Function box: the signature the student wrote plus the names it CAPTURED.
+    `co_freevars` names the closed-over variables and `__closure__` holds their
+    cells, in the same order; an empty cell (a name captured but not yet bound)
+    is rendered as such instead of raising."""
+    try:
+        code = f.__code__
+        params = list(code.co_varnames[: code.co_argcount + code.co_kwonlyargcount])[:MAX_ITEMS]
+        closure = {}
+        names = code.co_freevars or ()
+        cells = f.__closure__ or ()
+        for i, name in enumerate(names):
+            if i >= MAX_VARS or i >= len(cells):
+                break
+            try:
+                closure[name] = _value_ref(cells[i].cell_contents, idmap, heap, queue)
+            except ValueError:
+                # A cell exists but is empty: the name is captured and not yet
+                # assigned. That is a real state, worth showing as itself.
+                closure[name] = {"prim": "empty", "text": "(ainda não definido)"}
+            except Exception:
+                closure[name] = {"prim": "opaque", "text": "<ilegível>"}
+        return {
+            "kind": "function",
+            "cls": getattr(f, "__name__", "?"),
+            "params": params,
+            "closure": closure,
+            "truncated": len(names) > MAX_VARS,
+        }
+    except Exception:
+        return {"kind": "opaque", "cls": "function"}
+
+
 def _expand_object(v, idmap, heap, queue):
     """Build the typed heap box for v. Children are serialized via _value_ref,
     so nested objects are enqueued and shared/cyclic refs collapse to one box."""
@@ -259,6 +293,15 @@ def _expand_object(v, idmap, heap, queue):
                 entries.append([_value_ref(k, idmap, heap, queue),
                                 _value_ref(val, idmap, heap, queue)])
             return {"kind": "dict", "entries": entries, "truncated": truncated}
+        # A function is the object a student most needs DRAWN, not labelled:
+        # a closure is only understandable as a box holding the captured names.
+        # Falling through to `opaque` (as this did) turned `contador()` into a
+        # grey box and made the hardest topic the tutor exists to teach invisible.
+        # types.FunctionType is checked EXACTLY: a class instance can fake
+        # __name__/__closure__, and reading those off an arbitrary object would be
+        # calling into student code, which the harness never does.
+        if type(v) is _FunctionType:
+            return _expand_function(v, idmap, heap, queue)
         fields = _instance_fields(v)
         if fields is not None:
             out = {}
@@ -292,7 +335,8 @@ def _vars_graph(mapping, idmap, heap, queue, drop_globals=False):
         try:
             if not isinstance(name, str):
                 continue
-            if drop_globals and (not _is_recordable_name(name) or _skip_global_value(val)):
+            if drop_globals and (not _is_recordable_name(name)
+                                 or _skip_global_value(val, keep_student_functions=True)):
                 continue
             out[name] = _value_ref(val, idmap, heap, queue)
             n += 1
@@ -316,10 +360,23 @@ def _is_recordable_name(name):
     # Skip dunder names in globals (module machinery), keep everything else.
     return not (name.startswith("__") and name.endswith("__"))
 
-def _skip_global_value(v):
+def _skip_global_value(v, keep_student_functions=False):
     # Globals include imported modules, functions, and classes — noise for a
     # variables panel. Keep data-ish values only.
+    #
+    # The GRAPH (v2) makes one exception: a function the STUDENT defined in the
+    # traced file. Drawing it is the whole point of a closure diagram — a
+    # `contador()` that returns `incr` is unreadable if `incr` is invisible — and
+    # it is exactly what Python Tutor shows in the Global frame. Imported
+    # functions, builtins, modules and classes stay filtered: those are the noise
+    # this guard exists for. The v1 variables table keeps its old behaviour, so
+    # this widens nothing that already ships.
     import types as _t
+    if keep_student_functions and type(v) is _t.FunctionType:
+        try:
+            return v.__code__.co_filename != TARGET
+        except Exception:
+            return True
     return isinstance(v, (_t.ModuleType, _t.FunctionType, _t.BuiltinFunctionType,
                           _t.MethodType, type))
 

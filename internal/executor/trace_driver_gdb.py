@@ -9,7 +9,14 @@
 # dangling, scribble a length field, or simply not have written a local yet, and
 # the debugger will hand us whatever bytes are there. So:
 #
-#   * a pointer is NEVER dereferenced — only its address is reported;
+#   * a BARE pointer is never dereferenced — only its address is reported. The
+#     ONE exception is a container whose layout the language defines (an Odin
+#     string/slice/dynamic array is {data,len[,cap]}): there we DO read through
+#     `data`, but only after sanity-checking `len`, only up to MAX_ITEMS, and with
+#     every element read guarded — a scribbled length or a dangling buffer yields
+#     `opaque`, never a crash. Without this the student sees `{data: 0x5555…,
+#     len: 3}` instead of `"ola"` or `[10, 20, 30]`, which is the implementation,
+#     not the value;
 #   * every value read is wrapped: any gdb error becomes `opaque`, never an
 #     exception that kills the driver mid-trace;
 #   * a variable is HIDDEN until execution passes its declaring line. DWARF scope
@@ -71,6 +78,10 @@ MAX_ITEMS = 30
 MAX_STR = 256
 MAX_DEPTH = 4
 MAX_STACK = 25
+# A length field read out of a hostile program is itself untrusted. Anything past
+# this is treated as corrupt rather than walked — the cap that keeps a scribbled
+# `len` from turning into a multi-gigabyte read.
+MAX_SANE_LEN = 1_000_000
 
 # Names the compiler injects into every frame; not the student's variables.
 IMPLICIT_NAMES = {"context"}
@@ -116,6 +127,83 @@ def _opaque(reason="ilegível"):
     return {"prim": "opaque", "text": "<%s>" % reason}
 
 
+def _sane_len(v):
+    """The `len` field of a container, or None when it is not believable. A
+    native program can scribble it, so it is validated before it is used to
+    drive any loop."""
+    try:
+        n = int(v["len"])
+    except Exception:
+        return None
+    return n if 0 <= n <= MAX_SANE_LEN else None
+
+
+def _odin_string(v):
+    """Odin `string`/`cstring` -> the actual text. The layout is {data,len}; we
+    read exactly `len` bytes and quote them, so the student sees "ola" instead of
+    a pointer and a number."""
+    n = _sane_len(v)
+    if n is None:
+        return _opaque("comprimento inválido")
+    try:
+        raw = v["data"].string(length=min(n, MAX_STR), errors="replace")
+    except Exception:
+        return _opaque("texto ilegível")
+    text = '"%s"' % raw
+    if n > MAX_STR:
+        text = text[:-1] + '…"'
+    return {"prim": "string", "text": text}
+
+
+def _odin_sequence(v, t, heap, depth, kind_name):
+    """Odin slice `[]T` / `[dynamic]T` -> a list box with real cells. Both are
+    {data,len[,cap]}; `cap` is shown for a dynamic array because "grew to 8 slots
+    holding 1" is exactly the thing a student needs to see."""
+    n = _sane_len(v)
+    if n is None:
+        return _opaque("comprimento inválido")
+    key = ("seq", str(v["data"]), str(t))
+    rid = heap.id_for(key)
+    if rid is None:
+        heap.truncated = True
+        return _opaque("limite de objetos")
+    if rid not in heap.boxes:
+        box = {"kind": "list", "cls": kind_name, "items": [], "truncated": n > MAX_ITEMS}
+        heap.boxes[rid] = box
+        items = []
+        try:
+            data = v["data"]
+            for i in range(min(n, MAX_ITEMS)):
+                try:
+                    items.append(value_v2((data + i).dereference(), heap, depth + 1))
+                except Exception:
+                    items.append(_opaque())
+        except Exception:
+            box["truncated"] = True
+        box["items"] = items
+    return {"ref": rid}
+
+
+def _odin_map(v, t, heap):
+    """Odin `map[K]V`. Its `data` is the runtime's hash table, whose layout is
+    internal and version-specific — walking it would be guesswork that breaks on
+    the next toolchain bump. So the box is HONEST: the map's type and how many
+    entries it holds, explicitly marked partial, instead of invented pairs."""
+    rid = heap.id_for(("map", str(v["data"]), str(t)))
+    if rid is None:
+        heap.truncated = True
+        return _opaque("limite de objetos")
+    if rid not in heap.boxes:
+        n = _sane_len(v)
+        heap.boxes[rid] = {
+            "kind": "object",
+            "cls": str(t).replace("struct ", ""),
+            "fields": {"len": _prim("int", n if n is not None else "?")},
+            "truncated": True,
+        }
+    return {"ref": rid}
+
+
 def value_v2(v, heap, depth=0):
     """gdb.Value -> trace v2 value: inline primitive or {"ref": id}. Never raises,
     never dereferences a pointer."""
@@ -141,6 +229,20 @@ def value_v2(v, heap, depth=0):
         if depth >= MAX_DEPTH:
             return _opaque("profundidade")
 
+        # Odin's composite types are STRUCTS at the DWARF level ({data,len}), so
+        # they must be recognised by NAME before the generic struct path — that
+        # path would faithfully render the implementation and hide the value.
+        if code == gdb.TYPE_CODE_STRUCT:
+            tname = str(t).replace("struct ", "")
+            if tname in ("string", "cstring"):
+                return _odin_string(v)
+            if tname.startswith("[]"):
+                return _odin_sequence(v, t, heap, depth, tname)
+            if tname.startswith("[dynamic]"):
+                return _odin_sequence(v, t, heap, depth, tname)
+            if tname.startswith("map["):
+                return _odin_map(v, t, heap)
+
         if code == gdb.TYPE_CODE_STRUCT:
             key = ("s", str(v.address), str(t))
             rid = heap.id_for(key)
@@ -148,7 +250,7 @@ def value_v2(v, heap, depth=0):
                 heap.truncated = True
                 return _opaque("limite de objetos")
             if rid not in heap.boxes:
-                box = {"kind": "object", "cls": _clip(t), "fields": {}, "truncated": False}
+                box = {"kind": "object", "cls": _clip(str(t).replace("struct ", "")), "fields": {}, "truncated": False}
                 heap.boxes[rid] = box  # inserted BEFORE recursing: cycles terminate
                 fields = {}
                 for i, f in enumerate(t.fields()):
