@@ -99,6 +99,62 @@ func TestCSharpSpec(t *testing.T) {
 	}
 }
 
+// TestCSharpJailConcessions pins the two limits the CoreCLR cannot start under,
+// on BOTH phases (csc is itself a .NET program). capAddressSpace:false only
+// declines to ADD a cap; nsjail's own 4 GB default still aborted the CLR at GC
+// heap init, and its 32-descriptor default made the loader fail with a bogus
+// "Could not load file or assembly 'System.Console'". Both were misdiagnosed as a
+// missing assembly for exactly as long as the diagnostic below was on.
+func TestCSharpJailConcessions(t *testing.T) {
+	if !csharpSpec.unlimitedAddressSpace {
+		t.Fatal("csharp must lift RLIMIT_AS outright: nsjail's 4 GB default aborts CoreCLR GC heap init (0x8007000E)")
+	}
+	if csharpSpec.maxOpenFiles < 1024 {
+		t.Fatalf("csharp needs RLIMIT_NOFILE well above nsjail's 32 (one mmap per assembly), got %d", csharpSpec.maxOpenFiles)
+	}
+	// The COREHOST_TRACE diagnostic dumped ~64 KB of host resolution logging into
+	// compile_output, overflowing its cap and SWALLOWING the real compiler error.
+	// It must never ship again on either phase.
+	for _, env := range [][]string{csharpSpec.compileEnv, csharpSpec.runEnv} {
+		if strings.Contains(strings.Join(env, " "), "COREHOST_TRACE") {
+			t.Fatalf("COREHOST_TRACE floods compile_output past its cap and hides the real error: %v", env)
+		}
+	}
+	// Lifting RLIMIT_AS removed the only per-run memory bound in the no-cgroup mode,
+	// so the ceiling must live in the runtime instead — C#'s -Xmx, templated per
+	// request. A literal (untemplated) limit would silently ignore memory_mb.
+	if !strings.Contains(strings.Join(csharpSpec.runEnv, " "), "DOTNET_GCHeapHardLimit={memhex}") {
+		t.Fatalf("csharp run env must template the heap ceiling from the request budget: %v", csharpSpec.runEnv)
+	}
+	// ...and the fallback marker must match what breaching that ceiling actually
+	// PRINTS. A GCHeapHardLimit breach fail-fasts with "Out of memory." on stderr; it
+	// never throws OutOfMemoryException, so pinning the exception name would classify
+	// every C# OOM as a plain runtime_error.
+	if csharpSpec.memErrSubstr != "Out of memory" {
+		t.Fatalf("csharp OOM marker must match the CLR's fail-fast text, got %q", csharpSpec.memErrSubstr)
+	}
+}
+
+// TestMemHex pins the DOTNET_GCHeapHardLimit rendering: the CLR wants a hex BYTE
+// count, so a megabyte budget must be shifted, not printed. A non-positive budget
+// renders empty rather than a 0-byte heap that would fail every run.
+func TestMemHex(t *testing.T) {
+	for _, tc := range []struct {
+		mb   int
+		want string
+	}{
+		{128, "0x8000000"},
+		{256, "0x10000000"},
+		{512, "0x20000000"},
+		{0, ""},
+		{-1, ""},
+	} {
+		if got := memHex(tc.mb); got != tc.want {
+			t.Fatalf("memHex(%d) = %q, want %q", tc.mb, got, tc.want)
+		}
+	}
+}
+
 // TestCSharp_MultiFileRejected pins the phase-1 scope: C# is source_code-only (a
 // single Main.cs), so a files[] csharp request is a clean 400 (no csharp file policy
 // — multi-class/namespace layouts across .cs files are a documented G3 follow-up),

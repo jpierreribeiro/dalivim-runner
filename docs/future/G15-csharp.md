@@ -26,6 +26,24 @@
 > `OutOfMemoryException` as the no-cgroup fallback marker and a 128 MB floor for CLR
 > non-heap overhead; (4) `DOTNET_EnableDiagnostics=0` disables the /tmp diagnostic IPC
 > socket. Multi-file (multi-class/namespace `.cs`, G3) is a follow-up.
+>
+> **Correction (2026-08-03) — deviation (3) above is superseded, and C# did not
+> actually run in production until this fix.** Two nsjail limits, both left at
+> nsjail's *defaults* rather than set by us, aborted the CoreCLR in BOTH phases:
+> `--rlimit_as` defaults to **4096 MB** (`capAddressSpace:false` only declines to add
+> OUR cap — it does not remove nsjail's), which kills the CLR at GC heap init
+> (`0x8007000E`); and `--rlimit_nofile` defaults to **32**, too few to map the
+> framework's assemblies, which the loader misreports as
+> `Could not load file or assembly 'System.Console'`. That misleading message is what
+> the shipped `COREHOST_TRACE=1` diagnostic was chasing — and the diagnostic made it
+> worse, flooding `compile_output` past its 64 KB cap so the real error never
+> surfaced. The runtime now sets `UnlimitedAddressSpace` + `MaxOpenFiles: 1024`, and
+> the trace is gone. Lifting `RLIMIT_AS` removed the only per-run memory bound in the
+> no-cgroup mode, so the ceiling moved into the runtime: `runEnv` is now templated
+> (`{memhex}`) and pins `DOTNET_GCHeapHardLimit` per request — C#'s `-Xmx`, which is
+> exactly what deviation (3) said was impossible. The fallback marker is
+> `"Out of memory"`, not `OutOfMemoryException`: breaching a hard heap limit is a
+> fail-fast (exit 139), never a catchable exception.
 
 C# is the second VM-compiled language after Java (`ADDING-A-LANGUAGE.md:95` names it
 next). It slots into **Shape C**: compile the source to IL, run the IL on a VM (the

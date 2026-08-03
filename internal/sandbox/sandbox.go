@@ -53,12 +53,44 @@ type Spec struct {
 	TimeoutMs int
 
 	// AddressSpaceMB caps the child's virtual address space (RLIMIT_AS), in MB.
-	// 0 leaves it UNSET on purpose: a runtime like V8/Node reserves a multi-GB
+	// 0 omits OUR flag on purpose: a runtime like V8/Node reserves a multi-GB
 	// virtual "cage" at startup that a tight RLIMIT_AS refuses ("Failed to reserve
 	// virtual memory for CodeRange"), so such runtimes pass 0 here and bound real
 	// memory another way — an interpreter heap flag plus the container/cgroup
 	// memory limit. CPython tolerates the hard cap, so Python passes its budget.
+	//
+	// CAREFUL: omitting the flag is NOT "unlimited". nsjail applies its OWN default
+	// (--rlimit_as 4096 MB) to anything we leave unspecified, so 0 means "nsjail's
+	// 4 GB", not "no cap". Node/Go/the JVM fit inside 4 GB; the CoreCLR does not
+	// (it aborts at GC heap init with 0x8007000E) — that runtime must additionally
+	// set UnlimitedAddressSpace. See UnlimitedAddressSpace.
 	AddressSpaceMB int
+
+	// UnlimitedAddressSpace lifts RLIMIT_AS entirely (nsjail --rlimit_as inf) for a
+	// runtime that cannot start under ANY address-space cap, including nsjail's own
+	// 4 GB default. Only the CoreCLR needs this today: it reserves its virtual arena
+	// eagerly and dies at startup under 4 GB ("GC heap initialization failed with
+	// error 0x8007000E"), in BOTH the compile (csc is itself a .NET program) and the
+	// run phase.
+	//
+	// This trades a virtual-memory bound for the cgroup one: real memory stays
+	// bounded by the per-run memory.max (F-E/R6), which is the authoritative RSS
+	// accounting anyway. Without a delegated cgroup there is then no per-run memory
+	// ceiling for such a runtime — the reason the C# runtime declines to start in
+	// that mode (see the executor's cgroup requirement).
+	//
+	// Ignored when AddressSpaceMB > 0: an explicit cap always wins over the lift.
+	UnlimitedAddressSpace bool
+
+	// MaxOpenFiles raises the jail's RLIMIT_NOFILE (nsjail --rlimit_nofile). 0 keeps
+	// nsjail's default of 32 descriptors, which is ample for an interpreter or a
+	// static artifact and is a real containment property (it bounds fd exhaustion).
+	//
+	// A managed runtime that memory-maps one file per assembly blows straight
+	// through 32: the CoreCLR fails to load System.Console with a bogus
+	// "Could not load file or assembly" — an ENOENT-shaped message for what is
+	// really descriptor exhaustion. Such a runtime raises this to what it needs.
+	MaxOpenFiles int
 
 	// MemoryMB is the run's real-memory budget in MB. When the nsjail backend has a
 	// delegated cgroup v2 subtree (F-E/R6), it becomes the per-run `memory.max`:

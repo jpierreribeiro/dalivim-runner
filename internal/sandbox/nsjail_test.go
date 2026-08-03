@@ -127,13 +127,50 @@ func TestNsjailArgs_OptionalLimitsOmitted(t *testing.T) {
 
 // TestNsjailArgs_ZeroAddressSpaceOmitsRlimitAS pins the Node path: a run that
 // cannot take a virtual-address cap (V8's multi-GB cage) passes AddressSpaceMB=0
-// and must get NO --rlimit_as flag, not "--rlimit_as 0".
+// and must get NO --rlimit_as flag, not "--rlimit_as 0". Omitting the flag leaves
+// nsjail's OWN 4 GB default standing — which is the point for Node (it fits), and
+// is why a runtime that does NOT fit needs UnlimitedAddressSpace below.
 func TestNsjailArgs_ZeroAddressSpaceOmitsRlimitAS(t *testing.T) {
 	spec := sampleSpec()
 	spec.AddressSpaceMB = 0
 	args := nsjailArgs(1000, 1000, spec)
 	if hasArg(args, "--rlimit_as") {
 		t.Fatal("AddressSpaceMB=0 must omit --rlimit_as (V8/Node cannot start under a tight cap)")
+	}
+}
+
+// TestNsjailArgs_UnlimitedAddressSpace pins the CoreCLR path: omitting our cap is
+// not enough, because nsjail then applies its own 4 GB default and the CLR aborts
+// at GC heap init (0x8007000E). UnlimitedAddressSpace must lift it EXPLICITLY —
+// and an explicit AddressSpaceMB still wins, so the lift can never widen a run
+// that asked to be capped.
+func TestNsjailArgs_UnlimitedAddressSpace(t *testing.T) {
+	spec := sampleSpec()
+	spec.AddressSpaceMB = 0
+	spec.UnlimitedAddressSpace = true
+	if got := argValue(nsjailArgs(1000, 1000, spec), "--rlimit_as"); got != "inf" {
+		t.Fatalf("UnlimitedAddressSpace must emit --rlimit_as inf, got %q", got)
+	}
+
+	spec.AddressSpaceMB = 128 // an explicit cap outranks the lift
+	if got := argValue(nsjailArgs(1000, 1000, spec), "--rlimit_as"); got != "128" {
+		t.Fatalf("an explicit AddressSpaceMB must win over the lift, got %q", got)
+	}
+}
+
+// TestNsjailArgs_MaxOpenFiles pins RLIMIT_NOFILE: nsjail's default of 32 stands
+// unless a runtime asks for more (the CoreCLR maps one file per assembly and
+// misreports the exhaustion as "Could not load file or assembly").
+func TestNsjailArgs_MaxOpenFiles(t *testing.T) {
+	spec := sampleSpec()
+	spec.MaxOpenFiles = 1024
+	if got := argValue(nsjailArgs(1000, 1000, spec), "--rlimit_nofile"); got != "1024" {
+		t.Fatalf("MaxOpenFiles=1024 must emit --rlimit_nofile 1024, got %q", got)
+	}
+
+	spec.MaxOpenFiles = 0
+	if hasArg(nsjailArgs(1000, 1000, spec), "--rlimit_nofile") {
+		t.Fatal("MaxOpenFiles=0 must omit --rlimit_nofile (nsjail's tight default is the right one)")
 	}
 }
 
