@@ -103,6 +103,42 @@ func staticAllowlistPolicy(defaultAction string) string {
 		"\n\t}\n}\nUSE dalivim_static DEFAULT " + defaultAction
 }
 
+// tracerPolicy is the denylist MINUS the three tracer syscalls, for the step-
+// through tutor of a COMPILED language (B.2). A native binary has no
+// sys.settrace, so the only way to stop it line by line is a debugger, and a
+// debugger is ptrace. Everything else in the denylist stays: mount/pivot_root,
+// module and BPF loading, keyrings, reboot/swap, the fd-to-path handle tricks,
+// perf_event_open, io_uring and userfaultfd.
+//
+// Why this is defensible, measured rather than assumed (docs/future/B2-TRACER-SPIKE.md):
+//
+//   - The classic objection — "a tracer rewrites the syscall number at the
+//     ptrace stop, AFTER seccomp ran, so the filter is bypassable" — is FALSE on
+//     this kernel. Tested directly: a tracer flipping getppid(110) to mount(165)
+//     gets the child killed with SIGSYS. The kernel re-applies the filter to the
+//     rewritten call.
+//   - The jail's other walls are unchanged and are what bound the blast radius:
+//     a fresh PID namespace (a tracer can only see the jail's own processes), a
+//     jail-private uid (nothing more privileged to attach to), a read-only
+//     rootfs with no setuid binary, and no_new_privs.
+//
+// This profile is used ONLY for mode=trace on a compiled language. Run mode,
+// test mode and every interpreted language keep the full denylist.
+func tracerPolicy() string {
+	return `POLICY dalivim_trace {
+	KILL {
+		mount, umount, pivot_root, chroot,
+		kexec_load, init_module, finit_module, delete_module,
+		bpf, setns, unshare,
+		add_key, keyctl, request_key,
+		reboot, swapon, swapoff,
+		open_by_handle_at, name_to_handle_at, perf_event_open,
+		io_uring_setup, io_uring_enter, io_uring_register, userfaultfd
+	}
+}
+USE dalivim_trace DEFAULT ALLOW`
+}
+
 // seccompPolicyFor returns the kafel policy string for a run's chosen profile.
 func seccompPolicyFor(p SeccompProfile) string {
 	switch p {
@@ -110,6 +146,8 @@ func seccompPolicyFor(p SeccompProfile) string {
 		return staticAllowlistPolicy("KILL")
 	case SeccompStaticComplain:
 		return staticAllowlistPolicy("LOG")
+	case SeccompTracer:
+		return tracerPolicy()
 	default:
 		return seccompPolicy
 	}
@@ -134,7 +172,6 @@ func nsjailArgs(uid, gid int, spec Spec) []string {
 	args := []string{
 		"--mode", "o", // execve once, then exit — not a persistent daemon
 		"--quiet",
-		"--disable_proc",                                             // no /proc in the jail: hides host pids, cuts attack surface
 		"--iface_no_lo",                                              // even loopback stays down: an empty, egress-less network
 		"--time_limit", strconv.Itoa(wallCapSeconds(spec.TimeoutMs)), // hard wall-clock belt
 		"--rlimit_cpu", strconv.Itoa(cpuCapSeconds(spec.TimeoutMs)), // RLIMIT_CPU, s
@@ -148,6 +185,14 @@ func nsjailArgs(uid, gid int, spec Spec) []string {
 		// made the boot probe fail closed on `newgidmap: No such file or directory`.
 		"--user", "0:" + strconv.Itoa(uid) + ":1",
 		"--group", "0:" + strconv.Itoa(gid) + ":1",
+	}
+
+	// No /proc in the jail by default: it hides host pids and cuts attack surface.
+	// The ONE exception is the trace jail of a compiled language, where a debugger
+	// cannot function without it (see Spec.TracerProcfs) — and even then it is the
+	// procfs of the jail's own fresh PID namespace, not the host's.
+	if !spec.TracerProcfs {
+		args = append(args, "--disable_proc")
 	}
 
 	// Rootfs. Interpreters and the compiler need the whole host rootfs read-only

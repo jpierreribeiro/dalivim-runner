@@ -29,6 +29,24 @@ RUNNER_CGROUP=require                       # 'auto' until `setup` has made it r
 RUNNER_CGROUP_MOUNT=/sys/fs/cgroup/dalivim
 CGROUP_PARENT=/dalivim                      # empty to disable R6 cgroup placement
 RUNNER_STATIC_SECCOMP=""                    # F-D C/C++ run jail: off|complain|enforce (empty => off)
+# NATIVE_TRACE=1 enables the Odin step-through tutor (B.2) by running the
+# container with `--security-opt systempaths=unconfined`. It is OFF by default
+# and it is a REAL trade-off, so read this before flipping it:
+#
+#   Why it is needed: the trace jail mounts a FRESH procfs (a debugger cannot
+#   resolve a PIE binary's load base without /proc/<pid>/maps). Mounting procfs
+#   inside a user namespace is refused by the kernel while the container's own
+#   /proc is masked — Docker bind-mounts /dev/null over /proc/kcore and friends,
+#   which makes it "not fully visible". Without this flag every mode=trace on
+#   odin fails with: Failed to mount mandatory point: '/proc'.
+#
+#   What it costs: the CONTAINER's /proc stops being masked. The JAIL is
+#   unaffected — student code still gets a fresh procfs of the jail's own PID
+#   namespace, showing only the jail's handful of processes. So the exposure is
+#   to something that has already escaped the jail, not to the student program.
+#
+#   If you do not run Odin activities with the step-through, leave it off.
+NATIVE_TRACE=""
 CPUS=1
 MEMORY=1g
 PIDS_LIMIT=512
@@ -127,6 +145,14 @@ cmd_up() {
   [ -n "$RUNNER_MAX_MEMORY_MB" ]     && lim+=(-e "RUNNER_MAX_MEMORY_MB=$RUNNER_MAX_MEMORY_MB")
   [ -n "$RUNNER_STATIC_SECCOMP" ]    && lim+=(-e "RUNNER_STATIC_SECCOMP=$RUNNER_STATIC_SECCOMP")
 
+  # Unmask the container's /proc only when the native step-through is enabled;
+  # see NATIVE_TRACE above for exactly what that widens (and what it does not).
+  local sysp=()
+  if [ -n "$NATIVE_TRACE" ]; then
+    sysp=(--security-opt systempaths=unconfined)
+    log "native step-through ENABLED: /proc unmasked for the container (see NATIVE_TRACE in deploy.sh)"
+  fi
+
   log "recreating '$CONTAINER' from image '$IMAGE'"
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
   docker run -d --name "$CONTAINER" --restart unless-stopped \
@@ -138,6 +164,7 @@ cmd_up() {
     -e "RUNNER_CGROUP=$RUNNER_CGROUP" \
     -e "RUNNER_CGROUP_MOUNT=$RUNNER_CGROUP_MOUNT" \
     "${lim[@]}" \
+    "${sysp[@]}" \
     --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
     --pids-limit="$PIDS_LIMIT" --ulimit "nproc=$NPROC" --cpus="$CPUS" --memory="$MEMORY" \
     "$IMAGE" >/dev/null
