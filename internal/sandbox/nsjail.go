@@ -181,11 +181,22 @@ func nsjailArgs(uid, gid int, spec Spec) []string {
 		"--keep_env", // pass exactly the minimal env the caller set on cmd.Env
 		"--seccomp_string", seccompPolicyFor(spec.Seccomp),
 	)
-	// RLIMIT_AS, MB. 0 => leave it unset: V8/Node cannot start under a tight
-	// address-space cap (multi-GB virtual reservation), so those runs bound memory
-	// via an interpreter heap flag + the container/cgroup limit instead.
-	if spec.AddressSpaceMB > 0 {
+	// RLIMIT_AS, MB. 0 => omit OUR flag, which leaves nsjail's own 4096 MB default
+	// standing (NOT "unlimited"): V8/Node cannot start under a *tight* cap (multi-GB
+	// virtual reservation) but fit inside 4 GB, and bound real memory via an
+	// interpreter heap flag + the container/cgroup limit. A runtime that cannot even
+	// start under 4 GB (the CoreCLR) sets UnlimitedAddressSpace to lift it outright.
+	switch {
+	case spec.AddressSpaceMB > 0:
 		args = append(args, "--rlimit_as", strconv.Itoa(spec.AddressSpaceMB))
+	case spec.UnlimitedAddressSpace:
+		args = append(args, "--rlimit_as", "inf")
+	}
+	// RLIMIT_NOFILE. 0 => nsjail's default of 32, which bounds fd exhaustion and
+	// suffices for interpreters and static artifacts. A runtime that maps one file
+	// per assembly (the CoreCLR) raises it — see Spec.MaxOpenFiles.
+	if spec.MaxOpenFiles > 0 {
+		args = append(args, "--rlimit_nofile", strconv.Itoa(spec.MaxOpenFiles))
 	}
 	// Per-run fork-bomb cap against the jail-private uid (safe here, unlike a
 	// process-wide RLIMIT_NPROC). 0 => leave nsjail's default.

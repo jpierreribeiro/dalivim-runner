@@ -41,6 +41,17 @@ type compiledLangSpec struct {
 	// to reserve page summary memory"), exactly like V8 — so Go is bounded by the
 	// cgroup memory.max only, despite being a static binary.
 	capAddressSpace bool
+	// unlimitedAddressSpace lifts RLIMIT_AS outright (both phases) for a runtime that
+	// cannot start under nsjail's 4 GB DEFAULT either — capAddressSpace:false only
+	// declines to add OUR cap, it does not remove nsjail's. The CoreCLR is the one
+	// such runtime: under 4 GB it aborts at GC heap init (0x8007000E) before Main.
+	// Real memory stays bounded by the per-run cgroup memory.max.
+	unlimitedAddressSpace bool
+	// maxOpenFiles raises RLIMIT_NOFILE above nsjail's default of 32 (both phases).
+	// A runtime that maps one file per assembly (the CoreCLR) exhausts 32 mid-load
+	// and reports it as a bogus "Could not load file or assembly". 0 keeps the
+	// default, which is right for every other language here.
+	maxOpenFiles int
 	// staticAllowlistOK is whether this language MAY run under the tight static
 	// seccomp allowlist. True for C/C++. FALSE for Go: its scheduler needs clone and
 	// a wider syscall set than the C allowlist names, so Go stays on the denylist
@@ -408,11 +419,6 @@ var csharpSpec = compiledLangSpec{
 		// GC heap hard limit (384 MiB, well inside RUNNER_COMPILE_MEMORY_MB=512) so heap
 		// sizing is deterministic and /proc-independent; ample for a single-file compile.
 		"DOTNET_GCHeapHardLimit=0x18000000",
-		// DIAGNOSTIC (temporary): csc still faults loading System.Console in the jail
-		// (deterministic, ~337 ms in) though the identical command passes in the build
-		// proof. COREHOST_TRACE dumps the host's framework/TPA resolution to stderr so
-		// the next CI compile_output reveals exactly why the loader misses it. Remove.
-		"COREHOST_TRACE=1", "COREHOST_TRACE_VERBOSITY=3",
 	},
 	// Run env: the shared determinism pin + DOTNET_ROOT (locate the shared framework),
 	// writable HOME/TMPDIR on the jail's /tmp, telemetry/first-run off, and
@@ -430,15 +436,37 @@ var csharpSpec = compiledLangSpec{
 		"DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1",
 		// See compileEnv: Workstation GC (single heap) so the CoreCLR starts under the
 		// jail's constrained, /proc-less memory view instead of aborting at GC heap
-		// init. The run heap stays bounded by the cgroup memory.max (or nsjail's default
-		// RLIMIT_AS as the no-cgroup fallback → OutOfMemoryException), not a hard limit,
-		// so memory_mb still governs the run and the mem-bomb classifies as expected.
+		// init.
 		"DOTNET_gcServer=0",
+		// The run's heap ceiling, per request ({memhex} = memory_mb as hex bytes).
+		// This is C#'s -Xmx: unlimitedAddressSpace removes RLIMIT_AS, which WAS the
+		// only per-run bound when no cgroup is delegated, so the ceiling moves into
+		// the runtime itself instead of vanishing. With a cgroup (F-E/R6, production)
+		// memory.max still bounds real RSS and classifies via the kernel OOM event;
+		// without one, the CLR fail-fasts with "Out of memory." and memErrSubstr
+		// classifies it — the same two-path posture as Java. nsjail --disable_proc hides
+		// /proc/meminfo, so an explicit limit is also what keeps GC sizing
+		// deterministic rather than /proc-derived.
+		"DOTNET_GCHeapHardLimit={memhex}",
 	),
-	runFullRootfs:     true,                   // the CoreCLR is dynamically linked — full rootfs (like the JVM)
-	capAddressSpace:   false,                  // the CLR reserves a large virtual space; RLIMIT_AS kills startup
-	staticAllowlistOK: false,                  // widest syscall surface (JIT mmap, clone) → denylist, like the JVM
-	memErrSubstr:      "OutOfMemoryException", // no-cgroup fallback OOM classify
+	runFullRootfs:   true,  // the CoreCLR is dynamically linked — full rootfs (like the JVM)
+	capAddressSpace: false, // the CLR reserves a large virtual space; RLIMIT_AS kills startup
+	// ...and declining OUR cap is not enough: nsjail's own 4 GB default still aborts
+	// the CoreCLR at GC heap init (0x8007000E), in the compile phase too (csc is a
+	// .NET program). Lift RLIMIT_AS outright; memory.max remains the real bound.
+	unlimitedAddressSpace: true,
+	// 32 descriptors (nsjail's default) is fewer than the CoreCLR needs to map the
+	// framework: the loader runs out mid-load and blames the last assembly it wanted
+	// ("Could not load file or assembly 'System.Console'"), which reads like a
+	// missing-file bug and is not one.
+	maxOpenFiles:      1024,
+	staticAllowlistOK: false, // widest syscall surface (JIT mmap, clone) → denylist, like the JVM
+	// No-cgroup fallback OOM classify. NOT "OutOfMemoryException": a GCHeapHardLimit
+	// breach is a runtime FAIL-FAST, not a catchable exception — the CLR prints
+	// exactly "Out of memory." to stderr and aborts (verified on target, exit 139,
+	// for both an incremental bomb and one oversized allocation). Matching the
+	// exception name instead would classify every C# OOM as a plain runtime_error.
+	memErrSubstr: "Out of memory",
 	// The CLR's non-heap overhead (JIT, metadata) sits on top of allocations, like the
 	// JVM: floor an undersized budget so it starts at all. cgroup memory.max is the
 	// authoritative bound (deploy-time proof, like Go/Java — not the cgroup=auto CI).
@@ -755,12 +783,16 @@ func (r *compiledRuntime) compile(ctx context.Context, req runnerapi.RunRequest,
 		WorkDir:        workDir,
 		TimeoutMs:      timeout,
 		AddressSpaceMB: compileAS,
-		MemoryMB:       r.compileMemoryMB,
-		MaxProcesses:   r.maxProcesses,
-		MaxFileSizeMB:  r.maxFileSizeMB,
-		TmpfsSizeMB:    r.spec.compileTmpfsMB,
-		Writable:       true, // the compiler writes its artifact into /sandbox
-		MinimalRootfs:  false,
+		// csc is itself a .NET program, so the compile jail needs the same two
+		// CoreCLR concessions as the run jail — see the spec fields.
+		UnlimitedAddressSpace: r.spec.unlimitedAddressSpace,
+		MaxOpenFiles:          r.spec.maxOpenFiles,
+		MemoryMB:              r.compileMemoryMB,
+		MaxProcesses:          r.maxProcesses,
+		MaxFileSizeMB:         r.maxFileSizeMB,
+		TmpfsSizeMB:           r.spec.compileTmpfsMB,
+		Writable:              true, // the compiler writes its artifact into /sandbox
+		MinimalRootfs:         false,
 	})
 	if err != nil {
 		return runnerapi.RunResult{Status: runnerapi.StatusInternalError, Stderr: "sandbox containment unavailable"}, false
@@ -833,14 +865,18 @@ func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest,
 		runAS = req.MemoryMB
 	}
 	cmd, acct, err := r.sandbox.Command(rctx, sandbox.Spec{
-		Argv:           argv,
-		WorkDir:        workDir,
-		TimeoutMs:      req.TimeoutMs,
-		AddressSpaceMB: runAS,
-		MemoryMB:       req.MemoryMB,
-		MaxProcesses:   r.maxProcesses,
-		MaxFileSizeMB:  r.maxFileSizeMB,
-		Writable:       false,
+		Argv:      argv,
+		WorkDir:   workDir,
+		TimeoutMs: req.TimeoutMs,
+		// The CoreCLR needs RLIMIT_AS lifted (nsjail's 4 GB default aborts GC heap
+		// init) and more than 32 descriptors (one mmap per assembly) — see the spec.
+		AddressSpaceMB:        runAS,
+		UnlimitedAddressSpace: r.spec.unlimitedAddressSpace,
+		MaxOpenFiles:          r.spec.maxOpenFiles,
+		MemoryMB:              req.MemoryMB,
+		MaxProcesses:          r.maxProcesses,
+		MaxFileSizeMB:         r.maxFileSizeMB,
+		Writable:              false,
 		// Static artifacts get the minimal rootfs (no toolchain to re-invoke, D-4); a
 		// dynamically-linked VM needs its runtime libs, so Java keeps the full rootfs
 		// (same posture as the interpreted languages).
@@ -858,7 +894,12 @@ func (r *compiledRuntime) execute(ctx context.Context, req runnerapi.RunRequest,
 	// LANG/LC_ALL/TZ): C/C++ disable glibc rseq (see runEnv); Go pins GOMAXPROCS;
 	// Java adds nothing. Never nil — an empty non-nil slice keeps the child from
 	// inheriting the runner's environment.
-	if cmd.Env = r.spec.runEnv; cmd.Env == nil {
+	//
+	// {memhex} is the run's memory budget as a hex byte count, for a runtime whose
+	// heap ceiling is an ENV var rather than an argv flag (the CoreCLR's
+	// DOTNET_GCHeapHardLimit — the exact analogue of Java's -Xmx{mem}m in the run
+	// argv). subst copies, so the spec's slice is never mutated.
+	if cmd.Env = subst(r.spec.runEnv, "{memhex}", memHex(req.MemoryMB)); cmd.Env == nil {
 		cmd.Env = []string{}
 	}
 
@@ -1058,6 +1099,17 @@ func (r *compiledRuntime) executeTest(ctx context.Context, req runnerapi.RunRequ
 
 // subst returns a copy of argv with each placeholder token replaced. pairs are
 // old,new,old,new… ({src}, {out}, {dir}, {mem} — see the callers).
+// memHex renders a megabyte budget as the hex BYTE count the CoreCLR's
+// DOTNET_GCHeapHardLimit expects (128 -> "0x8000000"). A non-positive budget
+// yields "" so the substitution degrades to an unset-looking value rather than a
+// nonsensical 0-byte heap.
+func memHex(mb int) string {
+	if mb <= 0 {
+		return ""
+	}
+	return "0x" + strconv.FormatInt(int64(mb)<<20, 16)
+}
+
 func subst(argv []string, pairs ...string) []string {
 	repl := strings.NewReplacer(pairs...)
 	cp := make([]string, len(argv))
