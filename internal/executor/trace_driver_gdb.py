@@ -96,6 +96,24 @@ MAX_SANE_LEN = 1_000_000
 # Ponteiros que um passo pode enfileirar para expandir. O teto real de caixas é
 # MAX_HEAP_OBJECTS; este só impede a fila de crescer sem limite antes disso.
 MAX_PONTEIROS = 400
+# Quantos ALVOS de ponteiro um passo expande. Sem este teto o custo é quadrático:
+# cada passo reexpande a cadeia inteira, e um programa que constrói uma lista num
+# laço vira O(n²). Medido: 20 nós = 1,7s; 40 = 3,4s; 80 = 12s; 150 = timeout.
+#
+# 32 não é só um número de desempenho, é o mesmo limite de LEGIBILIDADE que já
+# conhecíamos: medido antes, 32 caixas geram 62 setas cruzando o canvas, e daí
+# para cima o desenho deixa de ensinar. Além do teto os ponteiros restantes
+# continuam sendo o endereço — honesto, e é o que era antes desta mudança.
+MAX_EXPANDIDOS_POR_PASSO = 32
+# E um orçamento para o TRACE INTEIRO. O teto por passo sozinho não basta: o
+# custo é passos × caixas, e um laço que constrói 150 nós dá ~450 passos — 450 ×
+# 32 leituras ainda estoura o tempo. Sem este orçamento eu transformaria um trace
+# que ANTES funcionava (sem desenho, mas funcionava) num timeout, que é entregar
+# nada ao aluno. Esgotado, os ponteiros voltam a ser endereços e o passo a passo
+# segue inteiro até o fim. 600 mantém o desenho nos primeiros passos (onde a
+# estrutura está sendo construída e o aluno está olhando) e devolve o tempo aos
+# programas longos: medido, n=150 caiu de 13s para perto do baseline.
+MAX_EXPANSOES_NO_TRACE = 600
 
 # Names the compiler injects into every frame; not the student's variables.
 IMPLICIT_NAMES = {"context"}
@@ -195,6 +213,10 @@ def _addr_int(valor):
         return None
 
 
+# Quanto ainda dá para expandir neste trace (ver MAX_EXPANSOES_NO_TRACE).
+_orcamento = {"resta": MAX_EXPANSOES_NO_TRACE}
+
+
 def _aponta_para_agregado(v):
     """O alvo do ponteiro é uma coisa DESENHÁVEL (struct, arranjo, união)?
 
@@ -233,7 +255,13 @@ def _expande_ponteiros(heap, depth_serializa):
     liberada é o que o PRÓPRIO programa faz naquela linha: mostrar o mesmo lixo
     que ele veria é a verdade daquele bug, não uma mentira sobre ele."""
     vistos = set()
-    while heap.pendentes and len(heap.usados) < MAX_HEAP_OBJECTS:
+    expandidos = 0
+    while (
+        heap.pendentes
+        and len(heap.usados) < MAX_HEAP_OBJECTS
+        and expandidos < MAX_EXPANDIDOS_POR_PASSO
+        and _orcamento["resta"] > 0
+    ):
         v = heap.pendentes.pop(0)
         try:
             addr = int(v)
@@ -248,6 +276,8 @@ def _expande_ponteiros(heap, depth_serializa):
             # depth 0: a fila é que dá a largura, então cada alvo começa do zero
             # e os tetos por caixa continuam valendo.
             depth_serializa(v.dereference(), heap)
+            expandidos += 1
+            _orcamento["resta"] -= 1
         except Exception:
             continue  # pendurado/ilegível: fica o endereço, que é honesto
 

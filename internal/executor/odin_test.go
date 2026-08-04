@@ -330,6 +330,16 @@ func TestOdinTraceDriver_LinkedStructureExpands(t *testing.T) {
 	if !strings.Contains(trecho, "len(heap.usados) < MAX_HEAP_OBJECTS") {
 		t.Fatal("expansion must be bounded by the same per-step box cap")
 	}
+	// DOIS tetos, e o segundo é o que impede uma regressão de tempo: o custo é
+	// passos × caixas, então um teto só por passo ainda deixa um laço que
+	// constrói 150 nós virar timeout — entregar NADA ao aluno, onde antes ele
+	// tinha um trace sem desenho. Medido: 13s com orçamento de 2000, 7,9s com 600.
+	if !strings.Contains(trecho, "expandidos < MAX_EXPANDIDOS_POR_PASSO") {
+		t.Fatal("expansion must be capped per step")
+	}
+	if !strings.Contains(trecho, `_orcamento["resta"] > 0`) {
+		t.Fatal("expansion must also have a budget for the whole trace")
+	}
 	// A relaxação da regra tem de estar declarada onde ela acontece, com o custo.
 	if !strings.Contains(trecho, "free") {
 		t.Fatal("the trade-off (reading after a free) must be stated at the site")
