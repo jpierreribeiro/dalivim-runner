@@ -37,11 +37,48 @@ type graphStep struct {
 		Func string              `json:"func"`
 		Vars map[string]graphVal `json:"vars"`
 	} `json:"stack"`
-	Heap map[string]graphBox `json:"heap"`
+	Heap      map[string]graphBox `json:"heap"`
+	HeapDelta *struct {
+		Set map[string]graphBox `json:"set"`
+		Del []string            `json:"del"`
+	} `json:"heap_delta"`
 }
 
 type graphReport struct {
-	Steps []graphStep `json:"steps"`
+	Steps        []graphStep `json:"steps"`
+	HeapEncoding string      `json:"heap_encoding"`
+}
+
+// heapsOf rebuilds the full per-step heap from the wire form. With
+// heap_encoding="delta" the first graph step carries the whole heap and each
+// later step carries only {set,del} — or nothing at all, when the heap did not
+// change. Every consumer has to do this, so the tests do it the same way the
+// frontend does: what they assert on is what a client actually sees.
+func heapsOf(g graphReport) []map[string]graphBox {
+	out := make([]map[string]graphBox, len(g.Steps))
+	var cur map[string]graphBox
+	for i, s := range g.Steps {
+		switch {
+		case s.Heap != nil:
+			cur = s.Heap
+		case s.HeapDelta != nil:
+			next := make(map[string]graphBox, len(cur))
+			for k, v := range cur {
+				next[k] = v
+			}
+			for k, v := range s.HeapDelta.Set {
+				next[k] = v
+			}
+			for _, k := range s.HeapDelta.Del {
+				delete(next, k)
+			}
+			cur = next
+		case g.HeapEncoding != "delta":
+			cur = nil // v1 step: no graph at all
+		}
+		out[i] = cur
+	}
+	return out
 }
 
 func decodeGraph(t *testing.T, res runnerapi.RunResult) graphReport {
@@ -56,6 +93,7 @@ func decodeGraph(t *testing.T, res runnerapi.RunResult) graphReport {
 // lastStepWithVars returns the innermost frame's vars from the last step whose
 // innermost frame defines every named variable — i.e. after they are all bound.
 func lastStepWithVars(g graphReport, names ...string) (map[string]graphVal, map[string]graphBox, bool) {
+	heaps := heapsOf(g)
 	for i := len(g.Steps) - 1; i >= 0; i-- {
 		s := g.Steps[i]
 		if len(s.Stack) == 0 {
@@ -70,7 +108,7 @@ func lastStepWithVars(g graphReport, names ...string) (map[string]graphVal, map[
 			}
 		}
 		if ok {
-			return vars, s.Heap, true
+			return vars, heaps[i], true
 		}
 	}
 	return nil, nil, false
@@ -174,9 +212,11 @@ func TestPythonTraceGraph_HeapObjectCapBounded(t *testing.T) {
 		t.Fatalf("expected success, got %s (stderr=%s)", res.Status, tail(res.Stderr, 200))
 	}
 	g := decodeGraph(t, res)
-	for _, s := range g.Steps {
-		if len(s.Heap) > 200 {
-			t.Fatalf("per-step heap must be capped at MAX_HEAP_OBJECTS=200, got %d at step %d", len(s.Heap), s.Step)
+	// The bound is on the RECONSTRUCTED heap: with deltas the cap could otherwise
+	// be trivially satisfied per step while the accumulated heap grew unbounded.
+	for i, h := range heapsOf(g) {
+		if len(h) > 200 {
+			t.Fatalf("per-step heap must be capped at MAX_HEAP_OBJECTS=200, got %d at step %d", len(h), i)
 		}
 	}
 }
@@ -223,5 +263,102 @@ func TestTraceHarness_ReturnValue(t *testing.T) {
 	// cyclic return must not get a private, uncapped path.
 	if !strings.Contains(traceHarnessPython, `step["retval"] = _value_ref(arg, idmap, heap, queue)`) {
 		t.Fatal("the return value must use the bounded graph serializer, not a raw repr")
+	}
+}
+
+// TestPythonTraceGraph_ObjectIdsStableAcrossSteps: an object's box id must not
+// change while the object lives. The id map used to be rebuilt EVERY step, so it
+// was dense per step: in this program `del a` renumbered every survivor (b went
+// from id 2 to id 1), which silently re-pointed the diagram's boxes and made any
+// step-to-step diff meaningless. Identity is the property the diagram exists to
+// teach, so it is asserted directly.
+func TestPythonTraceGraph_ObjectIdsStableAcrossSteps(t *testing.T) {
+	requirePython(t)
+	res, _ := runTraceMode(t, newPythonTrace(t, 2_000_000, 2500), traceReq(
+		"a = [1]\nb = [2]\nc = [3]\ndel a\nb.append(9)\n"))
+	if res.Status != runnerapi.StatusSuccess {
+		t.Fatalf("expected success, got %s (stderr=%s)", res.Status, tail(res.Stderr, 200))
+	}
+	g := decodeGraph(t, res)
+
+	// b's id, taken the first time b exists, must be the same at the last step.
+	idOf := func(step graphStep, name string) string {
+		if len(step.Stack) == 0 {
+			return ""
+		}
+		return step.Stack[len(step.Stack)-1].Vars[name].Ref
+	}
+	primeiro, ultimo := "", ""
+	for _, s := range g.Steps {
+		if id := idOf(s, "b"); id != "" {
+			if primeiro == "" {
+				primeiro = id
+			}
+			ultimo = id
+		}
+	}
+	if primeiro == "" {
+		t.Fatal("b never appeared in the graph vars")
+	}
+	if primeiro != ultimo {
+		t.Fatalf("b's box id changed across steps (%s → %s): identity is not preserved", primeiro, ultimo)
+	}
+	// And c, declared after b, must keep an id distinct from b's throughout.
+	for _, s := range g.Steps {
+		if idc := idOf(s, "c"); idc != "" && idc == ultimo {
+			t.Fatalf("c collided with b's id %s", idc)
+		}
+	}
+}
+
+// TestPythonTraceGraph_HeapTravelsAsDelta: the heap must NOT be repeated in full
+// on every step. Measured before this change, a 120-iteration loop spent 58% of
+// the report on the heap with 86% of steps repeating the previous one byte for
+// byte — which is what pushes an ordinary trace into the 2 MB cap. The delta must
+// still reconstruct to exactly what the full form would have said.
+func TestPythonTraceGraph_HeapTravelsAsDelta(t *testing.T) {
+	requirePython(t)
+	res, _ := runTraceMode(t, newPythonTrace(t, 2_000_000, 2500), traceReq(
+		"acc = []\nfor i in range(20):\n    acc.append(i)\n"))
+	if res.Status != runnerapi.StatusSuccess {
+		t.Fatalf("expected success, got %s (stderr=%s)", res.Status, tail(res.Stderr, 200))
+	}
+	g := decodeGraph(t, res)
+	if g.HeapEncoding != "delta" {
+		t.Fatalf("heap_encoding must announce the delta form, got %q", g.HeapEncoding)
+	}
+	cheios := 0
+	for _, s := range g.Steps {
+		if s.Heap != nil {
+			cheios++
+		}
+	}
+	if cheios != 1 {
+		t.Fatalf("exactly one step may carry the full heap, got %d", cheios)
+	}
+
+	// The reconstruction must show the list growing one cell per iteration.
+	heaps := heapsOf(g)
+	var maior int
+	for i, s := range g.Steps {
+		if len(s.Stack) == 0 {
+			continue
+		}
+		ref := s.Stack[len(s.Stack)-1].Vars["acc"].Ref
+		if ref == "" {
+			continue
+		}
+		box, ok := heaps[i][ref]
+		if !ok {
+			t.Fatalf("step %d: acc points at %s but the rebuilt heap has no such box", i, ref)
+		}
+		if len(box.Items) < maior {
+			t.Fatalf("step %d: acc shrank (%d → %d); the delta lost a mutation", i, maior, len(box.Items))
+		}
+		maior = len(box.Items)
+	}
+	// 20 stays under MAX_ITEMS=30, so the box is complete and the count is exact.
+	if maior != 20 {
+		t.Fatalf("acc should have ended with 20 items, rebuilt %d", maior)
 	}
 }
