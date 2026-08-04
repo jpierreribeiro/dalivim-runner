@@ -188,8 +188,16 @@ func TestOdinTraceDriver_CallAndReturnEvents(t *testing.T) {
 	}
 	// O `return` mora no passo ANTERIOR: é lá que o quadro ainda está de pé, que
 	// é a semântica do evento de retorno do Python.
-	if !strings.Contains(traceDriverGDB, "len(pilha) < len(pilha_ant)") {
-		t.Fatal("a return must be detected by the stack getting SHALLOWER")
+	//
+	// E o sinal NÃO é a pilha ter encolhido — é o breakpoint de saída ter
+	// disparado. `f(n-1) + f(n-2)` põe duas chamadas na mesma linha: a primeira
+	// sai e a segunda entra sem passo no nível do chamador, a profundidade fica
+	// igual, e o retorno seria invisível.
+	if !strings.Contains(traceDriverGDB, "d[1].saiu") {
+		t.Fatal("a return must be detected by the finish breakpoint FIRING")
+	}
+	if !strings.Contains(traceDriverGDB, "self.saiu = True") {
+		t.Fatal("the finish breakpoint must record that its frame left")
 	}
 }
 
