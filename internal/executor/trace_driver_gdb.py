@@ -38,8 +38,10 @@
 # DALIVIM_TRACE_MAX_STEPS, DALIVIM_TRACE_MAX_REPORT_BYTES, DALIVIM_TRACE_ENTRY
 # (the symbol to break on).
 
+import io
 import json
 import os
+import re
 
 import gdb
 
@@ -66,6 +68,9 @@ REPORT = os.environ.get("DALIVIM_TRACE_REPORT", "trace.json")
 # drops gdb's stream entirely.
 STDOUT_FILE = os.environ.get("DALIVIM_TRACE_STDOUT", "_dalivim_stdout.txt")
 STDERR_FILE = os.environ.get("DALIVIM_TRACE_STDERR", "_dalivim_stderr.txt")
+# Teto de leitura do stderr do aluno ao procurar a frase do pânico: o arquivo é
+# escrito pelo programa dele e pode ter qualquer tamanho.
+MAX_STDERR_SCAN = 64 * 1024
 ENTRY = os.environ.get("DALIVIM_TRACE_ENTRY", "main::main")
 LANGUAGE = os.environ.get("DALIVIM_TRACE_LANGUAGE", "odin")
 MAX_STEPS = _int_env("DALIVIM_TRACE_MAX_STEPS", 2500)
@@ -100,23 +105,55 @@ def _in_student_file(sal):
         return False
 
 
-class Heap:
-    """Per-step heap of typed boxes, ids remapped to a counter so a real address
-    (ASLR) never reaches the client — the same choice trace_harness.py makes."""
+class Registro:
+    """Endereço real → id denso, vivo pelo TRACE inteiro.
+
+    Era por PASSO, e por isso a identidade de uma caixa não atravessava um passo:
+    bastava um objeto sair de vista para todos os seguintes serem renumerados, e
+    a caixa que o aluno acompanhava trocava de conteúdo debaixo dele. É o mesmo
+    conserto que o harness Python recebeu — identidade é a propriedade que o
+    diagrama existe para ensinar, e sem ela um diff passo-a-passo compara coisas
+    diferentes.
+
+    Contra reuso de endereço: a chave já carrega o TIPO junto do endereço (ver as
+    chamadas de `id_for`), e o registro é podado ao conjunto vivo a cada passo."""
 
     def __init__(self):
-        self.boxes = {}
-        self._ids = {}
-        self._n = 0
+        self.ids = {}
+        self.n = 0
+
+    def id_for(self, key):
+        rid = self.ids.get(key)
+        if rid is None:
+            self.n += 1
+            rid = str(self.n)
+            self.ids[key] = rid
+        return rid
+
+    def podar(self, vivos):
+        self.ids = {k: v for k, v in self.ids.items() if k in vivos}
+
+
+class Heap:
+    """Heap de UM passo, com ids vindos do registro do trace. O teto de objetos
+    continua sendo por passo — senão um programa longo o estouraria acumulando —
+    e nenhum endereço real (ASLR) chega ao cliente, como no trace_harness.py."""
+
+    def __init__(self, registro, boxes=None):
+        self.registro = registro
+        self.boxes = {} if boxes is None else boxes
+        self.usados = set()
         self.truncated = False
 
     def id_for(self, key):
-        if key not in self._ids:
-            if len(self._ids) >= MAX_HEAP_OBJECTS:
-                return None
-            self._n += 1
-            self._ids[key] = str(self._n)
-        return self._ids[key]
+        if key in self.usados:
+            return self.registro.ids.get(key)
+        if len(self.usados) >= MAX_HEAP_OBJECTS:
+            return None
+        rid = self.registro.id_for(key)
+        if rid is not None:
+            self.usados.add(key)
+        return rid
 
 
 def _prim(t, text):
@@ -155,6 +192,33 @@ def _odin_string(v):
     return {"prim": "string", "text": text}
 
 
+def _ehNulo(ptr):
+    try:
+        return int(ptr) == 0
+    except Exception:
+        return False
+
+
+def _chave(marca, valor, ponteiro, tipo):
+    """A chave que identifica uma caixa. Normalmente é o PONTEIRO DOS DADOS: duas
+    fatias sobre o mesmo arranjo são a mesma coisa, e passar uma para uma proc
+    mantém a caixa — que é o comportamento certo.
+
+    Menos quando o ponteiro é NULO. Aí ele não identifica nada, e dois `[dynamic]`
+    vazios distintos caíam na MESMA caixa: o diagrama desenhava duas setas para um
+    objeto só, ensinando que `a` e `b` são aliases quando não são — o oposto
+    exato do que ele existe para mostrar. Nesse caso a identidade passa a ser o
+    endereço do próprio valor, que distingue as duas variáveis."""
+    if _ehNulo(ponteiro):
+        try:
+            propria = valor.address
+            if propria is not None:
+                return (marca, "vazio@" + str(propria), str(tipo))
+        except Exception:
+            pass
+    return (marca, str(ponteiro), str(tipo))
+
+
 def _odin_sequence(v, t, heap, depth, kind_name):
     """Odin slice `[]T` / `[dynamic]T` -> a list box with real cells. Both are
     {data,len[,cap]}; `cap` is shown for a dynamic array because "grew to 8 slots
@@ -162,7 +226,7 @@ def _odin_sequence(v, t, heap, depth, kind_name):
     n = _sane_len(v)
     if n is None:
         return _opaque("comprimento inválido")
-    key = ("seq", str(v["data"]), str(t))
+    key = _chave("seq", v, v["data"], t)
     rid = heap.id_for(key)
     if rid is None:
         heap.truncated = True
@@ -189,7 +253,7 @@ def _odin_map(v, t, heap):
     internal and version-specific — walking it would be guesswork that breaks on
     the next toolchain bump. So the box is HONEST: the map's type and how many
     entries it holds, explicitly marked partial, instead of invented pairs."""
-    rid = heap.id_for(("map", str(v["data"]), str(t)))
+    rid = heap.id_for(_chave("map", v, v["data"], t))
     if rid is None:
         heap.truncated = True
         return _opaque("limite de objetos")
@@ -349,10 +413,18 @@ def frame_vars(frame, heap, current_line):
     return out
 
 
-def snapshot(step_no):
+def _nome_proc(bruto):
+    """`main::soma` → `soma`. O aluno escreveu `soma`, e o prefixo do pacote só
+    ocupa espaço numa caixa estreita — o Python Tutor mostra o nome da função,
+    não o caminho até ela. Só o último segmento; nomes sem `::` passam intactos."""
+    nome = bruto or "?"
+    return nome.rsplit("::", 1)[-1] or nome
+
+
+def snapshot(step_no, registro):
     """One trace v2 step: the student-visible stack, outermost first, plus the
     heap reachable from it."""
-    heap = Heap()
+    heap = Heap(registro)
     frames = []
     try:
         f = gdb.selected_frame()
@@ -372,7 +444,7 @@ def snapshot(step_no):
             if not _in_student_file(sal):
                 continue
             stack.append({
-                "func": fr.name() or "?",
+                "func": _nome_proc(fr.name()),
                 "file": os.path.basename(sal.symtab.filename),
                 "line": sal.line,
                 "vars": frame_vars(fr, heap, sal.line),
@@ -383,12 +455,19 @@ def snapshot(step_no):
     try:
         cur = gdb.selected_frame().find_sal()
         line = cur.line
-        func = gdb.selected_frame().name() or "?"
+        func = _nome_proc(gdb.selected_frame().name())
     except Exception:
         return None
 
+    # O registro guarda só o que estava vivo NESTE passo: é essa poda que impede
+    # um endereço reaproveitado de herdar a caixa de um objeto morto.
+    registro.podar(heap.usados)
+
     return {
         "step": step_no,
+        # O evento definitivo é decidido em `collect`, comparando a pilha com a
+        # do passo anterior: só de lá dá para ver que uma proc foi chamada ou que
+        # ela acabou de devolver.
         "event": "line",
         "file": TARGET,
         "line": line,
@@ -397,6 +476,129 @@ def snapshot(step_no):
         "stack": stack,
         "heap": heap.boxes,
     }
+
+
+class _Devolucao(gdb.FinishBreakpoint):
+    """Captura o valor que UMA proc devolve.
+
+    É o "Return value" do Python Tutor — a linha `devolveu` no quadro — e era o
+    que faltava para o passo a passo do Odin fechar o ciclo mental de uma
+    chamada: o aluno via a proc terminar e nunca via o que ela entregou.
+
+    `FinishBreakpoint` é a ferramenta que o gdb tem exatamente para isso: ela se
+    arma no endereço de retorno do quadro e expõe `return_value` já com o tipo
+    certo, em vez de lermos um registrador na mão e adivinharmos a convenção de
+    chamada. `stop()` devolve False de propósito — o ponto é REGISTRAR o valor de
+    passagem, nunca interromper o programa do aluno.
+
+    Degradação: uma proc sem tipo de retorno conhecido (ou com retorno múltiplo,
+    que o Odin permite) deixa `valor` em None, e o passo sai sem a linha
+    `devolveu` — exatamente o comportamento de hoje, nunca um erro."""
+
+    def __init__(self, frame):
+        gdb.FinishBreakpoint.__init__(self, frame, internal=True)
+        self.silent = True
+        self.valor = None
+
+    def stop(self):
+        try:
+            self.valor = self.return_value
+        except Exception:
+            self.valor = None
+        return False
+
+    def out_of_scope(self):
+        # O quadro morreu sem passar pelo retorno (sinal, longjmp): sem valor.
+        self.valor = None
+
+
+def _arma_devolucao():
+    """Arma a captura para o quadro ATUAL, se der. Falha silenciosa: no quadro
+    mais externo não há endereço de retorno, e um gdb sem suporte deve custar o
+    valor devolvido, não o trace inteiro."""
+    try:
+        return _Devolucao(gdb.selected_frame())
+    except Exception:
+        return None
+
+
+def _anota_devolvido(passo, bp, registro):
+    """Prega o valor devolvido no passo de `return`, no heap DAQUELE passo."""
+    if bp is None or bp.valor is None:
+        return
+    try:
+        heap = Heap(registro, passo.get("heap"))
+        passo["retval"] = value_v2(bp.valor, heap)
+        passo["heap"] = heap.boxes
+    except Exception:
+        pass
+
+
+# Sinais que matam um programa de aluno, com o número (para o código de saída no
+# estilo do shell, 128+n) e a frase que o passo a passo mostra. O Odin sinaliza um
+# índice fora da faixa com um `ud2`, que chega como SIGILL.
+SINAIS = {
+    "SIGSEGV": (11, "acesso inválido à memória"),
+    "SIGFPE": (8, "erro aritmético (divisão por zero?)"),
+    "SIGBUS": (7, "endereço de memória inválido"),
+    "SIGILL": (4, "o programa foi interrompido por uma verificação em tempo de execução"),
+    "SIGABRT": (6, "o programa abortou"),
+}
+
+# Como o programa do ALUNO terminou. O gdb sempre sai 0, então sem isto um
+# programa que estourou era classificado como sucesso: o aluno via "execução
+# concluída" para um programa que quebrou (medido: `xs[10]` numa fatia de 3 dava
+# runtime_error em modo run e success em modo trace).
+_fim = {"sinal": None, "codigo": None}
+
+
+def _ao_sair(evt):
+    _fim["codigo"] = getattr(evt, "exit_code", None)
+
+
+def _ao_parar(evt):
+    nome = getattr(evt, "stop_signal", None)
+    if nome in SINAIS:
+        _fim["sinal"] = nome
+
+
+def _panico_do_odin():
+    """A frase que o PRÓPRIO Odin escreveu ao morrer.
+
+    O sinal responde "como", não "o quê": dizer `SIGILL` a um aluno é o mesmo que
+    o Python dizer `SIGFPE` em vez de `ZeroDivisionError`. O runtime do Odin já
+    escreveu a explicação boa no stderr —
+        /sandbox/main.odin(8:20) Index 10 is out of range 0..<3
+    — e é ela que o "Quebrou aqui" deve mostrar. Devolve (mensagem, linha) ou
+    None: uma morte sem essa linha (SIGSEGV cru) continua caindo no nome do sinal.
+
+    O arquivo é escrito pelo programa do ALUNO, então nada aqui confia nele além
+    de tamanho e formato: leitura limitada, uma linha só, texto recortado."""
+    try:
+        with io.open(STDERR_FILE, "r", encoding="utf-8", errors="replace") as fh:
+            bruto = fh.read(MAX_STDERR_SCAN)
+    except Exception:
+        return None
+    for linha in reversed([l.strip() for l in bruto.splitlines() if l.strip()]):
+        m = re.match(r"^.*?\((\d+):\d+\)\s+(.+)$", linha)
+        if m:
+            try:
+                n = int(m.group(1))
+            except Exception:
+                n = None
+            return (_clip(m.group(2)), n)
+    return None
+
+
+def _codigo_de_saida():
+    """O código com que o DRIVER sai, para o runner classificar o programa do
+    aluno pela régua de sempre — a mesma do modo run."""
+    if _fim["sinal"]:
+        return 128 + SINAIS[_fim["sinal"]][0]
+    try:
+        return int(_fim["codigo"] or 0)
+    except Exception:
+        return 0
 
 
 def _exec(cmd):
@@ -411,6 +613,14 @@ def collect():
     steps = []
     truncated_steps = False
     crash = None
+
+    # Como o programa do aluno terminou só se sabe por evento — o gdb não devolve
+    # isso pelo código de saída dele.
+    try:
+        gdb.events.exited.connect(_ao_sair)
+        gdb.events.stop.connect(_ao_parar)
+    except Exception:
+        pass
 
     _exec("set confirm off")
     _exec("set pagination off")
@@ -437,6 +647,12 @@ def collect():
     # Shell-style redirection on `run` is what separates the two streams.
     _exec("run > %s 2> %s" % (STDOUT_FILE, STDERR_FILE))
 
+    registro = Registro()
+    # Pilha de procs cuja devolução está armada, paralela aos quadros do aluno.
+    devolucoes = []
+    pilha_ant = None
+    terminou = False
+
     inner = 0
     while len(steps) < MAX_STEPS and inner < MAX_GDB_STEPS:
         inner += 1
@@ -444,11 +660,40 @@ def collect():
             frame = gdb.selected_frame()
             sal = frame.find_sal()
         except gdb.error:
+            terminou = True
             break  # program exited
 
         if _in_student_file(sal):
-            snap = snapshot(len(steps))
+            snap = snapshot(len(steps), registro)
             if snap is not None:
+                # ── call / return ──────────────────────────────────────────────
+                # O gdb entrega só "parei numa linha". Quem sabe que houve uma
+                # CHAMADA é a comparação com a pilha do passo anterior: ficou mais
+                # funda, entrou-se numa proc; ficou mais rasa, a proc do passo
+                # anterior acabou de devolver — e é NAQUELE passo que o evento
+                # `return` mora, com o quadro ainda em pé, igual ao Python.
+                pilha = [f["func"] for f in snap["stack"]]
+                if pilha_ant is None or len(pilha) > len(pilha_ant):
+                    snap["event"] = "call"
+                    devolucoes.append(_arma_devolucao())
+                elif len(pilha) < len(pilha_ant):
+                    quantas = len(pilha_ant) - len(pilha)
+                    if steps:
+                        steps[-1]["event"] = "return"
+                        # A proc mais interna é a última armada; as intermediárias
+                        # (retorno em cascata num passo só) saem sem valor, que é
+                        # honesto: não houve passo onde mostrá-las.
+                        bp = None
+                        for _ in range(quantas):
+                            if devolucoes:
+                                bp = devolucoes.pop()
+                        _anota_devolvido(steps[-1], bp, registro)
+                    else:
+                        for _ in range(quantas):
+                            if devolucoes:
+                                devolucoes.pop()
+                pilha_ant = pilha
+
                 steps.append(snap)
                 # Size cap: stop while the document is still valid JSON.
                 if len(json.dumps(steps)) > MAX_REPORT_BYTES:
@@ -456,15 +701,43 @@ def collect():
                     truncated_steps = True
                     break
             if not _exec("step"):
+                terminou = True  # `step` só falha aqui quando o programa acabou
                 break
         else:
             # Outside the student's file (stdlib, libc): leave without spending a
             # tutor step. `finish` fails at the outermost frame — then we are done.
             if not _exec("finish"):
+                terminou = True
                 break
 
     if len(steps) >= MAX_STEPS:
         truncated_steps = True
+
+    # QUEBRA. Um programa que morre de sinal precisa apontar ONDE, senão o passo
+    # a passo simplesmente para e a pergunta "onde quebrou?" fica sem resposta.
+    # O Python já trazia esse registro; o Odin, não.
+    if _fim["sinal"] and steps:
+        ultimo = steps[-1]
+        panico = _panico_do_odin()
+        crash = {
+            # A frase do próprio Odin quando ela existe; o sinal só quando não há
+            # nada melhor. "Index 10 is out of range 0..<3" ensina; "SIGILL" não.
+            "type": "Erro em execução" if panico else _fim["sinal"],
+            "message": panico[0] if panico else SINAIS[_fim["sinal"]][1],
+            "file": ultimo.get("file"),
+            "line": (panico[1] if panico and panico[1] else ultimo.get("line")),
+            "func": ultimo.get("func"),
+        }
+        ultimo["event"] = "exception"
+        ultimo["exc"] = {"type": crash["type"], "message": crash["message"]}
+    # O último passo de um programa que chegou INTEIRO ao fim é o retorno da proc
+    # mais externa — não há passo SEGUINTE onde a pilha encolheria, então ele
+    # nunca seria marcado pela comparação. É o mesmo `return` do `<module>` no
+    # Python. Num trace cortado, o último passo é onde a régua acabou, não onde o
+    # programa acabou — e num que quebrou, o último passo é a quebra.
+    elif terminou and steps and not truncated_steps:
+        steps[-1]["event"] = "return"
+        _anota_devolvido(steps[-1], devolucoes.pop() if devolucoes else None, registro)
 
     # Let the program RUN TO COMPLETION even when the step budget ran out: it is
     # still the student's program, its remaining output is theirs, and a process
@@ -500,4 +773,7 @@ def main():
 
 
 main()
-gdb.execute("quit", to_string=True)
+# Sai com o código do PROGRAMA DO ALUNO, não com o do gdb. É isso que faz o
+# runner classificar um trace igual a um run: sem isto, `xs[10]` numa fatia de 3
+# dava runtime_error em modo run e "sucesso" em modo trace.
+gdb.execute("quit %d" % _codigo_de_saida(), to_string=True)

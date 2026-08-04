@@ -165,3 +165,107 @@ func TestOdinTraceDriver_ContainersShowValues(t *testing.T) {
 		t.Fatal("the map box must stay honest (type + length), not fake its entries")
 	}
 }
+
+// TestOdinTraceDriver_CallAndReturnEvents: o gdb entrega só "parei numa linha".
+// Sem sintetizar `call`/`return` o passo a passo do Odin era uma lista plana de
+// linhas — 20 eventos `line` e ZERO `return` no mesmo programa em que o Python
+// produz 5 e 5 —, então o aluno nunca via entrar numa proc nem sair dela.
+func TestOdinTraceDriver_CallAndReturnEvents(t *testing.T) {
+	for _, want := range []string{`snap["event"] = "call"`, `steps[-1]["event"] = "return"`} {
+		if !strings.Contains(traceDriverGDB, want) {
+			t.Fatalf("the driver must synthesise call/return events (%s missing)", want)
+		}
+	}
+	// O `return` mora no passo ANTERIOR: é lá que o quadro ainda está de pé, que
+	// é a semântica do evento de retorno do Python.
+	if !strings.Contains(traceDriverGDB, "len(pilha) < len(pilha_ant)") {
+		t.Fatal("a return must be detected by the stack getting SHALLOWER")
+	}
+}
+
+// TestOdinTraceDriver_CapturesReturnValue: a linha `devolveu` — o "Return value"
+// do Python Tutor — é o que fecha o ciclo mental de uma chamada. Sem ela o aluno
+// vê a proc terminar e nunca vê o que ela entregou.
+func TestOdinTraceDriver_CapturesReturnValue(t *testing.T) {
+	if !strings.Contains(traceDriverGDB, "gdb.FinishBreakpoint") {
+		t.Fatal("the return value must come from gdb's FinishBreakpoint, not a hand-read register")
+	}
+	// stop() devolve False: registrar o valor NUNCA pode parar o programa do aluno.
+	i := strings.Index(traceDriverGDB, "def stop(self)")
+	if i < 0 || !strings.Contains(traceDriverGDB[i:i+400], "return False") {
+		t.Fatal("the finish breakpoint must record the value WITHOUT stopping the inferior")
+	}
+	if !strings.Contains(traceDriverGDB, `passo["retval"]`) {
+		t.Fatal("the captured value must be attached to the return step as retval")
+	}
+}
+
+// TestOdinTraceDriver_StableObjectIds: o mapa de ids era refeito a cada passo, e
+// a identidade de uma caixa não atravessava um passo — a propriedade que o
+// diagrama existe para ensinar. É o mesmo conserto do harness Python.
+func TestOdinTraceDriver_StableObjectIds(t *testing.T) {
+	if !strings.Contains(traceDriverGDB, "class Registro") {
+		t.Fatal("ids must live in a per-TRACE registry, not a per-step map")
+	}
+	if !strings.Contains(traceDriverGDB, "registro.podar(") {
+		t.Fatal("the registry must be pruned to each step's live set (address reuse)")
+	}
+	// O teto de objetos continua sendo POR PASSO; um registro de trace inteiro
+	// não pode servir de desculpa para um heap ilimitado num passo.
+	if !strings.Contains(traceDriverGDB, "len(self.usados) >= MAX_HEAP_OBJECTS") {
+		t.Fatal("the per-STEP heap cap must survive the shared registry")
+	}
+}
+
+// TestOdinTraceDriver_EmptyContainersAreDistinct: com o ponteiro de dados NULO
+// como chave, dois `[dynamic]int` vazios distintos caíam na MESMA caixa — o
+// diagrama desenhava duas setas para um objeto só e ensinava que `a` e `b` são
+// aliases quando não são.
+func TestOdinTraceDriver_EmptyContainersAreDistinct(t *testing.T) {
+	if !strings.Contains(traceDriverGDB, "def _chave") || !strings.Contains(traceDriverGDB, "vazio@") {
+		t.Fatal("a null data pointer must fall back to the value's own address")
+	}
+	for _, marca := range []string{`_chave("seq"`, `_chave("map"`} {
+		if !strings.Contains(traceDriverGDB, marca) {
+			t.Fatalf("%s must go through the null-safe key", marca)
+		}
+	}
+}
+
+// TestOdinTraceDriver_ExitStatusMatchesRunMode: o gdb sai sempre 0, então um
+// programa que estourava era classificado como SUCESSO em modo trace enquanto o
+// mesmo programa dava runtime_error em modo run (medido: `xs[10]` numa fatia de
+// 3). O aluno via "execução concluída" para um programa que quebrou.
+func TestOdinTraceDriver_ExitStatusMatchesRunMode(t *testing.T) {
+	if !strings.Contains(traceDriverGDB, `gdb.execute("quit %d"`) {
+		t.Fatal("the driver must exit with the STUDENT program's status, not gdb's")
+	}
+	if !strings.Contains(traceDriverGDB, "gdb.events.exited.connect") ||
+		!strings.Contains(traceDriverGDB, "gdb.events.stop.connect") {
+		t.Fatal("how the inferior ended is only knowable through gdb's events")
+	}
+	// E a quebra vira registro: sem ele o passo a passo apenas para, e a pergunta
+	// "onde quebrou?" fica sem resposta.
+	if !strings.Contains(traceDriverGDB, `ultimo["event"] = "exception"`) {
+		t.Fatal("a fatal signal must mark the last step as the crash")
+	}
+}
+
+// TestOdinTraceDriver_CrashSaysWhatBroke: o sinal responde "como", não "o quê".
+// Dizer `SIGILL` a um aluno é o mesmo que o Python dizer `SIGFPE` em vez de
+// `ZeroDivisionError` — e o runtime do Odin já escreveu a explicação boa no
+// stderr ("Index 10 is out of range 0..<3"). É ela que o "Quebrou aqui" mostra.
+func TestOdinTraceDriver_CrashSaysWhatBroke(t *testing.T) {
+	if !strings.Contains(traceDriverGDB, "def _panico_do_odin") {
+		t.Fatal("the crash message must prefer the Odin runtime's own sentence")
+	}
+	// O stderr é escrito pelo programa do ALUNO: leitura limitada, nunca inteira.
+	if !strings.Contains(traceDriverGDB, "MAX_STDERR_SCAN") ||
+		!strings.Contains(traceDriverGDB, "fh.read(MAX_STDERR_SCAN)") {
+		t.Fatal("the student's stderr is hostile input and must be read under a cap")
+	}
+	// E sem a frase (um SIGSEGV cru) ainda há de sobrar o nome do sinal.
+	if !strings.Contains(traceDriverGDB, `else _fim["sinal"]`) {
+		t.Fatal("a crash with no parseable sentence must still fall back to the signal")
+	}
+}

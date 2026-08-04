@@ -125,3 +125,47 @@ Single-file Odin needs `package main` and a `main :: proc()` in `main.odin`; the
 `-file` flag builds that one file. Multi-file (Odin's package = a directory) maps
 onto the runner's `files[]` model as a follow-up (mirror the compiled multi-file
 build), not part of B.1.
+
+
+## Paridade com o passo a passo do Python (B.3)
+
+O `mode="trace"` do Odin nasceu emitindo apenas eventos `line`. Medido no mesmo
+programa (três chamadas aninhadas): **Python 5 `call` + 5 `return` + 5 valores
+devolvidos; Odin 20 `line` e ZERO valores devolvidos**. Faltava exatamente o que
+o Python Tutor mostra — entrar numa função, sair dela, e o que ela entregou.
+
+O que mudou no `trace_driver_gdb.py`:
+
+* **`call` / `return` sintetizados.** O gdb entrega só "parei numa linha". Quem
+  sabe que houve chamada é a comparação com a pilha do passo anterior: mais funda
+  → `call`; mais rasa → a proc do passo ANTERIOR acabou de devolver, e é nele que
+  o `return` mora (com o quadro ainda de pé, igual ao Python).
+* **Valor devolvido via `gdb.FinishBreakpoint`.** É a ferramenta que o gdb tem
+  para isso: arma-se no endereço de retorno do quadro e expõe `return_value` já
+  tipado, em vez de lermos um registrador e adivinharmos a convenção de chamada.
+  `stop()` devolve False — o ponto é registrar de passagem, nunca interromper o
+  programa do aluno. Retorno múltiplo ou sem tipo conhecido degrada para "sem
+  valor", que é o comportamento anterior.
+* **Ids de objeto estáveis pelo trace.** O mapa era refeito a cada passo; a
+  identidade de uma caixa não atravessava um passo. Mesmo conserto do harness
+  Python: registro por trace, podado ao conjunto vivo de cada passo.
+* **Dois contêineres vazios deixam de colapsar.** Com o ponteiro de dados NULO
+  como chave, dois `[dynamic]int` vazios distintos caíam na mesma caixa — o
+  diagrama desenhava duas setas para um objeto só e ensinava que `a` e `b` são
+  aliases quando não são. Ponteiro nulo agora cai no endereço do próprio valor.
+* **Status igual ao do modo run.** O gdb sai sempre 0, então um programa que
+  estourava era classificado como SUCESSO em modo trace enquanto o mesmo programa
+  dava `runtime_error` em modo run (medido: `xs[10]` numa fatia de 3 → run
+  `runtime_error` exit 132, trace `success` exit 0). O driver passa a sair com o
+  código do programa do aluno, e a quebra vira registro `crash` + passo marcado.
+* **A quebra diz O QUÊ, não só o sinal.** `SIGILL` é para um aluno o que
+  `SIGFPE` seria em vez de `ZeroDivisionError`. O runtime do Odin já escreve a
+  frase boa no stderr (`Index 10 is out of range 0..<3`) e é ela que o "Quebrou
+  aqui" mostra; sem uma frase legível (um SIGSEGV cru), cai no nome do sinal.
+  O stderr é do programa do aluno, então é lido sob teto e só uma linha.
+* **Nome do quadro sem o pacote.** `main::soma` → `soma()`.
+
+**Diferença que permanece:** os parâmetros aparecem um passo depois do `call`.
+Não é descuido — ler um argumento na linha de declaração da proc devolve lixo
+(o prólogo ainda não salvou os registradores), e mostrar lixo seria pior que
+mostrar um passo depois.
