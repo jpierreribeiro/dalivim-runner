@@ -38,8 +38,10 @@
 # DALIVIM_TRACE_MAX_STEPS, DALIVIM_TRACE_MAX_REPORT_BYTES, DALIVIM_TRACE_ENTRY
 # (the symbol to break on).
 
+import io
 import json
 import os
+import re
 
 import gdb
 
@@ -66,6 +68,9 @@ REPORT = os.environ.get("DALIVIM_TRACE_REPORT", "trace.json")
 # drops gdb's stream entirely.
 STDOUT_FILE = os.environ.get("DALIVIM_TRACE_STDOUT", "_dalivim_stdout.txt")
 STDERR_FILE = os.environ.get("DALIVIM_TRACE_STDERR", "_dalivim_stderr.txt")
+# Teto de leitura do stderr do aluno ao procurar a frase do pânico: o arquivo é
+# escrito pelo programa dele e pode ter qualquer tamanho.
+MAX_STDERR_SCAN = 64 * 1024
 ENTRY = os.environ.get("DALIVIM_TRACE_ENTRY", "main::main")
 LANGUAGE = os.environ.get("DALIVIM_TRACE_LANGUAGE", "odin")
 MAX_STEPS = _int_env("DALIVIM_TRACE_MAX_STEPS", 2500)
@@ -557,6 +562,34 @@ def _ao_parar(evt):
         _fim["sinal"] = nome
 
 
+def _panico_do_odin():
+    """A frase que o PRÓPRIO Odin escreveu ao morrer.
+
+    O sinal responde "como", não "o quê": dizer `SIGILL` a um aluno é o mesmo que
+    o Python dizer `SIGFPE` em vez de `ZeroDivisionError`. O runtime do Odin já
+    escreveu a explicação boa no stderr —
+        /sandbox/main.odin(8:20) Index 10 is out of range 0..<3
+    — e é ela que o "Quebrou aqui" deve mostrar. Devolve (mensagem, linha) ou
+    None: uma morte sem essa linha (SIGSEGV cru) continua caindo no nome do sinal.
+
+    O arquivo é escrito pelo programa do ALUNO, então nada aqui confia nele além
+    de tamanho e formato: leitura limitada, uma linha só, texto recortado."""
+    try:
+        with io.open(STDERR_FILE, "r", encoding="utf-8", errors="replace") as fh:
+            bruto = fh.read(MAX_STDERR_SCAN)
+    except Exception:
+        return None
+    for linha in reversed([l.strip() for l in bruto.splitlines() if l.strip()]):
+        m = re.match(r"^.*?\((\d+):\d+\)\s+(.+)$", linha)
+        if m:
+            try:
+                n = int(m.group(1))
+            except Exception:
+                n = None
+            return (_clip(m.group(2)), n)
+    return None
+
+
 def _codigo_de_saida():
     """O código com que o DRIVER sai, para o runner classificar o programa do
     aluno pela régua de sempre — a mesma do modo run."""
@@ -685,11 +718,14 @@ def collect():
     # O Python já trazia esse registro; o Odin, não.
     if _fim["sinal"] and steps:
         ultimo = steps[-1]
+        panico = _panico_do_odin()
         crash = {
-            "type": _fim["sinal"],
-            "message": SINAIS[_fim["sinal"]][1],
+            # A frase do próprio Odin quando ela existe; o sinal só quando não há
+            # nada melhor. "Index 10 is out of range 0..<3" ensina; "SIGILL" não.
+            "type": "Erro em execução" if panico else _fim["sinal"],
+            "message": panico[0] if panico else SINAIS[_fim["sinal"]][1],
             "file": ultimo.get("file"),
-            "line": ultimo.get("line"),
+            "line": (panico[1] if panico and panico[1] else ultimo.get("line")),
             "func": ultimo.get("func"),
         }
         ultimo["event"] = "exception"

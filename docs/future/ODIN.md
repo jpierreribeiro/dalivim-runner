@@ -158,6 +158,11 @@ O que mudou no `trace_driver_gdb.py`:
   dava `runtime_error` em modo run (medido: `xs[10]` numa fatia de 3 → run
   `runtime_error` exit 132, trace `success` exit 0). O driver passa a sair com o
   código do programa do aluno, e a quebra vira registro `crash` + passo marcado.
+* **A quebra diz O QUÊ, não só o sinal.** `SIGILL` é para um aluno o que
+  `SIGFPE` seria em vez de `ZeroDivisionError`. O runtime do Odin já escreve a
+  frase boa no stderr (`Index 10 is out of range 0..<3`) e é ela que o "Quebrou
+  aqui" mostra; sem uma frase legível (um SIGSEGV cru), cai no nome do sinal.
+  O stderr é do programa do aluno, então é lido sob teto e só uma linha.
 * **Nome do quadro sem o pacote.** `main::soma` → `soma()`.
 
 **Diferença que permanece:** os parâmetros aparecem um passo depois do `call`.

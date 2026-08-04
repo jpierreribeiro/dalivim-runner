@@ -250,3 +250,22 @@ func TestOdinTraceDriver_ExitStatusMatchesRunMode(t *testing.T) {
 		t.Fatal("a fatal signal must mark the last step as the crash")
 	}
 }
+
+// TestOdinTraceDriver_CrashSaysWhatBroke: o sinal responde "como", não "o quê".
+// Dizer `SIGILL` a um aluno é o mesmo que o Python dizer `SIGFPE` em vez de
+// `ZeroDivisionError` — e o runtime do Odin já escreveu a explicação boa no
+// stderr ("Index 10 is out of range 0..<3"). É ela que o "Quebrou aqui" mostra.
+func TestOdinTraceDriver_CrashSaysWhatBroke(t *testing.T) {
+	if !strings.Contains(traceDriverGDB, "def _panico_do_odin") {
+		t.Fatal("the crash message must prefer the Odin runtime's own sentence")
+	}
+	// O stderr é escrito pelo programa do ALUNO: leitura limitada, nunca inteira.
+	if !strings.Contains(traceDriverGDB, "MAX_STDERR_SCAN") ||
+		!strings.Contains(traceDriverGDB, "fh.read(MAX_STDERR_SCAN)") {
+		t.Fatal("the student's stderr is hostile input and must be read under a cap")
+	}
+	// E sem a frase (um SIGSEGV cru) ainda há de sobrar o nome do sinal.
+	if !strings.Contains(traceDriverGDB, `else _fim["sinal"]`) {
+		t.Fatal("a crash with no parseable sentence must still fall back to the signal")
+	}
+}
