@@ -12,3 +12,8 @@
 # Deploy: local config + secret token
 /deploy/runner.env
 /deploy/.runner-token
+
+# Bytecode do Python: o harness e o driver do trace são .py embutidos por
+# go:embed, e compilar um deles localmente deixa um __pycache__ para trás.
+__pycache__/
+*.pyc
