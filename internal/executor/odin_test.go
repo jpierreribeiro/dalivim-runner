@@ -1,9 +1,42 @@
 package executor
 
 import (
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestOdinTraceDriver_Behaviour EXECUTA o driver, em vez de afirmar sobre o texto
+// dele como todo o resto deste arquivo faz.
+//
+// A diferença importa: um teste de texto passa em qualquer refactor que preserve
+// as strings e falha em qualquer renomeação que não mude nada, e foi assim que o
+// driver do Odin chegou a produção sem uma única garantia de COMPORTAMENTO — ao
+// contrário do harness Python, cujos testes rodam CPython de verdade e foi um
+// deles que pegou o bug de identidade de caixa.
+//
+// A imagem de dev não tem gdb nem o toolchain do Odin, então o driver roda contra
+// um `gdb` falso (trace_driver_gdb_fake.py) sobre um programa roteirizado. Isso
+// NÃO substitui o smoke on-target — nada aqui prova coisa alguma sobre o DWARF do
+// Odin —, mas prova toda a lógica que mora no driver: identidade de caixa, delta
+// do heap, atribuição do valor devolvido, contagem de saída e os tetos.
+func TestOdinTraceDriver_Behaviour(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+	script, err := filepath.Abs("trace_driver_gdb_test.py")
+	if err != nil {
+		t.Fatalf("resolve script: %v", err)
+	}
+	out, err := exec.Command("python3", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("driver behaviour checks failed:\n%s", out)
+	}
+	if !strings.Contains(string(out), "tudo verde") {
+		t.Fatalf("expected every check to pass:\n%s", out)
+	}
+}
 
 // TestOdinSpec pins the Odin runtime shape (B.1): a native single-file build via
 // `odin build -file`, run as the artifact on the full-rootfs denylist jail. This
@@ -223,6 +256,96 @@ func TestOdinTraceDriver_CapturesReturnValue(t *testing.T) {
 	// errado é pior que valor nenhum — ele ensina que fib(0) devolve 8.
 	if !strings.Contains(traceDriverGDB, "len(saidos) == 1 and not repetida") {
 		t.Fatal("retval must be omitted when the returning frame is ambiguous (recursion)")
+	}
+	// A QUARTA abordagem: identificar o quadro pelo ENDEREÇO dele, e não pela
+	// posição. As três anteriores responderam por profundidade ou por ordem de
+	// disparo — nenhuma das duas distingue `f(n-1)` de `f(n-2)`, que moram na
+	// mesma linha. O par (pc do chamador, sp do chamador) distingue: dois sítios
+	// de chamada são dois endereços de retorno.
+	if !strings.Contains(traceDriverGDB, "def _id_de_quadro") {
+		t.Fatal("the returning frame must be identified by its ADDRESS, not by depth or firing order")
+	}
+	iChave := strings.Index(traceDriverGDB, "def _id_de_quadro")
+	for _, want := range []string{"pai.pc()", `pai.read_register("sp")`} {
+		if !strings.Contains(traceDriverGDB[iChave:iChave+1600], want) {
+			t.Fatalf("the frame key must come from the CALLER's frame (%s missing)", want)
+		}
+	}
+	// E a regra antiga fica como PISO: a chave nova ainda não foi medida
+	// on-target, então ela só pode ACRESCENTAR valor onde ele é provável, nunca
+	// sobrepor um silêncio com um palpite.
+	if !strings.Contains(traceDriverGDB, "if dono is None and len(saidos) == 1 and not repetida:") {
+		t.Fatal("the conservative rule must remain the FLOOR when the frame key does not resolve")
+	}
+}
+
+// TestOdinTraceDriver_ByteBudgetIsPerStep: o teto de bytes media
+// `len(json.dumps(steps))` — a lista INTEIRA acumulada, uma vez por passo —, o
+// que faz o custo do próprio medidor crescer com o quadrado do número de passos.
+// Medido: 2,0 s em 533 passos (o `fib(10)`, ~15% dos 13 s) e 46,7 s em 2500, num
+// envelope de 15 s. O teto de 2500 passos era INALCANÇÁVEL: um trace longo morria
+// de timeout dentro do medidor e o aluno recebia um erro no lugar de um trace
+// parcial. O harness Python sempre mediu por passo.
+func TestOdinTraceDriver_ByteBudgetIsPerStep(t *testing.T) {
+	if strings.Contains(traceDriverGDB, "len(json.dumps(steps))") {
+		t.Fatal("the byte cap must not re-serialise the whole accumulated list on every step")
+	}
+	if !strings.Contains(traceDriverGDB, "custo = len(json.dumps(snap))") {
+		t.Fatal("the byte cap must measure ONE step and accumulate the number")
+	}
+}
+
+// TestOdinTraceDriver_HeapTravelsAsDelta: o Odin mandava o heap CHEIO em todo
+// passo — o item 3 da lista de pendências. Mesma codificação do harness Python,
+// e o mesmo consumidor remonta os dois.
+func TestOdinTraceDriver_HeapTravelsAsDelta(t *testing.T) {
+	if !strings.Contains(traceDriverGDB, `"heap_encoding": "delta"`) {
+		t.Fatal("the Odin trace must announce the delta encoding like the Python harness")
+	}
+	if !strings.Contains(traceDriverGDB, `snap["heap_delta"] = delta`) {
+		t.Fatal("steps after the first must carry only what changed")
+	}
+	// A base do delta só avança DEPOIS de o passo entrar: um passo descartado pelo
+	// teto deixaria o delta seguinte apontando para um heap que nunca foi enviado.
+	iAppend := strings.Index(traceDriverGDB, "steps.append(snap)")
+	iBase := strings.Index(traceDriverGDB, "heap_ant = cheio")
+	if iAppend < 0 || iBase < 0 || iBase < iAppend {
+		t.Fatal("the delta baseline must only advance after the step is actually kept")
+	}
+}
+
+// TestOdinTraceDriver_LimitsAreVisible: o teto de caixas por passo era escrito em
+// três lugares e NUNCA serializado — campo morto. Para o aluno isso era a
+// variável virando um ponto que não aponta para lugar nenhum (o frontend não
+// desenha seta para caixa que não existe), sem nenhuma explicação.
+func TestOdinTraceDriver_LimitsAreVisible(t *testing.T) {
+	if !strings.Contains(traceDriverGDB, `passo["heap_truncated"] = True`) {
+		t.Fatal("hitting the per-step box cap must be recorded on the step")
+	}
+	if !strings.Contains(traceDriverGDB, `"heap": heap_truncated,`) {
+		t.Fatal("the document's truncated{} must carry the heap cap, or it never reaches the student")
+	}
+}
+
+// TestOdinTraceDriver_StdoutLenIsReal: o driver mandava `stdout_len: 0` em TODO
+// passo, então o painel "Saída até aqui" dizia "(sem saída ainda)" em todos os
+// passos de todo programa Odin — inclusive no último, de um programa que
+// imprimiu. O contrato conta CODE POINTS (o consumidor fatia com Array.from).
+func TestOdinTraceDriver_StdoutLenIsReal(t *testing.T) {
+	if strings.Contains(traceDriverGDB, `"stdout_len": 0,`) {
+		t.Fatal("stdout_len must not be a hardcoded zero")
+	}
+	if !strings.Contains(traceDriverGDB, "def _stdout_ate_agora") {
+		t.Fatal("the driver must count the inferior's own output")
+	}
+	i := strings.Index(traceDriverGDB, "def _stdout_ate_agora")
+	// Incremental: reler o arquivo inteiro a cada passo seria o mesmo erro
+	// quadrático que o teto de bytes tinha.
+	if !strings.Contains(traceDriverGDB[i:i+2200], `fh.seek(_saida["bytes"])`) {
+		t.Fatal("the counter must read only the NEW bytes, not the whole file each step")
+	}
+	if !strings.Contains(traceDriverGDB[i:i+2200], "getincrementaldecoder") {
+		t.Fatal("code points, not bytes: a multibyte char split across two reads must not become two")
 	}
 }
 
