@@ -197,11 +197,32 @@ def type_name(v):
 # Boxable container/collection kinds we expand into the heap. Anything else with
 # no recognized shape becomes an inline opaque "<ClassName>" primitive (never a
 # ref), so we never chase an unknown object's attributes.
-def _remap_id(idmap, real_id):
-    rid = idmap.get(real_id)
-    if rid is None:
-        rid = str(len(idmap) + 1)
-        idmap[real_id] = rid
+def _remap_id(idmap, real_id, kind=None):
+    """Map a real id() to a dense id that is stable ACROSS STEPS.
+
+    The map used to be rebuilt every step, so ids were dense per STEP, not per
+    trace: after `del a` every surviving object was renumbered. That breaks the
+    one thing the diagram exists to teach — identity — and makes a per-step diff
+    meaningless.
+
+    ADDRESS REUSE: CPython can hand a freed object's address to a new object.
+    Two guards, in order of strength:
+      1. the caller prunes the map to the previous step's live set, so only
+         recently-alive objects can be matched at all;
+      2. the type name is stored with the id, so a freed list whose address is
+         reused by a dict mints a NEW id instead of inheriting the list's box.
+    A same-type reuse between two steps can still inherit an id; the effect is
+    cosmetic (the box reads as "changed" rather than "new") and never a leak —
+    the id is a dense counter and no address is ever exposed.
+
+    `#n` holds the counter so ids keep rising even as entries are pruned."""
+    entry = idmap.get(real_id)
+    if entry is not None and (kind is None or entry[1] == kind):
+        return entry[0]
+    counter = idmap.get("#n", 0) + 1
+    idmap["#n"] = counter
+    rid = str(counter)
+    idmap[real_id] = (rid, kind)
     return rid
 
 def _is_prim(v):
@@ -229,7 +250,7 @@ def _value_ref(v, idmap, heap, queue):
     if _is_prim(v):
         return _prim_value(v)
     real = id(v)
-    rid = _remap_id(idmap, real)
+    rid = _remap_id(idmap, real, type_name(v))
     if rid not in heap and len(heap) < MAX_HEAP_OBJECTS:
         heap[rid] = None            # reserve the slot before expanding (cycle-safe)
         queue.append((rid, v))
@@ -466,6 +487,11 @@ _state = {
     "step_limit_hit": False,
     "bytes_limit_hit": False,
     "stopped": False,
+    # id() real → (id denso, nome do tipo), vivo pelo TRACE inteiro. Podado a cada
+    # passo para o conjunto alcançável, que é o que limita o reuso de endereço.
+    "idmap": {},
+    # O último heap EMITIDO. O passo seguinte manda só a diferença contra ele.
+    "prev_heap": None,
 }
 
 def _record(frame, event, arg):
@@ -477,8 +503,10 @@ def _record(frame, event, arg):
         return
     try:
         # One object graph per step, shared by every frame so aliases across
-        # frames map to a single box (idmap remaps id() → dense per-trace ids).
-        idmap, heap, queue = {}, {}, []
+        # frames map to a single box. The idmap is now PER TRACE, so a box keeps
+        # its id from the step it is born to the step it dies.
+        idmap = _state["idmap"]
+        heap, queue = {}, []
         top = _build_stack(frame, idmap, heap, queue)
         _drain_heap(idmap, heap, queue)
         cur = top[-1] if top else {"func": frame.f_code.co_name, "file": _rel(frame.f_code.co_filename), "line": frame.f_lineno}
@@ -490,7 +518,6 @@ def _record(frame, event, arg):
             "func": cur["func"],
             "stdout_len": _stdout.count,
             "stack": top,
-            "heap": heap,
         }
         # The RETURN VALUE, on the step where the frame returns. Python Tutor
         # shows it as a "Return value" row, and it is what closes the mental loop
@@ -502,7 +529,6 @@ def _record(frame, event, arg):
             try:
                 step["retval"] = _value_ref(arg, idmap, heap, queue)
                 _drain_heap(idmap, heap, queue)
-                step["heap"] = heap
             except Exception:
                 pass
         if event == "exception" and isinstance(arg, tuple) and len(arg) >= 2:
@@ -511,6 +537,27 @@ def _record(frame, event, arg):
                 "type": getattr(exc_type, "__name__", str(exc_type)),
                 "message": _clip(safe_repr(str(exc_val))),
             }
+        # HEAP POR-TRACE. Repetir o heap inteiro em todo passo era a maior fonte
+        # de bytes do documento — medido num laço de 120 iterações: 58% do
+        # relatório era heap e 86% dos passos repetiam o anterior byte a byte.
+        # Com o teto de 2 MB, é isso que corta um trace comum ao meio.
+        # O primeiro passo com grafo manda o heap cheio; os seguintes mandam só
+        # {set, del}, ou NADA quando nada mudou. É o mesmo conteúdo, e o "set"
+        # ainda diz ao desenho O QUE mudou — que é o que destrava mostrar mutação.
+        prev = _state["prev_heap"]
+        if prev is None:
+            step["heap"] = heap
+        else:
+            mudadas = {rid: box for rid, box in heap.items() if prev.get(rid) != box}
+            sumidas = [rid for rid in prev if rid not in heap]
+            if mudadas or sumidas:
+                delta = {}
+                if mudadas:
+                    delta["set"] = mudadas
+                if sumidas:
+                    delta["del"] = sumidas
+                step["heap_delta"] = delta
+
         # Approximate the report growth and stop before blowing the byte budget.
         approx = len(json.dumps(step, ensure_ascii=False))
         if _state["bytes"] + approx > MAX_REPORT_BYTES:
@@ -519,6 +566,17 @@ def _record(frame, event, arg):
             return
         _state["bytes"] += approx
         _state["steps"].append(step)
+        # Só depois de o passo ENTRAR é que ele vira a base do próximo delta —
+        # senão um passo descartado pelo teto deixaria o delta seguinte apontando
+        # para um heap que nunca foi enviado.
+        _state["prev_heap"] = heap
+        # Poda: o mapa de ids guarda só o que estava vivo neste passo. É esse
+        # corte que impede um endereço reaproveitado de herdar a caixa de um
+        # objeto que morreu passos atrás.
+        vivos = set(heap)
+        _state["idmap"] = {
+            k: v for k, v in idmap.items() if k == "#n" or (isinstance(v, tuple) and v[0] in vivos)
+        }
     except Exception:
         # Never let a recording failure crash the traced program.
         return
@@ -589,6 +647,11 @@ def _emit(crash):
         # dalivim-trace-json@2 only when the v1 {repr,type} `locals` are removed.
         "version": 1,
         "language": "python",
+        # Como o heap viaja: "delta" = o primeiro passo com grafo traz `heap`
+        # cheio, os seguintes trazem `heap_delta` {set, del}, e um passo SEM
+        # nenhum dos dois tem o heap idêntico ao anterior. Um consumidor que não
+        # conheça a flag continua lendo `heap` onde ele aparece.
+        "heap_encoding": "delta",
         "steps": _state["steps"],
         "step_count": len(_state["steps"]),
         "truncated": {

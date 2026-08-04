@@ -78,6 +78,7 @@ than a bare run.
       "line": 7,                  // 1-based current line in that file
       "func": "main",             // innermost frame's function name ("<module>" at top level)
       "stdout_len": 12,           // cumulative CHARACTERS of stdout produced up to this step
+      // "heap" / "heap_delta": ver "O heap viaja em DELTA", abaixo.
       "stack": [                  // OUTERMOST-first; the last entry is the current frame
         { "func": "<module>", "file": "main.py", "line": 13, "locals": { /* module globals, data only */ } },
         { "func": "main",     "file": "main.py", "line": 7,  "locals": {
@@ -100,6 +101,32 @@ than a bare run.
   }
 }
 ```
+
+### O heap viaja em DELTA (`heap_encoding: "delta"`)
+
+Repetir o heap inteiro em todo passo era a maior fonte de bytes do documento.
+Medido num laço de 120 iterações: **58%** do relatório era heap e **86%** dos
+passos repetiam o anterior byte a byte — com o teto de 2 MB, é isso que corta um
+trace comum ao meio. O documento traz, no topo, `"heap_encoding": "delta"`, e:
+
+* o **primeiro** passo com grafo carrega `heap` inteiro;
+* os seguintes carregam `heap_delta`: `{ "set": { id: box, ... }, "del": [id...] }`;
+* um passo **sem nenhum dos dois** tem o heap **idêntico ao anterior**.
+
+Mesmo conteúdo, 61% menos bytes no mesmo programa (321 KB → 124 KB). O consumidor
+remonta acumulando — `heapsOf` (Go, nos testes) e `parseTrace` (frontend) fazem
+exatamente isso, e o `set` ainda diz **o que** mudou naquele passo, que é o sinal
+usado para marcar mutação no desenho.
+
+**Ids de objeto são estáveis pelo trace inteiro.** O mapa `id() → id denso` vive
+pelo trace, não pelo passo: antes ele era refeito a cada passo, então um `del a`
+renumerava todos os sobreviventes e a identidade — a propriedade que o diagrama
+existe para ensinar — não atravessava um passo. Contra reuso de endereço pelo
+CPython há duas defesas: o mapa é **podado ao conjunto vivo** de cada passo, e o
+**nome do tipo** viaja junto com o id (uma lista liberada cujo endereço vira um
+dicionário ganha id novo). Sobra o caso de reuso pelo mesmo tipo entre dois
+passos: o efeito é cosmético (a caixa lê como "mudou" em vez de "nasceu") e nunca
+um vazamento — o id é um contador denso e nenhum endereço é exposto.
 
 **Values** are rendered as `{ "repr": <bounded string>, "type": <class name> }`.
 The `repr` is produced by the harness's own `safe_repr` — see the security model:
