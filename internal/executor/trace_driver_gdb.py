@@ -9,14 +9,20 @@
 # dangling, scribble a length field, or simply not have written a local yet, and
 # the debugger will hand us whatever bytes are there. So:
 #
-#   * a BARE pointer is never dereferenced — only its address is reported. The
-#     ONE exception is a container whose layout the language defines (an Odin
-#     string/slice/dynamic array is {data,len[,cap]}): there we DO read through
-#     `data`, but only after sanity-checking `len`, only up to MAX_ITEMS, and with
-#     every element read guarded — a scribbled length or a dangling buffer yields
-#     `opaque`, never a crash. Without this the student sees `{data: 0x5555…,
-#     len: 3}` instead of `"ola"` or `[10, 20, 30]`, which is the implementation,
-#     not the value;
+#   * an UNTYPED pointer is never dereferenced — `rawptr`, a function pointer or
+#     a pointer to a scalar is reported as its address and nothing else. We DO
+#     read through two kinds of typed pointer, and both under the same discipline:
+#       - a container whose layout the language defines (an Odin
+#         string/slice/dynamic array is {data,len[,cap]}), after sanity-checking
+#         `len`, up to MAX_ITEMS, every element guarded. Without this the student
+#         sees `{data: 0x5555…, len: 3}` instead of `"ola"` or `[10, 20, 30]` —
+#         the implementation, not the value;
+#       - a `^T` whose target is an aggregate (struct/array/union), so that a
+#         LINKED STRUCTURE draws as boxes and arrows instead of a column of
+#         addresses. Expanded breadth-first at the end of the step and bounded by
+#         MAX_HEAP_OBJECTS — see _expande_ponteiros, which also states what this
+#         costs in a manually-managed language and why it is the honest trade;
+#     a dangling or scribbled target yields `opaque` in every case, never a crash;
 #   * every value read is wrapped: any gdb error becomes `opaque`, never an
 #     exception that kills the driver mid-trace;
 #   * a variable is HIDDEN until execution passes its declaring line. DWARF scope
@@ -87,6 +93,27 @@ MAX_STACK = 25
 # this is treated as corrupt rather than walked — the cap that keeps a scribbled
 # `len` from turning into a multi-gigabyte read.
 MAX_SANE_LEN = 1_000_000
+# Ponteiros que um passo pode enfileirar para expandir. O teto real de caixas é
+# MAX_HEAP_OBJECTS; este só impede a fila de crescer sem limite antes disso.
+MAX_PONTEIROS = 400
+# Quantos ALVOS de ponteiro um passo expande. Sem este teto o custo é quadrático:
+# cada passo reexpande a cadeia inteira, e um programa que constrói uma lista num
+# laço vira O(n²). Medido: 20 nós = 1,7s; 40 = 3,4s; 80 = 12s; 150 = timeout.
+#
+# 32 não é só um número de desempenho, é o mesmo limite de LEGIBILIDADE que já
+# conhecíamos: medido antes, 32 caixas geram 62 setas cruzando o canvas, e daí
+# para cima o desenho deixa de ensinar. Além do teto os ponteiros restantes
+# continuam sendo o endereço — honesto, e é o que era antes desta mudança.
+MAX_EXPANDIDOS_POR_PASSO = 32
+# E um orçamento para o TRACE INTEIRO. O teto por passo sozinho não basta: o
+# custo é passos × caixas, e um laço que constrói 150 nós dá ~450 passos — 450 ×
+# 32 leituras ainda estoura o tempo. Sem este orçamento eu transformaria um trace
+# que ANTES funcionava (sem desenho, mas funcionava) num timeout, que é entregar
+# nada ao aluno. Esgotado, os ponteiros voltam a ser endereços e o passo a passo
+# segue inteiro até o fim. 600 mantém o desenho nos primeiros passos (onde a
+# estrutura está sendo construída e o aluno está olhando) e devolve o tempo aos
+# programas longos: medido, n=150 caiu de 13s para perto do baseline.
+MAX_EXPANSOES_NO_TRACE = 600
 
 # Names the compiler injects into every frame; not the student's variables.
 IMPLICIT_NAMES = {"context"}
@@ -144,6 +171,21 @@ class Heap:
         self.boxes = {} if boxes is None else boxes
         self.usados = set()
         self.truncated = False
+        # endereço real → id da caixa que mora ali. É o que liga um ponteiro à
+        # caixa certa (ver _liga_ponteiros).
+        self.por_endereco = {}
+        # Ponteiros vistos no passo, guardados com o VALOR do gdb para que a
+        # expansão aconteça depois, em largura (ver _expande_ponteiros).
+        self.pendentes = []
+
+    def pendura(self, valor):
+        if len(self.pendentes) < MAX_PONTEIROS:
+            self.pendentes.append(valor)
+
+    def marca_endereco(self, valor, rid):
+        addr = _addr_int(valor)
+        if addr:
+            self.por_endereco[addr] = rid
 
     def id_for(self, key):
         if key in self.usados:
@@ -154,6 +196,136 @@ class Heap:
         if rid is not None:
             self.usados.add(key)
         return rid
+
+
+def _addr_int(valor):
+    """O endereço de um valor como INTEIRO, ou None.
+
+    Existe porque as duas pontas falavam formatos diferentes: a caixa era
+    chaveada por `str(v.address)` — que o gdb imprime como
+    `(main::Node *) 0x7fff…` — e o ponteiro saía como `0x%x`. Os dois lados
+    tinham a mesma informação e nunca casavam, então nenhuma seta era desenhada
+    entre dois objetos."""
+    try:
+        a = valor.address
+        return int(a) if a is not None else None
+    except Exception:
+        return None
+
+
+# Quanto ainda dá para expandir neste trace (ver MAX_EXPANSOES_NO_TRACE).
+_orcamento = {"resta": MAX_EXPANSOES_NO_TRACE}
+
+
+def _aponta_para_agregado(v):
+    """O alvo do ponteiro é uma coisa DESENHÁVEL (struct, arranjo, união)?
+
+    Isto é o filtro que separa `^Node` — que o Python Tutor desenharia como uma
+    caixa ligada por seta — de um `rawptr` ou de um ponteiro para função, que não
+    têm forma declarada e cujo alvo nunca é lido."""
+    try:
+        alvo = v.type.strip_typedefs().target().strip_typedefs()
+        return alvo.code in (gdb.TYPE_CODE_STRUCT, gdb.TYPE_CODE_ARRAY, gdb.TYPE_CODE_UNION)
+    except Exception:
+        return False
+
+
+def _expande_ponteiros(heap, depth_serializa):
+    """Dá caixa ao que um ponteiro alcança — é isto que faz uma LISTA LIGADA se
+    desenhar em vez de virar uma coluna de endereços.
+
+    Aqui a regra de "nunca desreferenciar um ponteiro cru" É relaxada, e vale
+    dizer exatamente até onde:
+
+      * só ponteiro TIPADO para agregado (`^Node`, `^[4]int`). `rawptr`, ponteiro
+        para função e ponteiro para escalar continuam sendo só o endereço — sem
+        forma declarada, ler seria adivinhar;
+      * a leitura passa pelo mesmo `value_v2` de todo o resto, com os mesmos
+        tetos de campos, itens e tamanho, e embrulhada: um ponteiro pendurado
+        levanta erro no gdb e vira `opaque`, nunca derruba o driver;
+      * expansão em LARGURA, com fila. Não há limite de profundidade: uma lista
+        de 10 nós desenha os 10, e o que a limita é MAX_HEAP_OBJECTS — o mesmo
+        teto de sempre. Recursão com MAX_DEPTH cortaria a lista no 4º nó.
+
+    O que se perde: numa linguagem de memória manual, ler depois de um `free`
+    mostra um objeto que não existe mais. É um risco REAL e é a razão de a regra
+    existir — mas ele já valia para o `data` de toda fatia e string, que este
+    driver sempre leu. E, diferente de uma variável ainda não inicializada (que
+    seguimos escondendo, porque nenhuma linha do aluno a produziu), ler memória
+    liberada é o que o PRÓPRIO programa faz naquela linha: mostrar o mesmo lixo
+    que ele veria é a verdade daquele bug, não uma mentira sobre ele."""
+    vistos = set()
+    expandidos = 0
+    while (
+        heap.pendentes
+        and len(heap.usados) < MAX_HEAP_OBJECTS
+        and expandidos < MAX_EXPANDIDOS_POR_PASSO
+        and _orcamento["resta"] > 0
+    ):
+        v = heap.pendentes.pop(0)
+        try:
+            addr = int(v)
+        except Exception:
+            continue
+        if not addr or addr in vistos or addr in heap.por_endereco:
+            continue
+        vistos.add(addr)
+        if not _aponta_para_agregado(v):
+            continue
+        try:
+            # depth 0: a fila é que dá a largura, então cada alvo começa do zero
+            # e os tetos por caixa continuam valendo.
+            depth_serializa(v.dereference(), heap)
+            expandidos += 1
+            _orcamento["resta"] -= 1
+        except Exception:
+            continue  # pendurado/ilegível: fica o endereço, que é honesto
+
+
+def _liga_ponteiros(stack, boxes, por_endereco):
+    """Troca `{"prim":"ptr","text":"0x…"}` por `{"ref": id}` quando o endereço é
+    de uma caixa que JÁ está no desenho.
+
+    Isto NÃO desreferencia coisa alguma — a regra de nunca ler através de um
+    ponteiro cru continua valendo palavra por palavra. É só uma consulta: o
+    endereço já foi lido, e a caixa já foi montada a partir de uma variável
+    alcançável; ligar as duas é reconhecer uma identidade que estava ali.
+
+    Sem isto, um `prox: ^Node` aparecia como `0x7fffffffe9b8` — o aluno via um
+    número onde o Python Tutor desenha uma seta, que é a metade do diagrama que
+    ensina estrutura ligada. Um ponteiro para algo que não está no desenho
+    (memória de `new` que ninguém mais alcança) continua sendo o endereço."""
+
+    def troca(val):
+        if not isinstance(val, dict) or val.get("prim") != "ptr":
+            return val
+        try:
+            addr = int(val.get("text", ""), 16)
+        except Exception:
+            return val
+        rid = por_endereco.get(addr)
+        return {"ref": rid} if rid is not None else val
+
+    for frame in stack:
+        vars_ = frame.get("vars") or {}
+        for nome, val in list(vars_.items()):
+            vars_[nome] = troca(val)
+    for box in (boxes or {}).values():
+        if not isinstance(box, dict):
+            continue
+        campos = box.get("fields")
+        if isinstance(campos, dict):
+            for nome, val in list(campos.items()):
+                campos[nome] = troca(val)
+        itens = box.get("items")
+        if isinstance(itens, list):
+            box["items"] = [troca(x) for x in itens]
+        pares = box.get("entries")
+        if isinstance(pares, list):
+            box["entries"] = [
+                [troca(p[0]), troca(p[1])] if isinstance(p, list) and len(p) == 2 else p
+                for p in pares
+            ]
 
 
 def _prim(t, text):
@@ -228,6 +400,8 @@ def _odin_sequence(v, t, heap, depth, kind_name):
         return _opaque("comprimento inválido")
     key = _chave("seq", v, v["data"], t)
     rid = heap.id_for(key)
+    if rid is not None:
+        heap.marca_endereco(v, rid)
     if rid is None:
         heap.truncated = True
         return _opaque("limite de objetos")
@@ -286,9 +460,16 @@ def value_v2(v, heap, depth=0):
             # Address only. Dereferencing a dangling/scribbled pointer is exactly
             # how a hostile program would crash the tracer.
             try:
-                return _prim("ptr", "0x%x" % int(v))
+                n = int(v)
             except Exception:
                 return _opaque("ponteiro inválido")
+            # `nil` é o que o aluno escreveu; `0x0` é o que a máquina guardou.
+            if n == 0:
+                return _prim("ptr", "nil")
+            # Guarda o VALOR (não só o endereço): a expansão acontece no fim do
+            # passo, em largura, para que uma lista ligada inteira se desenhe.
+            heap.pendura(v)
+            return _prim("ptr", "0x%x" % n)
 
         if depth >= MAX_DEPTH:
             return _opaque("profundidade")
@@ -308,13 +489,14 @@ def value_v2(v, heap, depth=0):
                 return _odin_map(v, t, heap)
 
         if code == gdb.TYPE_CODE_STRUCT:
-            key = ("s", str(v.address), str(t))
+            key = ("s", _addr_int(v), str(t))
             rid = heap.id_for(key)
             if rid is None:
                 heap.truncated = True
                 return _opaque("limite de objetos")
+            heap.marca_endereco(v, rid)
             if rid not in heap.boxes:
-                box = {"kind": "object", "cls": _clip(str(t).replace("struct ", "")), "fields": {}, "truncated": False}
+                box = {"kind": "object", "cls": _clip(_nome_curto(str(t).replace("struct ", ""))), "fields": {}, "truncated": False}
                 heap.boxes[rid] = box  # inserted BEFORE recursing: cycles terminate
                 fields = {}
                 for i, f in enumerate(t.fields()):
@@ -331,11 +513,12 @@ def value_v2(v, heap, depth=0):
             return {"ref": rid}
 
         if code == gdb.TYPE_CODE_ARRAY:
-            key = ("a", str(v.address), str(t))
+            key = ("a", _addr_int(v), str(t))
             rid = heap.id_for(key)
             if rid is None:
                 heap.truncated = True
                 return _opaque("limite de objetos")
+            heap.marca_endereco(v, rid)
             if rid not in heap.boxes:
                 box = {"kind": "list", "items": [], "truncated": False}
                 heap.boxes[rid] = box
@@ -413,8 +596,8 @@ def frame_vars(frame, heap, current_line):
     return out
 
 
-def _nome_proc(bruto):
-    """`main::soma` → `soma`. O aluno escreveu `soma`, e o prefixo do pacote só
+def _nome_curto(bruto):
+    """`main::soma` → `soma`, `main::Node` → `Node`. O aluno escreveu `soma`, e o prefixo do pacote só
     ocupa espaço numa caixa estreita — o Python Tutor mostra o nome da função,
     não o caminho até ela. Só o último segmento; nomes sem `::` passam intactos."""
     nome = bruto or "?"
@@ -444,7 +627,7 @@ def snapshot(step_no, registro):
             if not _in_student_file(sal):
                 continue
             stack.append({
-                "func": _nome_proc(fr.name()),
+                "func": _nome_curto(fr.name()),
                 "file": os.path.basename(sal.symtab.filename),
                 "line": sal.line,
                 "vars": frame_vars(fr, heap, sal.line),
@@ -455,9 +638,15 @@ def snapshot(step_no, registro):
     try:
         cur = gdb.selected_frame().find_sal()
         line = cur.line
-        func = _nome_proc(gdb.selected_frame().name())
+        func = _nome_curto(gdb.selected_frame().name())
     except Exception:
         return None
+
+    # Primeiro dá caixa ao que os ponteiros alcançam (lista ligada), depois liga
+    # cada ponteiro à sua caixa. Tem de ser aqui, no fim: quando `a.prox` é
+    # serializado, a caixa de `b` pode ainda não ter sido montada.
+    _expande_ponteiros(heap, lambda alvo, h: value_v2(alvo, h))
+    _liga_ponteiros(stack, heap.boxes, heap.por_endereco)
 
     # O registro guarda só o que estava vivo NESTE passo: é essa poda que impede
     # um endereço reaproveitado de herdar a caixa de um objeto morto.
@@ -499,17 +688,27 @@ class _Devolucao(gdb.FinishBreakpoint):
         gdb.FinishBreakpoint.__init__(self, frame, internal=True)
         self.silent = True
         self.valor = None
+        # DISPAROU? É este o sinal de que o quadro saiu — e ele é bem mais
+        # confiável que comparar a profundidade da pilha entre dois passos.
+        # Em `f(n-1) + f(n-2)` as duas chamadas moram na mesma linha: a primeira
+        # retorna e a segunda entra sem que exista um passo intermediário no
+        # nível do chamador, então a profundidade nunca muda e o retorno passa
+        # despercebido — medido em `fibonacci`, todo quadro dizia `devolveu 1`,
+        # que era o valor preso da chamada anterior.
+        self.saiu = False
 
     def stop(self):
         try:
             self.valor = self.return_value
         except Exception:
             self.valor = None
+        self.saiu = True
         return False
 
     def out_of_scope(self):
         # O quadro morreu sem passar pelo retorno (sinal, longjmp): sem valor.
         self.valor = None
+        self.saiu = True
 
 
 def _arma_devolucao():
@@ -673,25 +872,50 @@ def collect():
                 # anterior acabou de devolver — e é NAQUELE passo que o evento
                 # `return` mora, com o quadro ainda em pé, igual ao Python.
                 pilha = [f["func"] for f in snap["stack"]]
-                if pilha_ant is None or len(pilha) > len(pilha_ant):
+                nivel = len(pilha)
+                nivel_ant = len(pilha_ant) if pilha_ant is not None else 0
+
+                # RETORNO. O sinal não é a pilha ter encolhido — é o breakpoint de
+                # saída ter DISPARADO. A diferença aparece em `f(n-1) + f(n-2)`,
+                # onde a primeira chamada sai e a segunda entra sem nenhum passo no
+                # nível do chamador: a profundidade fica igual e o retorno seria
+                # invisível. O passo ANTERIOR é o último dentro da proc que saiu, e
+                # é nele que o evento mora — com o quadro ainda em pé, como no
+                # Python. Numa cascata só o mais interno tem passo onde aparecer;
+                # os de fora saem sem valor, que é honesto.
+                saidos = [d for d in devolucoes if d[1] is not None and d[1].saiu]
+                if saidos and steps:
+                    steps[-1]["event"] = "return"
+                    # O VALOR só entra quando dá para provar de quem ele é.
+                    #
+                    # Em recursão eu não consigo: `f(n-1) + f(n-2)` põe duas
+                    # chamadas na mesma linha e o gdb entra e sai delas sem um
+                    # passo no nível do chamador, então nem a profundidade da
+                    # pilha nem a ordem de disparo identificam o quadro. Tentei as
+                    # duas e as duas produziram valores PLAUSÍVEIS E ERRADOS —
+                    # medido em `fibonacci(6)`: um quadro com `n = 0` dizendo
+                    # `devolveu 8`, que é a resposta da chamada de cima.
+                    #
+                    # Um valor errado é pior que valor nenhum: ensina que
+                    # `fib(0)` devolve 8. Então a linha `devolveu` aparece só
+                    # quando exatamente UM quadro saiu e a proc dele NÃO está
+                    # repetida na pilha. Fora disso o passo continua marcado como
+                    # `retornou` — o aluno vê a saída da função, só não vê o
+                    # valor. Vale para os casos que o tutor mais usa (`dobro(21)`
+                    # → `devolveu 42`) e cala exatamente onde eu não sei.
+                    anterior = pilha_ant or []
+                    repetida = anterior and anterior.count(anterior[-1]) > 1
+                    if len(saidos) == 1 and not repetida:
+                        _anota_devolvido(steps[-1], saidos[0][1], registro)
+                if saidos:
+                    devolucoes = [d for d in devolucoes if not (d[1] is not None and d[1].saiu)]
+
+                if pilha_ant is None or nivel > nivel_ant:
                     snap["event"] = "call"
-                    devolucoes.append(_arma_devolucao())
-                elif len(pilha) < len(pilha_ant):
-                    quantas = len(pilha_ant) - len(pilha)
-                    if steps:
-                        steps[-1]["event"] = "return"
-                        # A proc mais interna é a última armada; as intermediárias
-                        # (retorno em cascata num passo só) saem sem valor, que é
-                        # honesto: não houve passo onde mostrá-las.
-                        bp = None
-                        for _ in range(quantas):
-                            if devolucoes:
-                                bp = devolucoes.pop()
-                        _anota_devolvido(steps[-1], bp, registro)
-                    else:
-                        for _ in range(quantas):
-                            if devolucoes:
-                                devolucoes.pop()
+                    devolucoes.append((nivel, _arma_devolucao()))
+                # Uma proc cujo breakpoint nunca dispara (gdb sem suporte, quadro
+                # mais externo) não pode ficar presa segurando o nível de outra.
+                devolucoes = [d for d in devolucoes if d[0] <= nivel]
                 pilha_ant = pilha
 
                 steps.append(snap)
@@ -737,7 +961,7 @@ def collect():
     # programa acabou — e num que quebrou, o último passo é a quebra.
     elif terminou and steps and not truncated_steps:
         steps[-1]["event"] = "return"
-        _anota_devolvido(steps[-1], devolucoes.pop() if devolucoes else None, registro)
+        _anota_devolvido(steps[-1], devolucoes[-1][1] if devolucoes else None, registro)
 
     # Let the program RUN TO COMPLETION even when the step budget ran out: it is
     # still the student's program, its remaining output is theirs, and a process

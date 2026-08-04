@@ -127,10 +127,20 @@ func TestOdinTraceDriver_HidesUndefinedVariables(t *testing.T) {
 	if !strings.Contains(traceDriverGDB, "current_line <= func_line") {
 		t.Fatal("the driver must hide arguments until the prologue is past the function's line")
 	}
-	// A pointer is never dereferenced: a dangling one is how a hostile program
-	// would crash the tracer.
+	// Um ponteiro SEM forma declarada nunca é desreferenciado — `rawptr`, ponteiro
+	// para função, ponteiro para escalar. Só `^T` para agregado é seguido, e é o
+	// que faz uma lista ligada virar caixas e setas (ver _aponta_para_agregado).
 	if !strings.Contains(traceDriverGDB, "TYPE_CODE_PTR") || !strings.Contains(traceDriverGDB, "0x%x") {
-		t.Fatal("the driver must report a pointer as an address, never dereference it")
+		t.Fatal("a pointer with no drawable target must be reported as its address")
+	}
+	if !strings.Contains(traceDriverGDB, "def _aponta_para_agregado") {
+		t.Fatal("only a pointer to an aggregate may be followed")
+	}
+	i := strings.Index(traceDriverGDB, "def _aponta_para_agregado")
+	for _, code := range []string{"TYPE_CODE_STRUCT", "TYPE_CODE_ARRAY", "TYPE_CODE_UNION"} {
+		if !strings.Contains(traceDriverGDB[i:i+700], code) {
+			t.Fatalf("the aggregate filter must name %s", code)
+		}
 	}
 	if !strings.Contains(traceDriverGDB, "IMPLICIT_NAMES") {
 		t.Fatal("the driver must drop compiler-injected names (Odin's `context`)")
@@ -150,7 +160,7 @@ func TestOdinTraceDriver_ContainersShowValues(t *testing.T) {
 	}
 	// Recognised BEFORE the generic struct expansion, or the {data,len} shape wins.
 	iName := strings.Index(traceDriverGDB, `tname in ("string", "cstring")`)
-	iStruct := strings.Index(traceDriverGDB, `key = ("s", str(v.address)`)
+	iStruct := strings.Index(traceDriverGDB, `key = ("s", _addr_int(v)`)
 	if iName < 0 || iStruct < 0 || iName > iStruct {
 		t.Fatal("container recognition must come BEFORE the generic struct path")
 	}
@@ -178,8 +188,16 @@ func TestOdinTraceDriver_CallAndReturnEvents(t *testing.T) {
 	}
 	// O `return` mora no passo ANTERIOR: é lá que o quadro ainda está de pé, que
 	// é a semântica do evento de retorno do Python.
-	if !strings.Contains(traceDriverGDB, "len(pilha) < len(pilha_ant)") {
-		t.Fatal("a return must be detected by the stack getting SHALLOWER")
+	//
+	// E o sinal NÃO é a pilha ter encolhido — é o breakpoint de saída ter
+	// disparado. `f(n-1) + f(n-2)` põe duas chamadas na mesma linha: a primeira
+	// sai e a segunda entra sem passo no nível do chamador, a profundidade fica
+	// igual, e o retorno seria invisível.
+	if !strings.Contains(traceDriverGDB, "d[1].saiu") {
+		t.Fatal("a return must be detected by the finish breakpoint FIRING")
+	}
+	if !strings.Contains(traceDriverGDB, "self.saiu = True") {
+		t.Fatal("the finish breakpoint must record that its frame left")
 	}
 }
 
@@ -197,6 +215,14 @@ func TestOdinTraceDriver_CapturesReturnValue(t *testing.T) {
 	}
 	if !strings.Contains(traceDriverGDB, `passo["retval"]`) {
 		t.Fatal("the captured value must be attached to the return step as retval")
+	}
+	// E SÓ quando dá para provar de quem o valor é. Em recursão não dá: duas
+	// chamadas na mesma linha (`f(n-1) + f(n-2)`) não deixam passo no nível do
+	// chamador, e nem a profundidade nem a ordem de disparo identificam o quadro.
+	// Medido em fibonacci(6): um quadro com n=0 dizendo `devolveu 8`. Um valor
+	// errado é pior que valor nenhum — ele ensina que fib(0) devolve 8.
+	if !strings.Contains(traceDriverGDB, "len(saidos) == 1 and not repetida") {
+		t.Fatal("retval must be omitted when the returning frame is ambiguous (recursion)")
 	}
 }
 
@@ -267,5 +293,75 @@ func TestOdinTraceDriver_CrashSaysWhatBroke(t *testing.T) {
 	// E sem a frase (um SIGSEGV cru) ainda há de sobrar o nome do sinal.
 	if !strings.Contains(traceDriverGDB, `else _fim["sinal"]`) {
 		t.Fatal("a crash with no parseable sentence must still fall back to the signal")
+	}
+}
+
+// TestOdinTraceDriver_PointersBecomeArrows: um `prox: ^Node` saía como
+// `0x7fffffffe9b8` — o aluno via um número onde o Python Tutor desenha uma seta,
+// e uma estrutura ligada não se desenhava. As duas pontas tinham a informação e
+// nunca casavam: a caixa era chaveada por `str(v.address)` (que o gdb imprime
+// como `(main::Node *) 0x7fff…`) e o ponteiro saía como `0x%x`.
+func TestOdinTraceDriver_PointersBecomeArrows(t *testing.T) {
+	if !strings.Contains(traceDriverGDB, "def _addr_int") {
+		t.Fatal("both ends must speak the same address format")
+	}
+	if !strings.Contains(traceDriverGDB, "def _liga_ponteiros") ||
+		!strings.Contains(traceDriverGDB, "por_endereco") {
+		t.Fatal("a pointer into a box already on screen must become a ref")
+	}
+	// A ligação é uma CONSULTA, não uma leitura: a regra de nunca desreferenciar
+	// um ponteiro cru continua valendo, e o teste dela segue neste arquivo.
+	i := strings.Index(traceDriverGDB, "def _liga_ponteiros")
+	if i < 0 || !strings.Contains(traceDriverGDB[i:i+1200], "NÃO desreferencia") {
+		t.Fatal("the linking pass must state that it never dereferences")
+	}
+	// Precisa rodar DEPOIS do heap estar completo: quando `a.prox` é lido, a
+	// caixa de `b` pode ainda não existir.
+	iDrain := strings.Index(traceDriverGDB, "_drain_heap(idmap, heap, queue)")
+	iLink := strings.Index(traceDriverGDB, "_liga_ponteiros(stack,")
+	if iDrain >= 0 && iLink >= 0 && iLink < iDrain {
+		t.Fatal("pointer linking must run after every box for the step exists")
+	}
+	// `nil` é o que o aluno escreveu; `0x0` é o que a máquina guardou.
+	if !strings.Contains(traceDriverGDB, `_prim("ptr", "nil")`) {
+		t.Fatal("a null pointer must read as nil, not 0x0")
+	}
+}
+
+// TestOdinTraceDriver_LinkedStructureExpands: uma lista ligada com `new()` é o
+// exercício em que o diagrama mais ensina, e era exatamente o que não se
+// desenhava — nenhuma variável alcança os nós além do ponteiro, então não havia
+// caixa nenhuma, só endereços.
+func TestOdinTraceDriver_LinkedStructureExpands(t *testing.T) {
+	if !strings.Contains(traceDriverGDB, "def _expande_ponteiros") {
+		t.Fatal("a pointer's target must get a box, or a linked list draws nothing")
+	}
+	// EM LARGURA, com fila: recursão sob MAX_DEPTH cortaria a lista no 4º nó.
+	// O que limita é o teto de caixas de sempre.
+	i := strings.Index(traceDriverGDB, "def _expande_ponteiros")
+	trecho := traceDriverGDB[i : i+2600]
+	if !strings.Contains(trecho, "heap.pendentes.pop(0)") {
+		t.Fatal("expansion must be breadth-first (a queue), not depth-limited recursion")
+	}
+	if !strings.Contains(trecho, "len(heap.usados) < MAX_HEAP_OBJECTS") {
+		t.Fatal("expansion must be bounded by the same per-step box cap")
+	}
+	// DOIS tetos, e o segundo é o que impede uma regressão de tempo: o custo é
+	// passos × caixas, então um teto só por passo ainda deixa um laço que
+	// constrói 150 nós virar timeout — entregar NADA ao aluno, onde antes ele
+	// tinha um trace sem desenho. Medido: 13s com orçamento de 2000, 7,9s com 600.
+	if !strings.Contains(trecho, "expandidos < MAX_EXPANDIDOS_POR_PASSO") {
+		t.Fatal("expansion must be capped per step")
+	}
+	if !strings.Contains(trecho, `_orcamento["resta"] > 0`) {
+		t.Fatal("expansion must also have a budget for the whole trace")
+	}
+	// A relaxação da regra tem de estar declarada onde ela acontece, com o custo.
+	if !strings.Contains(trecho, "free") {
+		t.Fatal("the trade-off (reading after a free) must be stated at the site")
+	}
+	// Um alvo pendurado degrada para o endereço, nunca derruba o driver.
+	if !strings.Contains(trecho, "except Exception:") {
+		t.Fatal("a dangling target must degrade, not crash the tracer")
 	}
 }
