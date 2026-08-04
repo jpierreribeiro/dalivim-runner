@@ -169,3 +169,38 @@ O que mudou no `trace_driver_gdb.py`:
 Não é descuido — ler um argumento na linha de declaração da proc devolve lixo
 (o prólogo ainda não salvou os registradores), e mostrar lixo seria pior que
 mostrar um passo depois.
+
+
+## Ponteiros viram setas (B.4)
+
+`prox: ^Node` saía como `0x7fffffffe9b8`: o aluno via um número onde o Python
+Tutor desenha uma seta, e uma **lista ligada** — o exercício em que o diagrama
+mais ensina — não se desenhava de jeito nenhum.
+
+Duas mudanças, uma sem custo e outra com trade-off declarado:
+
+1. **Ligar o que já está na tela.** A caixa era chaveada por `str(v.address)`
+   (`(main::Node *) 0x7fff…`) e o ponteiro saía como `0x%x` — dois formatos do
+   mesmo endereço, que nunca casavam. Normalizados, virou consulta: **nenhuma
+   leitura de memória nova**. Resolve `&local` e ciclos (`n.prox = &n`).
+2. **Dar caixa ao alvo de um `^T` agregado.** Isto SIM lê através do ponteiro, e
+   é o que faz `new(Node)` desenhar. Expansão em **largura**, com fila, limitada
+   por `MAX_HEAP_OBJECTS` — uma cadeia de 10 nós desenha os 10 (recursão sob
+   `MAX_DEPTH` cortaria no 4º). `rawptr`, ponteiro para função e ponteiro para
+   escalar continuam sendo só o endereço.
+
+**O custo, dito por inteiro:** em linguagem de memória manual, ler depois de um
+`free` mostra um objeto que não existe mais. O risco é real e é a razão de a
+regra existir — mas ele já valia para o `data` de toda fatia e string, que este
+driver sempre leu. E há uma diferença que importa: uma variável não inicializada
+segue escondida (nenhuma linha do aluno a produziu), enquanto ler memória
+liberada é o que o **próprio programa** faz naquela linha — mostrar o mesmo lixo
+que ele veria é a verdade daquele bug, não uma mentira sobre ele. Verificado:
+`free(p)` seguido de execução não derruba o driver.
+
+**O mapa continua sem os pares, e a razão agora está medida.** O DWARF descreve
+`map[string]int` como `{data, len, allocator}`, mas o `data` do Odin **empacota o
+log2 da capacidade nos bits baixos do ponteiro** e o armazenamento é SoA — a
+struct do DWARF é uma descrição, não o layout. Lê-lo exigiria reproduzir um
+formato interno do runtime, e errar mostraria **pares errados**, que é pior que
+mostrar tipo e tamanho.

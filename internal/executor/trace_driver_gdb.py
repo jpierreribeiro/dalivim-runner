@@ -9,14 +9,20 @@
 # dangling, scribble a length field, or simply not have written a local yet, and
 # the debugger will hand us whatever bytes are there. So:
 #
-#   * a BARE pointer is never dereferenced — only its address is reported. The
-#     ONE exception is a container whose layout the language defines (an Odin
-#     string/slice/dynamic array is {data,len[,cap]}): there we DO read through
-#     `data`, but only after sanity-checking `len`, only up to MAX_ITEMS, and with
-#     every element read guarded — a scribbled length or a dangling buffer yields
-#     `opaque`, never a crash. Without this the student sees `{data: 0x5555…,
-#     len: 3}` instead of `"ola"` or `[10, 20, 30]`, which is the implementation,
-#     not the value;
+#   * an UNTYPED pointer is never dereferenced — `rawptr`, a function pointer or
+#     a pointer to a scalar is reported as its address and nothing else. We DO
+#     read through two kinds of typed pointer, and both under the same discipline:
+#       - a container whose layout the language defines (an Odin
+#         string/slice/dynamic array is {data,len[,cap]}), after sanity-checking
+#         `len`, up to MAX_ITEMS, every element guarded. Without this the student
+#         sees `{data: 0x5555…, len: 3}` instead of `"ola"` or `[10, 20, 30]` —
+#         the implementation, not the value;
+#       - a `^T` whose target is an aggregate (struct/array/union), so that a
+#         LINKED STRUCTURE draws as boxes and arrows instead of a column of
+#         addresses. Expanded breadth-first at the end of the step and bounded by
+#         MAX_HEAP_OBJECTS — see _expande_ponteiros, which also states what this
+#         costs in a manually-managed language and why it is the honest trade;
+#     a dangling or scribbled target yields `opaque` in every case, never a crash;
 #   * every value read is wrapped: any gdb error becomes `opaque`, never an
 #     exception that kills the driver mid-trace;
 #   * a variable is HIDDEN until execution passes its declaring line. DWARF scope
@@ -87,6 +93,9 @@ MAX_STACK = 25
 # this is treated as corrupt rather than walked — the cap that keeps a scribbled
 # `len` from turning into a multi-gigabyte read.
 MAX_SANE_LEN = 1_000_000
+# Ponteiros que um passo pode enfileirar para expandir. O teto real de caixas é
+# MAX_HEAP_OBJECTS; este só impede a fila de crescer sem limite antes disso.
+MAX_PONTEIROS = 400
 
 # Names the compiler injects into every frame; not the student's variables.
 IMPLICIT_NAMES = {"context"}
@@ -144,9 +153,16 @@ class Heap:
         self.boxes = {} if boxes is None else boxes
         self.usados = set()
         self.truncated = False
-        # endereço real → id da caixa que mora ali. É o que permite ligar um
-        # ponteiro à caixa certa SEM desreferenciá-lo (ver _liga_ponteiros).
+        # endereço real → id da caixa que mora ali. É o que liga um ponteiro à
+        # caixa certa (ver _liga_ponteiros).
         self.por_endereco = {}
+        # Ponteiros vistos no passo, guardados com o VALOR do gdb para que a
+        # expansão aconteça depois, em largura (ver _expande_ponteiros).
+        self.pendentes = []
+
+    def pendura(self, valor):
+        if len(self.pendentes) < MAX_PONTEIROS:
+            self.pendentes.append(valor)
 
     def marca_endereco(self, valor, rid):
         addr = _addr_int(valor)
@@ -177,6 +193,63 @@ def _addr_int(valor):
         return int(a) if a is not None else None
     except Exception:
         return None
+
+
+def _aponta_para_agregado(v):
+    """O alvo do ponteiro é uma coisa DESENHÁVEL (struct, arranjo, união)?
+
+    Isto é o filtro que separa `^Node` — que o Python Tutor desenharia como uma
+    caixa ligada por seta — de um `rawptr` ou de um ponteiro para função, que não
+    têm forma declarada e cujo alvo nunca é lido."""
+    try:
+        alvo = v.type.strip_typedefs().target().strip_typedefs()
+        return alvo.code in (gdb.TYPE_CODE_STRUCT, gdb.TYPE_CODE_ARRAY, gdb.TYPE_CODE_UNION)
+    except Exception:
+        return False
+
+
+def _expande_ponteiros(heap, depth_serializa):
+    """Dá caixa ao que um ponteiro alcança — é isto que faz uma LISTA LIGADA se
+    desenhar em vez de virar uma coluna de endereços.
+
+    Aqui a regra de "nunca desreferenciar um ponteiro cru" É relaxada, e vale
+    dizer exatamente até onde:
+
+      * só ponteiro TIPADO para agregado (`^Node`, `^[4]int`). `rawptr`, ponteiro
+        para função e ponteiro para escalar continuam sendo só o endereço — sem
+        forma declarada, ler seria adivinhar;
+      * a leitura passa pelo mesmo `value_v2` de todo o resto, com os mesmos
+        tetos de campos, itens e tamanho, e embrulhada: um ponteiro pendurado
+        levanta erro no gdb e vira `opaque`, nunca derruba o driver;
+      * expansão em LARGURA, com fila. Não há limite de profundidade: uma lista
+        de 10 nós desenha os 10, e o que a limita é MAX_HEAP_OBJECTS — o mesmo
+        teto de sempre. Recursão com MAX_DEPTH cortaria a lista no 4º nó.
+
+    O que se perde: numa linguagem de memória manual, ler depois de um `free`
+    mostra um objeto que não existe mais. É um risco REAL e é a razão de a regra
+    existir — mas ele já valia para o `data` de toda fatia e string, que este
+    driver sempre leu. E, diferente de uma variável ainda não inicializada (que
+    seguimos escondendo, porque nenhuma linha do aluno a produziu), ler memória
+    liberada é o que o PRÓPRIO programa faz naquela linha: mostrar o mesmo lixo
+    que ele veria é a verdade daquele bug, não uma mentira sobre ele."""
+    vistos = set()
+    while heap.pendentes and len(heap.usados) < MAX_HEAP_OBJECTS:
+        v = heap.pendentes.pop(0)
+        try:
+            addr = int(v)
+        except Exception:
+            continue
+        if not addr or addr in vistos or addr in heap.por_endereco:
+            continue
+        vistos.add(addr)
+        if not _aponta_para_agregado(v):
+            continue
+        try:
+            # depth 0: a fila é que dá a largura, então cada alvo começa do zero
+            # e os tetos por caixa continuam valendo.
+            depth_serializa(v.dereference(), heap)
+        except Exception:
+            continue  # pendurado/ilegível: fica o endereço, que é honesto
 
 
 def _liga_ponteiros(stack, boxes, por_endereco):
@@ -361,7 +434,12 @@ def value_v2(v, heap, depth=0):
             except Exception:
                 return _opaque("ponteiro inválido")
             # `nil` é o que o aluno escreveu; `0x0` é o que a máquina guardou.
-            return _prim("ptr", "nil" if n == 0 else "0x%x" % n)
+            if n == 0:
+                return _prim("ptr", "nil")
+            # Guarda o VALOR (não só o endereço): a expansão acontece no fim do
+            # passo, em largura, para que uma lista ligada inteira se desenhe.
+            heap.pendura(v)
+            return _prim("ptr", "0x%x" % n)
 
         if depth >= MAX_DEPTH:
             return _opaque("profundidade")
@@ -534,9 +612,10 @@ def snapshot(step_no, registro):
     except Exception:
         return None
 
-    # Agora que TODAS as caixas do passo existem, um ponteiro pode ser ligado à
-    # caixa que ele endereça. Tem de ser aqui, no fim: quando `a.prox` é lido, a
-    # caixa de `b` pode ainda não ter sido montada.
+    # Primeiro dá caixa ao que os ponteiros alcançam (lista ligada), depois liga
+    # cada ponteiro à sua caixa. Tem de ser aqui, no fim: quando `a.prox` é
+    # serializado, a caixa de `b` pode ainda não ter sido montada.
+    _expande_ponteiros(heap, lambda alvo, h: value_v2(alvo, h))
     _liga_ponteiros(stack, heap.boxes, heap.por_endereco)
 
     # O registro guarda só o que estava vivo NESTE passo: é essa poda que impede

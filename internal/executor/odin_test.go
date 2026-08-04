@@ -127,10 +127,20 @@ func TestOdinTraceDriver_HidesUndefinedVariables(t *testing.T) {
 	if !strings.Contains(traceDriverGDB, "current_line <= func_line") {
 		t.Fatal("the driver must hide arguments until the prologue is past the function's line")
 	}
-	// A pointer is never dereferenced: a dangling one is how a hostile program
-	// would crash the tracer.
+	// Um ponteiro SEM forma declarada nunca é desreferenciado — `rawptr`, ponteiro
+	// para função, ponteiro para escalar. Só `^T` para agregado é seguido, e é o
+	// que faz uma lista ligada virar caixas e setas (ver _aponta_para_agregado).
 	if !strings.Contains(traceDriverGDB, "TYPE_CODE_PTR") || !strings.Contains(traceDriverGDB, "0x%x") {
-		t.Fatal("the driver must report a pointer as an address, never dereference it")
+		t.Fatal("a pointer with no drawable target must be reported as its address")
+	}
+	if !strings.Contains(traceDriverGDB, "def _aponta_para_agregado") {
+		t.Fatal("only a pointer to an aggregate may be followed")
+	}
+	i := strings.Index(traceDriverGDB, "def _aponta_para_agregado")
+	for _, code := range []string{"TYPE_CODE_STRUCT", "TYPE_CODE_ARRAY", "TYPE_CODE_UNION"} {
+		if !strings.Contains(traceDriverGDB[i:i+700], code) {
+			t.Fatalf("the aggregate filter must name %s", code)
+		}
 	}
 	if !strings.Contains(traceDriverGDB, "IMPLICIT_NAMES") {
 		t.Fatal("the driver must drop compiler-injected names (Odin's `context`)")
@@ -297,7 +307,35 @@ func TestOdinTraceDriver_PointersBecomeArrows(t *testing.T) {
 		t.Fatal("pointer linking must run after every box for the step exists")
 	}
 	// `nil` é o que o aluno escreveu; `0x0` é o que a máquina guardou.
-	if !strings.Contains(traceDriverGDB, `"nil" if n == 0`) {
+	if !strings.Contains(traceDriverGDB, `_prim("ptr", "nil")`) {
 		t.Fatal("a null pointer must read as nil, not 0x0")
+	}
+}
+
+// TestOdinTraceDriver_LinkedStructureExpands: uma lista ligada com `new()` é o
+// exercício em que o diagrama mais ensina, e era exatamente o que não se
+// desenhava — nenhuma variável alcança os nós além do ponteiro, então não havia
+// caixa nenhuma, só endereços.
+func TestOdinTraceDriver_LinkedStructureExpands(t *testing.T) {
+	if !strings.Contains(traceDriverGDB, "def _expande_ponteiros") {
+		t.Fatal("a pointer's target must get a box, or a linked list draws nothing")
+	}
+	// EM LARGURA, com fila: recursão sob MAX_DEPTH cortaria a lista no 4º nó.
+	// O que limita é o teto de caixas de sempre.
+	i := strings.Index(traceDriverGDB, "def _expande_ponteiros")
+	trecho := traceDriverGDB[i : i+2600]
+	if !strings.Contains(trecho, "heap.pendentes.pop(0)") {
+		t.Fatal("expansion must be breadth-first (a queue), not depth-limited recursion")
+	}
+	if !strings.Contains(trecho, "len(heap.usados) < MAX_HEAP_OBJECTS") {
+		t.Fatal("expansion must be bounded by the same per-step box cap")
+	}
+	// A relaxação da regra tem de estar declarada onde ela acontece, com o custo.
+	if !strings.Contains(trecho, "free") {
+		t.Fatal("the trade-off (reading after a free) must be stated at the site")
+	}
+	// Um alvo pendurado degrada para o endereço, nunca derruba o driver.
+	if !strings.Contains(trecho, "except Exception:") {
+		t.Fatal("a dangling target must degrade, not crash the tracer")
 	}
 }
