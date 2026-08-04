@@ -37,7 +37,26 @@
 #
 # Bounds mirror the Python harness: steps, heap boxes, container items, fields,
 # string length and the total report size are all capped, and ids are remapped to
-# a per-trace counter so no real address ever reaches the client.
+# a per-trace counter so no real address ever reaches the client. The size cap is
+# measured PER STEP and accumulated — measuring the whole accumulated document on
+# every step made the cap itself quadratic, which is what put the step limit out
+# of reach (see the budget in `collect`).
+#
+# The heap travels as a DELTA, like the Python harness: the first step with a
+# graph carries the whole heap, the ones after carry {set, del}, and a step with
+# neither is identical to the previous one. The document announces it with
+# `heap_encoding: "delta"` and consumers reassemble by accumulating.
+#
+# Every cap that can degrade the DRAWING is reported: a step that hit the box cap
+# carries `heap_truncated`, and the document rolls it up into `truncated.heap`.
+# Without that the student just sees a reference reaching nothing, and reads it as
+# a statement about their program instead of about the diagram's limit.
+#
+# Behaviour is covered by trace_driver_gdb_test.py, which runs THIS file against a
+# scripted program through a fake gdb (trace_driver_gdb_fake.py). That proves the
+# logic living here — box identity, the delta, return-value attribution, output
+# counting, the caps — and proves nothing about Odin's DWARF, which stays the
+# on-target smoke's job.
 #
 # Config arrives by env (never argv): DALIVIM_TRACE_TARGET (the student source
 # basename, which is also the file filter), DALIVIM_TRACE_REPORT (where to write),
@@ -371,24 +390,33 @@ def _ehNulo(ptr):
         return False
 
 
-def _chave(marca, valor, ponteiro, tipo):
+def _chave(marca, valor, ponteiro, tipo, extra=None):
     """A chave que identifica uma caixa. Normalmente é o PONTEIRO DOS DADOS: duas
     fatias sobre o mesmo arranjo são a mesma coisa, e passar uma para uma proc
     mantém a caixa — que é o comportamento certo.
 
-    Menos quando o ponteiro é NULO. Aí ele não identifica nada, e dois `[dynamic]`
-    vazios distintos caíam na MESMA caixa: o diagrama desenhava duas setas para um
+    Menos em dois casos.
+
+    Quando o ponteiro é NULO ele não identifica nada, e dois `[dynamic]` vazios
+    distintos caíam na MESMA caixa: o diagrama desenhava duas setas para um
     objeto só, ensinando que `a` e `b` são aliases quando não são — o oposto
     exato do que ele existe para mostrar. Nesse caso a identidade passa a ser o
-    endereço do próprio valor, que distingue as duas variáveis."""
+    endereço do próprio valor, que distingue as duas variáveis.
+
+    E quando uma SUB-FATIA compartilha o começo do arranjo (`extra`, ver
+    _odin_sequence). `a := []int{1,2,3}` com `b := a[:2]` têm o mesmo `data` e o
+    mesmo tipo, então caíam na mesma chave — e como a caixa só é montada na
+    primeira vez, as duas setas apontavam para uma caixa de TRÊS itens. O aluno
+    lia que `b` é a mesma fatia de `a`, contra o `len(b) == 2` do programa dele.
+    É a mesma família do bug dos dois vazios, com o ponteiro não nulo."""
     if _ehNulo(ponteiro):
         try:
             propria = valor.address
             if propria is not None:
-                return (marca, "vazio@" + str(propria), str(tipo))
+                return (marca, "vazio@" + str(propria), str(tipo), extra)
         except Exception:
             pass
-    return (marca, str(ponteiro), str(tipo))
+    return (marca, str(ponteiro), str(tipo), extra)
 
 
 def _odin_sequence(v, t, heap, depth, kind_name):
@@ -398,7 +426,17 @@ def _odin_sequence(v, t, heap, depth, kind_name):
     n = _sane_len(v)
     if n is None:
         return _opaque("comprimento inválido")
-    key = _chave("seq", v, v["data"], t)
+    # O COMPRIMENTO entra na chave de uma FATIA (`[]T`), e só dela. Uma fatia tem
+    # cabeçalho imutável — `b := a[:2]` é um valor novo, não uma mutação de `a` —
+    # então distinguir por `len` separa a sub-fatia sem custo nenhum.
+    #
+    # Num `[dynamic]T` seria o contrário: `append` faz o `len` crescer NO LUGAR, e
+    # pôr o `len` na chave daria uma caixa nova a cada append — a identidade
+    # morreria exatamente onde o diagrama mais precisa dela (ver Registro). E não
+    # é preciso: uma sub-fatia de um `[dynamic]` sai como `[]T`, outro tipo, e o
+    # tipo já está na chave.
+    dinamico = kind_name.startswith("[dynamic]")
+    key = _chave("seq", v, v["data"], t, None if dinamico else n)
     rid = heap.id_for(key)
     if rid is not None:
         heap.marca_endereco(v, rid)
@@ -547,12 +585,18 @@ def value_v2(v, heap, depth=0):
 
 def frame_vars(frame, heap, current_line):
     """Locals/args of one frame, EXCLUDING variables execution has not reached
-    yet (see the header: DWARF scope != defined)."""
+    yet (see the header: DWARF scope != defined).
+
+    Devolve `(vars, no_prologo)`. `no_prologo` diz que existem ARGUMENTOS
+    escondidos só porque o prólogo ainda não rodou — o que é diferente de a proc
+    não ter parâmetros, e é a diferença que o desenho precisa para não afirmar
+    "sem variáveis" no passo em que o aluno acabou de entrar em `dobro(21)`."""
     out = {}
+    escondeu_argumento = False
     try:
         block = frame.block()
     except Exception:
-        return out
+        return out, False
     # The function's own declaration line: arguments are only trustworthy once
     # the prologue past it has run.
     try:
@@ -581,6 +625,7 @@ def frame_vars(frame, heap, current_line):
                 # rule applies, against the FUNCTION's line.
                 if sym.is_argument:
                     if current_line <= func_line:
+                        escondeu_argumento = True
                         continue
                 else:
                     decl = getattr(sym, "line", 0) or 0
@@ -593,7 +638,81 @@ def frame_vars(frame, heap, current_line):
             block = block.superblock
         except Exception:
             break
-    return out
+    return out, escondeu_argumento
+
+
+# Quanto do stdout do aluno já foi contado, e em quantos code points. Incremental
+# de propósito: reler o arquivo inteiro a cada passo seria o mesmo erro quadrático
+# que o teto de bytes tinha (ver collect).
+_saida = {"bytes": 0, "chars": 0, "decoder": None}
+
+
+def _stdout_ate_agora():
+    """Quantos CODE POINTS o programa do aluno já escreveu, para o campo
+    `stdout_len` do contrato.
+
+    Antes disto o driver mandava 0 em TODO passo, e o painel "Saída até aqui" do
+    passo a passo dizia "(sem saída ainda)" em todos os passos de todo programa
+    Odin — inclusive no último, de um programa que imprimiu. O `stdout_len` do
+    Python vem de um contador em volta do `sys.stdout`; aqui a fonte é o arquivo
+    para onde o inferior foi redirecionado (ver STDOUT_FILE).
+
+    Duas propriedades que fazem isto ser seguro em vez de "plausível e errado":
+
+    * o consumidor FATIA o stdout capturado até este número, então um número
+      MENOR que o real mostra um prefixo — texto que o programa de fato escreveu,
+      só que menos. Um número maior é que mostraria saída antes da hora, e isso
+      não pode acontecer: o tamanho do arquivo nunca passa do que foi escrito;
+    * se o `fmt` do Odin bufferizar ao escrever num arquivo (não medido
+      on-target), o efeito é exatamente esse atraso, no lado seguro.
+
+    Code points, não bytes: o `stdout_len` do contrato é contado como o
+    `Array.from(...).slice(...)` do frontend faz. O decodificador é incremental
+    para que um caractere multibyte partido entre duas leituras não vire dois."""
+    try:
+        import codecs
+        if _saida["decoder"] is None:
+            _saida["decoder"] = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        with io.open(STDOUT_FILE, "rb") as fh:
+            fh.seek(_saida["bytes"])
+            novos = fh.read()
+        if novos:
+            _saida["bytes"] += len(novos)
+            _saida["chars"] += len(_saida["decoder"].decode(novos))
+    except Exception:
+        pass  # arquivo ainda não existe, ou ilegível: o contador só não avança
+    return _saida["chars"]
+
+
+def _id_de_quadro(frame):
+    """Identidade de um QUADRO VIVO — o que faltava para saber de QUEM é um valor
+    devolvido.
+
+    Nem a profundidade da pilha nem a ordem de disparo do breakpoint servem:
+    `f(n-1) + f(n-2)` põe duas chamadas na mesma LINHA, o gdb entra e sai da
+    primeira sem deixar passo no nível do chamador, e as duas têm a mesma
+    profundidade. Foi isso que produziu, nas tentativas anteriores, um quadro com
+    `n = 0` dizendo `devolveu 8` — a resposta de `fib(6)`.
+
+    A chave aqui é o ENDEREÇO do quadro, não a posição dele: o par (pc do
+    chamador, sp do chamador). O pc do chamador é o endereço de RETORNO, e duas
+    chamadas na mesma linha são dois sítios de chamada distintos, logo dois
+    endereços distintos. O sp do chamador separa `fib(0)` de `fib(6)`. E o sp do
+    PRÓPRIO quadro não serve: ele se move com o prólogo e com pushes.
+
+    Duas chamadas irmãs reusam o mesmo slot de pilha, mas nunca ao mesmo tempo —
+    a primeira termina antes de a segunda nascer —, então procurar o passo mais
+    recente com esta chave sempre cai dentro do quadro que acabou de sair.
+
+    Devolve None quando não dá para ler (quadro mais externo, gdb sem o
+    registrador). Nesse caso a atribuição volta à regra conservadora de sempre."""
+    try:
+        pai = frame.older()
+        if pai is None:
+            return None
+        return (int(pai.pc()), int(pai.read_register("sp")))
+    except Exception:
+        return None
 
 
 def _nome_curto(bruto):
@@ -621,17 +740,27 @@ def snapshot(step_no, registro):
             break
 
     stack = []
+    interno = None
     for fr in reversed(frames):
         try:
             sal = fr.find_sal()
             if not _in_student_file(sal):
                 continue
-            stack.append({
+            vars_, no_prologo = frame_vars(fr, heap, sal.line)
+            quadro = {
                 "func": _nome_curto(fr.name()),
                 "file": os.path.basename(sal.symtab.filename),
                 "line": sal.line,
-                "vars": frame_vars(fr, heap, sal.line),
-            })
+                "vars": vars_,
+            }
+            # Os parâmetros só são legíveis depois do prólogo (ver frame_vars).
+            # Sem esta marca o passo de `call` mostra um quadro que o desenho
+            # rotula "sem variáveis" — que afirma que a proc não TEM parâmetros,
+            # mais forte que "ainda não dá para lê-los".
+            if no_prologo:
+                quadro["prologo"] = True
+            stack.append(quadro)
+            interno = fr
         except Exception:
             continue
 
@@ -652,7 +781,7 @@ def snapshot(step_no, registro):
     # um endereço reaproveitado de herdar a caixa de um objeto morto.
     registro.podar(heap.usados)
 
-    return {
+    passo = {
         "step": step_no,
         # O evento definitivo é decidido em `collect`, comparando a pilha com a
         # do passo anterior: só de lá dá para ver que uma proc foi chamada ou que
@@ -661,10 +790,20 @@ def snapshot(step_no, registro):
         "file": TARGET,
         "line": line,
         "func": func,
-        "stdout_len": 0,
+        "stdout_len": _stdout_ate_agora(),
         "stack": stack,
         "heap": heap.boxes,
     }
+    # O teto de caixas por passo era invisível: a flag era ESCRITA em três lugares
+    # e nunca serializada, então o aluno via a variável virar um ponto que não
+    # aponta para nada (o frontend não desenha seta para caixa que não existe) sem
+    # nenhuma explicação. Agora ela sobe até a faixa "Trace parcial".
+    if heap.truncated:
+        passo["heap_truncated"] = True
+    # A chave do quadro mais interno, para o valor devolvido saber onde morar.
+    # Fica FORA do documento (ver collect): é dado de trabalho, não de contrato.
+    passo["_quadro"] = _id_de_quadro(interno) if interno is not None else None
+    return passo
 
 
 class _Devolucao(gdb.FinishBreakpoint):
@@ -688,6 +827,9 @@ class _Devolucao(gdb.FinishBreakpoint):
         gdb.FinishBreakpoint.__init__(self, frame, internal=True)
         self.silent = True
         self.valor = None
+        # DE QUEM é este valor. Ver _id_de_quadro: é o endereço do quadro, e é a
+        # única coisa aqui que distingue `f(n-1)` de `f(n-2)`.
+        self.quadro = _id_de_quadro(frame)
         # DISPAROU? É este o sinal de que o quadro saiu — e ele é bem mais
         # confiável que comparar a profundidade da pilha entre dois passos.
         # Em `f(n-1) + f(n-2)` as duas chamadas moram na mesma linha: a primeira
@@ -721,16 +863,101 @@ def _arma_devolucao():
         return None
 
 
-def _anota_devolvido(passo, bp, registro):
-    """Prega o valor devolvido no passo de `return`, no heap DAQUELE passo."""
+def _anota_devolvido(passo, bp, registro, base):
+    """Prega o valor devolvido no passo de `return`, no heap DAQUELE passo.
+
+    Devolve as caixas NOVAS que isto criou (ou None), para quem chama manter a
+    linha de base do delta em dia — o passo já foi codificado quando chegamos
+    aqui, então não dá para simplesmente reescrever o heap dele.
+
+    Duas coisas que faltavam e que este passo herdava do resto do desenho:
+
+    * uma proc que devolve `^Node` mostrava `devolveu 0x7fff…` — o NÚMERO onde o
+      resto do quadro já desenha seta. `_expande_ponteiros` e `_liga_ponteiros`
+      rodam dentro de `snapshot`, e isto acontece depois; então eles precisam
+      rodar de novo, sobre o pedaço novo;
+    * o `Heap` era construído com as caixas do passo mas com `usados` VAZIO, e é
+      `usados` que conta contra MAX_HEAP_OBJECTS. O passo de retorno podia
+      duplicar o teto. Agora ele começa sabendo o que já está lá."""
     if bp is None or bp.valor is None:
-        return
+        return None
     try:
-        heap = Heap(registro, passo.get("heap"))
+        # `base` é o heap CHEIO daquele passo. Não dá para tirá-lo do próprio
+        # passo: quando ele já foi codificado em delta, a chave `heap` não está
+        # mais lá — e reconstruir do zero faria este passo remontar caixas que já
+        # existem, gastando o teto duas vezes.
+        antes = dict(base or {})
+        heap = Heap(registro, dict(antes))
+        # O teto por passo vale para o passo INTEIRO, retorno incluído: `usados`
+        # começa com as chaves que já têm caixa neste passo.
+        heap.usados = {k for k, rid in registro.ids.items() if rid in antes}
         passo["retval"] = value_v2(bp.valor, heap)
-        passo["heap"] = heap.boxes
+        # Mesmo tratamento do resto do passo: dar caixa ao que o ponteiro alcança
+        # e só então trocar o endereço pela seta. As caixas que já existiam saem
+        # daqui intactas — elas já foram ligadas em `snapshot`, e religar uma
+        # referência é no-op —, então as caixas NOVAS são exatamente as que este
+        # passo acrescentou.
+        _expande_ponteiros(heap, lambda alvo, h: value_v2(alvo, h))
+        _liga_ponteiros([], heap.boxes, heap.por_endereco)
+        retval = passo.get("retval")
+        if isinstance(retval, dict) and retval.get("prim") == "ptr":
+            try:
+                rid = heap.por_endereco.get(int(retval.get("text", ""), 16))
+                if rid is not None:
+                    passo["retval"] = {"ref": rid}
+            except Exception:
+                pass
+        if heap.truncated:
+            passo["heap_truncated"] = True
+        # NÃO escreve `passo["heap"]`: o passo já tem a codificação dele (cheia ou
+        # delta), e sobrescrever a chave aqui quebraria o delta. Quem chama coloca
+        # as caixas novas pela codificação certa — ver _acrescenta_caixas.
+        return {rid: box for rid, box in heap.boxes.items() if rid not in antes} or None
     except Exception:
-        pass
+        return None
+
+
+def _acrescenta_caixas(passo, novas, base):
+    """Põe caixas num passo JÁ CODIFICADO, respeitando a codificação dele, e
+    atualiza a linha de base para o delta do passo seguinte."""
+    if not novas:
+        return
+    if "heap" in passo:
+        passo["heap"].update(novas)
+    else:
+        passo.setdefault("heap_delta", {}).setdefault("set", {}).update(novas)
+    if base is not None:
+        base.update(novas)
+
+
+def _envelope(steps, truncated_steps, crash, heap_truncated=False, bytes_truncated=False):
+    """O documento do fio. Existe como função para o orçamento de bytes poder
+    medir o envelope antes do primeiro passo, em vez de descobrir no fim que ele
+    não cabia."""
+    doc = {
+        "version": TRACE_VERSION,
+        "language": LANGUAGE,
+        # O consumidor que não conhecer a flag continua lendo `heap` onde ele
+        # aparece; quem conhecer remonta acumulando (parseTrace, heapsOf).
+        "heap_encoding": "delta",
+        "steps": steps,
+        "step_count": len(steps),
+        "truncated": {
+            "steps": truncated_steps,
+            "bytes": bytes_truncated,
+            # O teto de caixas por passo. Sem isto ele era invisível: a variável
+            # virava um ponto que não aponta para lugar nenhum, sem explicação.
+            "heap": heap_truncated,
+        },
+        "limits": {
+            "max_steps": MAX_STEPS,
+            "max_report_bytes": MAX_REPORT_BYTES,
+            "max_heap_objects": MAX_HEAP_OBJECTS,
+        },
+    }
+    if crash:
+        doc["crash"] = crash
+    return doc
 
 
 # Sinais que matam um programa de aluno, com o número (para o código de saída no
@@ -851,6 +1078,9 @@ def collect():
     devolucoes = []
     pilha_ant = None
     terminou = False
+    # O último heap EMITIDO (base do delta) e os bytes já gastos no documento.
+    heap_ant = None
+    bytes_usados = len(json.dumps(_envelope([], False, None))) + 64
 
     inner = 0
     while len(steps) < MAX_STEPS and inner < MAX_GDB_STEPS:
@@ -886,27 +1116,48 @@ def collect():
                 saidos = [d for d in devolucoes if d[1] is not None and d[1].saiu]
                 if saidos and steps:
                     steps[-1]["event"] = "return"
-                    # O VALOR só entra quando dá para provar de quem ele é.
+                    # O VALOR só entra quando dá para PROVAR de quem ele é.
                     #
-                    # Em recursão eu não consigo: `f(n-1) + f(n-2)` põe duas
-                    # chamadas na mesma linha e o gdb entra e sai delas sem um
-                    # passo no nível do chamador, então nem a profundidade da
-                    # pilha nem a ordem de disparo identificam o quadro. Tentei as
-                    # duas e as duas produziram valores PLAUSÍVEIS E ERRADOS —
+                    # A pergunta é sempre a mesma: qual passo gravado é o último
+                    # de dentro do quadro que acabou de sair? Três tentativas
+                    # anteriores responderam por PROFUNDIDADE ou por ORDEM DE
+                    # DISPARO, e as três produziram valores plausíveis e errados —
                     # medido em `fibonacci(6)`: um quadro com `n = 0` dizendo
-                    # `devolveu 8`, que é a resposta da chamada de cima.
+                    # `devolveu 8`, que é a resposta de `fib(6)`. `f(n-1) + f(n-2)`
+                    # põe duas chamadas na mesma LINHA: o gdb entra e sai da
+                    # primeira sem deixar passo no nível do chamador, a
+                    # profundidade nunca muda, e a ordem não diz de quem é.
                     #
-                    # Um valor errado é pior que valor nenhum: ensina que
-                    # `fib(0)` devolve 8. Então a linha `devolveu` aparece só
-                    # quando exatamente UM quadro saiu e a proc dele NÃO está
-                    # repetida na pilha. Fora disso o passo continua marcado como
-                    # `retornou` — o aluno vê a saída da função, só não vê o
-                    # valor. Vale para os casos que o tutor mais usa (`dobro(21)`
-                    # → `devolveu 42`) e cala exatamente onde eu não sei.
+                    # A quarta responde por ENDEREÇO DE QUADRO (ver _id_de_quadro):
+                    # o par (pc do chamador, sp do chamador). Duas chamadas na
+                    # mesma linha são dois sítios de chamada, logo dois endereços
+                    # de retorno; e `fib(0)` e `fib(6)` diferem no sp. Irmãs reusam
+                    # o slot mas nunca coexistem, então o passo mais recente com
+                    # aquela chave está sempre dentro do quadro que saiu.
+                    #
+                    # A regra antiga fica como PISO, e é de propósito: esta chave
+                    # ainda não foi medida on-target, e uma chave que não bate tem
+                    # de calar, nunca chutar. Ou seja, o caminho novo só ACRESCENTA
+                    # valor onde ele é provável; ele nunca sobrepõe um silêncio com
+                    # um palpite. Um valor errado ensina que `fib(0)` devolve 8;
+                    # nenhum valor só não ensina.
                     anterior = pilha_ant or []
                     repetida = anterior and anterior.count(anterior[-1]) > 1
-                    if len(saidos) == 1 and not repetida:
-                        _anota_devolvido(steps[-1], saidos[0][1], registro)
+                    dono = None
+                    chave_passo = steps[-1].get("_quadro")
+                    if chave_passo is not None:
+                        casam = [d for d in saidos if d[1].quadro == chave_passo]
+                        if len(casam) == 1:
+                            dono = casam[0][1]
+                    if dono is None and len(saidos) == 1 and not repetida:
+                        dono = saidos[0][1]
+                    if dono is not None:
+                        novas = _anota_devolvido(steps[-1], dono, registro, heap_ant)
+                        # O passo já foi codificado (o heap dele pode ser um
+                        # delta), então as caixas novas entram pela codificação
+                        # dele e viram base do delta seguinte.
+                        if novas:
+                            _acrescenta_caixas(steps[-1], novas, heap_ant)
                 if saidos:
                     devolucoes = [d for d in devolucoes if not (d[1] is not None and d[1].saiu)]
 
@@ -918,12 +1169,49 @@ def collect():
                 devolucoes = [d for d in devolucoes if d[0] <= nivel]
                 pilha_ant = pilha
 
-                steps.append(snap)
-                # Size cap: stop while the document is still valid JSON.
-                if len(json.dumps(steps)) > MAX_REPORT_BYTES:
-                    steps.pop()
+                # O heap vai em DELTA, como no harness Python: o primeiro passo
+                # com grafo leva o heap cheio, os seguintes levam {set, del}, e um
+                # passo sem nenhum dos dois tem o heap idêntico ao anterior.
+                cheio = snap.get("heap") or {}
+                if heap_ant is None:
+                    snap["heap"] = cheio
+                else:
+                    mudadas = {rid: box for rid, box in cheio.items() if heap_ant.get(rid) != box}
+                    sumidas = [rid for rid in heap_ant if rid not in cheio]
+                    snap.pop("heap", None)
+                    if mudadas or sumidas:
+                        delta = {}
+                        if mudadas:
+                            delta["set"] = mudadas
+                        if sumidas:
+                            delta["del"] = sumidas
+                        snap["heap_delta"] = delta
+
+                # ORÇAMENTO DE BYTES, medido por PASSO. Antes o teto serializava a
+                # lista INTEIRA acumulada, uma vez por passo gravado, o que faz o
+                # custo do próprio medidor crescer com o quadrado do número de
+                # passos. Medido, só o medidor, em passos de ~818 B: 2,0 s em 533
+                # passos (o `fib(10)`, ~15% dos 13 s medidos) e 46,7 s em 2500 —
+                # mais que o triplo do envelope de 15 s. Ou seja, o teto de 2500
+                # passos era INALCANÇÁVEL: um trace longo morria de timeout dentro
+                # do próprio medidor, e o aluno recebia um erro onde deveria
+                # receber um trace parcial. O harness Python sempre mediu por
+                # passo; aqui era a lista toda.
+                #
+                # Depois, o driver INTEIRO sobre o mesmo roteiro (com o delta
+                # acima): 0,04 s em 533 passos e 0,17 s em 2500, com o documento
+                # caindo de 2015 KB para 577 KB. O que sobra no relógio do Odin é
+                # o gdb, que é onde o custo deve mesmo estar.
+                custo = len(json.dumps(snap)) + 1
+                if bytes_usados + custo > MAX_REPORT_BYTES:
                     truncated_steps = True
                     break
+                bytes_usados += custo
+                steps.append(snap)
+                # Só depois de ENTRAR é que o passo vira a base do delta seguinte —
+                # senão um passo descartado pelo teto deixaria o delta seguinte
+                # apontando para um heap que nunca foi enviado.
+                heap_ant = cheio
             if not _exec("step"):
                 terminou = True  # `step` só falha aqui quando o programa acabou
                 break
@@ -961,36 +1249,48 @@ def collect():
     # programa acabou — e num que quebrou, o último passo é a quebra.
     elif terminou and steps and not truncated_steps:
         steps[-1]["event"] = "return"
-        _anota_devolvido(steps[-1], devolucoes[-1][1] if devolucoes else None, registro)
+        _acrescenta_caixas(
+            steps[-1],
+            _anota_devolvido(steps[-1], devolucoes[-1][1] if devolucoes else None, registro, heap_ant),
+            heap_ant,
+        )
 
     # Let the program RUN TO COMPLETION even when the step budget ran out: it is
     # still the student's program, its remaining output is theirs, and a process
     # killed mid-way never flushes its buffers (measured: an unfinished inferior
     # leaves the stdout file empty). Errors here just mean it already exited.
     _exec("continue")
-    return steps, truncated_steps, crash
+    # O último `stdout_len` só é honesto depois do `continue`: é lá que o resto da
+    # saída do programa sai. Sem isto o último passo de um trace cortado mostraria
+    # menos saída do que o painel "Resultado" ao lado.
+    if steps:
+        steps[-1]["stdout_len"] = max(steps[-1].get("stdout_len", 0), _stdout_ate_agora())
+
+    # A truncagem de heap é do DOCUMENTO, não de um passo: basta um passo ter
+    # batido no teto para o desenho estar incompleto em algum lugar.
+    heap_truncado = any(p.get("heap_truncated") for p in steps)
+    return steps, truncated_steps, crash, heap_truncado
 
 
 def main():
     try:
-        steps, truncated, crash = collect()
+        steps, truncated, crash, heap_truncado = collect()
     except Exception as e:  # a driver bug must not look like a student failure
-        steps, truncated, crash = [], False, {"type": "InternalError", "message": _clip(e)}
+        steps, truncated, crash, heap_truncado = [], False, {"type": "InternalError", "message": _clip(e)}, False
 
-    doc = {
-        "version": TRACE_VERSION,
-        "language": LANGUAGE,
-        "steps": steps,
-        "step_count": len(steps),
-        "truncated": {"steps": truncated, "bytes": False},
-    }
-    if crash:
-        doc["crash"] = crash
+    # Campo de trabalho, nunca do contrato: a chave do quadro serve para atribuir
+    # o valor devolvido e não tem sentido para quem consome o trace.
+    for p in steps:
+        p.pop("_quadro", None)
 
+    doc = _envelope(steps, truncated, crash, heap_truncado)
     blob = json.dumps(doc)
     if len(blob) > MAX_REPORT_BYTES:
-        doc["steps"] = doc["steps"][: max(0, len(doc["steps"]) // 2)]
-        doc["truncated"] = {"steps": truncated, "bytes": True}
+        # Rede de segurança: o orçamento por passo já para antes de chegar aqui,
+        # mas se o envelope estourar por outro caminho é melhor entregar metade do
+        # trace do que um JSON que o cliente não consegue ler. Cortar no fim
+        # preserva o começo, que é onde o aluno está olhando.
+        doc = _envelope(steps[: max(0, len(steps) // 2)], truncated, crash, heap_truncado, True)
         blob = json.dumps(doc)
     with open(REPORT, "w") as fh:
         fh.write(blob)

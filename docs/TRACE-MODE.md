@@ -14,9 +14,17 @@ hands it back opaque (`trace_report`, labelled by `trace_format`). Stepping
 forward/back is done entirely **client-side** over the fetched trace — there is
 no re-execution.
 
-> **Status:** ships **Python only** (CPython `sys.settrace`). The registry is a
-> closed per-language seam (`traceCommands`), so JS/others can be added later
-> exactly like test mode. Ask for support via `GET /languages` (`trace:true`).
+> **Status:** ships for **Python** (CPython `sys.settrace`, `dalivim-trace-json@1`)
+> and **Odin** (gdb over a `-debug` build, `dalivim-trace-json@2` — see
+> [`future/B2-TRACER-SPIKE.md`](./future/B2-TRACER-SPIKE.md) for the security
+> review that gated it). The registry is a closed per-language seam
+> (`traceCommands`), so others can be added the same way. Ask for support via
+> `GET /languages` (`trace:true`).
+>
+> The two formats differ only in what each mechanism can produce — same document
+> shape, same bounds, same delta heap. `@2` replaces v1's `{repr,type}` `locals`
+> with the object graph, and carries `prologo` on a frame whose arguments the
+> prologue has not made readable yet.
 
 This is run mode **plus a transcription**: the status classifies the *student*
 program exactly like run mode (`success` / `runtime_error` / `timeout` /
@@ -90,7 +98,10 @@ than a bare run.
     }
   ],
   "step_count": 25,
-  "truncated": { "steps": false, "bytes": false },  // harness-internal caps hit
+  // Tetos internos atingidos. `heap` = algum passo bateu no teto de CAIXAS, então
+  // o desenho está incompleto: uma referência cujo alvo não coube não alcança
+  // nada. Era o único teto sem forma de chegar ao aluno.
+  "truncated": { "steps": false, "bytes": false, "heap": false },
   "limits":    { "max_steps": 2500, "max_report_bytes": 2000000 },
   "crash": {                      // present iff the program ended by an uncaught exception
     "type": "ZeroDivisionError",
@@ -133,7 +144,11 @@ The `repr` is produced by the harness's own `safe_repr` — see the security mod
 it is **not** the value's Python `repr()`.
 
 **Cumulative stdout.** `stdout_len` counts characters (code points) written to
-stdout *before* the current line executes. The visualizer reconstructs
+stdout *before* the current line executes. In the compiled shape it comes from
+the file the inferior's stdout was redirected into, read incrementally; if the
+language's runtime buffers, the number LAGS rather than leads, which is the safe
+direction — the consumer slices the captured stdout to it, so a low number shows
+a shorter prefix and never output that has not happened yet. The visualizer reconstructs
 "output so far at step *i*" by slicing the run's captured `stdout` to that length
 (use `Array.from(stdout).slice(0, n).join('')` for code-point-correct slicing).
 Program output still flows to the real stdout, so the runner's output-limit kill
@@ -157,7 +172,10 @@ step whose `event == "exception"`.
 | Container walk | depth 4, 30 items | fixed in harness | `safe_repr` (`MAX_DEPTH`, `MAX_ITEMS`) |
 | Vars per frame | 60 | fixed in harness | `_vars_of` (`MAX_VARS`) |
 | Stack frames per step | 25 | fixed in harness | `_build_stack` (`MAX_STACK`) |
-| Wall / memory / output | run-mode caps (test-timeout envelope) | existing knobs | the **same jail** as run mode |
+| Heap boxes per step | 200 | fixed in harness/driver | `MAX_HEAP_OBJECTS` → the step carries `heap_truncated`, the document `truncated.heap` |
+| Pointer targets expanded, per step (Odin) | 32 | fixed in driver | `MAX_EXPANDIDOS_POR_PASSO` → past it a pointer stays its address |
+| Pointer expansions, whole trace (Odin) | 600 | fixed in driver | `MAX_EXPANSOES_NO_TRACE` — the expansion is steps × boxes, so a per-step cap alone still lets a 150-node loop time out |
+| Wall / memory / output | run-mode caps (test-timeout envelope) | existing knobs | the run-mode jail for an INTERPRETED language; see below for Odin |
 
 The harness estimates the document's growth per step and stops **before**
 crossing the byte budget; the runner then re-reads the file under an independent
@@ -168,17 +186,51 @@ discipline as `stdout_truncated` / `test_report_truncated`).
 
 ## Security model — student code and its runtime values are HOSTILE
 
-The trace harness is `sys.settrace` running over untrusted code. It runs in the
-**exact same jail as run mode** (empty netns, per-run cgroup `memory.max`,
-`RLIMIT_NPROC`/`RLIMIT_FSIZE`, read-only rootfs, `-s -P` CPython hardening, the
-`LANG`/`LC_ALL`/`TZ`/`PYTHONHASHSEED` determinism pins). No isolation is relaxed.
+The trace harness is `sys.settrace` running over untrusted code. For an
+INTERPRETED language it runs in the **exact same jail as run mode** (empty netns,
+per-run cgroup `memory.max`, `RLIMIT_NPROC`/`RLIMIT_FSIZE`, read-only rootfs,
+`-s -P` CPython hardening, the `LANG`/`LC_ALL`/`TZ`/`PYTHONHASHSEED` determinism
+pins). No isolation is relaxed there.
+
+**A COMPILED language is the exception, and it is deliberate.** A native binary
+has no `sys.settrace`, so the only way to stop it line by line is a debugger, and
+a debugger is `ptrace`. `mode:"trace"` on a compiled language therefore runs in a
+SEPARATE jail (`SeccompTracer` + `TracerProcfs`, see `executeTrace`), which is the
+run-mode posture plus exactly two things:
+
+* `ptrace`, `process_vm_readv`, `process_vm_writev` — the rest of the denylist
+  stays (mount/pivot_root, module and BPF loading, keyrings, reboot/swap, the
+  fd-to-path handle tricks, `perf_event_open`, io_uring, userfaultfd);
+* a procfs of the **jail's own fresh PID namespace** (4 visible PIDs, read-only),
+  without which gdb cannot resolve a PIE load base.
+
+The classic objection — a tracer rewriting the syscall number at the ptrace stop,
+after seccomp ran — was TESTED rather than assumed and does not hold on this
+kernel: the kernel re-applies the filter to the rewritten call. Everything else
+that bounds the blast radius is unchanged: fresh PID namespace, jail-private uid,
+read-only rootfs with no setuid binary, `no_new_privs`, empty netns. The full
+review is in [`future/B2-TRACER-SPIKE.md`](./future/B2-TRACER-SPIKE.md); the
+posture is pinned by `TestTracerPolicy_*` in `internal/sandbox`.
+
 On top of the jail, the harness adds:
 
-1. **`safe_repr` never calls a value's `__repr__`/`__str__`.** Only built-in
-   scalar/container shapes are walked; **any other object renders as
+1. **`safe_repr` never calls a value's `__repr__`/`__str__`/`__iter__`/`items`.**
+   Only built-in scalar/container shapes are walked; **any other object renders as
    `<ClassName>` only**. A malicious, expensive, or side-effecting `__repr__`
-   therefore never runs — this is proven by `TestPythonTrace_MaliciousReprNeverInvoked`
-   (a `__repr__` that prints a marker and raises is never invoked).
+   therefore never runs — `TestPythonTrace_MaliciousReprNeverInvoked` (a
+   `__repr__` that prints a marker and raises is never invoked).
+
+   **A SUBCLASS OF A BUILT-IN IS STUDENT CODE**, and `isinstance` is true for it.
+   Every branch therefore dispatches through the BUILT-IN's own unbound slot
+   (`int.__repr__(v)`, never `str(v)`; `dict.items(v)`, never `v.items()`), which
+   a subclass cannot override — safe and still truthful, so the value keeps
+   showing (a `class Celsius(float)` shows its number, a `Counter` its pairs).
+   Measured before this rule, with a `class Loud(int)`: the student's `__str__`
+   ran six times without the program calling it once, `Loud(5)` was DRAWN AS 42,
+   and a `__str__` returning 200 MB was materialised in full before the length cap
+   could cut it. Pinned by `TestPythonTraceGraph_BuiltinSubclassIsNotStudentCode`
+   (the student's own counter is the witness) and by
+   `TestTraceHarness_BuiltinSlotDispatch` (the rule, not one program).
 2. **Cycles and huge structures are bounded** by depth, item-count, and total
    length caps, with an id-visited set that renders a back-reference as
    `<circular>` (`TestPythonTrace_CyclicStructureBounded`,

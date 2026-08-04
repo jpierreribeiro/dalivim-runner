@@ -13,9 +13,11 @@
 #   * the report is capped by an in-harness byte budget AND, authoritatively,
 #     re-capped by the runner (TraceTruncated);
 #   * value serialization is done by safe_repr, which NEVER calls a value's own
-#     __repr__/__str__ — an arbitrary object renders as "<ClassName>" only, so a
-#     malicious/expensive/huge __repr__ can never run and cyclic or enormous
-#     structures are bounded by depth/length/item caps;
+#     __repr__/__str__/__iter__/items — an arbitrary object renders as
+#     "<ClassName>" only, and a value that DERIVES from a built-in is rendered
+#     through the BUILT-IN's own unbound slot (int.__repr__, dict.items, …), which
+#     a subclass cannot override. So a malicious/expensive/huge __repr__ can never
+#     run, and cyclic or enormous structures are bounded by depth/length/item caps;
 #   * only frames belonging to the student's own files are recorded — stdlib and
 #     this harness are never traced.
 # The harness writes ONLY to the report file; student stdout/stderr flow through
@@ -96,21 +98,37 @@ def safe_repr(v, depth=0, seen=None):
     """Render v to a bounded string WITHOUT invoking v.__repr__/__str__ for
     unknown types. Only built-in scalar/container shapes are walked; anything
     else becomes "<ClassName>". Cyclic and oversized structures are bounded by
-    depth, item count, and total length caps."""
+    depth, item count, and total length caps.
+
+    SUBCLASSES OF BUILT-INS ARE STUDENT CODE. `isinstance` is true for them, so
+    every branch below dispatches through the BUILT-IN's own unbound slot
+    (`int.__repr__(v)`, not `str(v)`; `dict.items(v)`, not `v.items()`). A
+    subclass cannot override those, and the value still renders truthfully —
+    a `class Celsius(float)` shows its number, a `Counter` shows its pairs.
+
+    Falling back to "<ClassName>" for anything deriving from a built-in would be
+    safe too, but it would hide the value; going through the base slot is both
+    safe AND honest. Measured before this rule: a `class Loud(int)` whose
+    `__str__` returned "42" was DRAWN AS 42 while holding 5, and a `__str__`
+    returning 200 MB was materialised in full before _clip could cut it."""
     try:
         if v is None or v is True or v is False:
             return repr(v)  # None/True/False: fixed, safe literals
         if isinstance(v, bool):
+            # bool cannot be subclassed, so its repr is always the built-in's.
             return repr(v)
         if isinstance(v, int):
             # int() has no unbounded __repr__ risk beyond digit count; clip huge ints.
-            return _clip(str(v))
+            return _clip(int.__repr__(v))
         if isinstance(v, float):
-            return _clip(repr(v))
+            return _clip(float.__repr__(v))
         if isinstance(v, str):
-            return _clip(_quote_str(v))
+            # Slicing through the base slot both CLIPS and returns a plain `str`,
+            # so the escaping below cannot reach an overridden `replace`.
+            return _clip(_quote_str(str.__getitem__(v, slice(None, MAX_STR + 1))))
         if isinstance(v, (bytes, bytearray)):
-            return _clip(repr(bytes(v[:MAX_STR])))
+            base = bytes if isinstance(v, bytes) else bytearray
+            return _clip(bytes.__repr__(bytes(base.__getitem__(v, slice(None, MAX_STR)))))
 
         if seen is None:
             seen = set()
@@ -124,7 +142,7 @@ def safe_repr(v, depth=0, seen=None):
             seen = seen | {vid}
             open_c, close_c = _bracket(v)
             parts = []
-            for i, item in enumerate(v):
+            for i, item in enumerate(_itens_base(v)):
                 if i >= MAX_ITEMS:
                     parts.append("\u2026")
                     break
@@ -137,7 +155,7 @@ def safe_repr(v, depth=0, seen=None):
         if isinstance(v, dict):
             seen = seen | {vid}
             parts = []
-            for i, (k, val) in enumerate(v.items()):
+            for i, (k, val) in enumerate(_pares_base(v)):
                 if i >= MAX_ITEMS:
                     parts.append("\u2026")
                     break
@@ -151,6 +169,23 @@ def safe_repr(v, depth=0, seen=None):
         return "<" + type(v).__name__ + ">"
     except Exception:
         return "<unrepr>"
+
+def _itens_base(v):
+    """Os elementos de uma sequência embutida, pelo slot da BASE.
+
+    `for x in v` chama `type(v).__iter__`, e uma subclasse do aluno pode
+    sobrescrever isso — levantar, mutar, ou nunca terminar. `list.__iter__(v)` é
+    o iterador do próprio built-in, que uma subclasse não alcança."""
+    for base in (list, tuple, set, frozenset):
+        if isinstance(v, base):
+            return base.__iter__(v)
+    return iter(())
+
+
+def _pares_base(v):
+    """Os pares de um dicionário embutido, pelo slot da base — mesmo motivo."""
+    return dict.items(v)
+
 
 def _quote_str(s):
     # A bounded, escaped single-line rendering; avoids control chars in JSON.
@@ -298,7 +333,10 @@ def _expand_object(v, idmap, heap, queue):
                     else "tuple" if isinstance(v, tuple) else "set")
             items = []
             truncated = False
-            for i, item in enumerate(v):
+            # Pelo slot da base, nunca por `for item in v`: ver _itens_base. Um
+            # `class Minha(list)` com `__iter__` próprio é código do ALUNO, e
+            # expandir a caixa não pode ser um jeito de executá-lo.
+            for i, item in enumerate(_itens_base(v)):
                 if i >= MAX_ITEMS:
                     truncated = True
                     break
@@ -307,7 +345,7 @@ def _expand_object(v, idmap, heap, queue):
         if isinstance(v, dict):
             entries = []
             truncated = False
-            for i, (k, val) in enumerate(v.items()):
+            for i, (k, val) in enumerate(_pares_base(v)):
                 if i >= MAX_ITEMS:
                     truncated = True
                     break

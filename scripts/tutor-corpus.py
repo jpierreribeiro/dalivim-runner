@@ -7,8 +7,25 @@ exemplo aqui declara o que o desenho TEM de dizer, e o script confere.
 
     RUNNER=http://127.0.0.1:8099 python3 scripts/tutor-corpus.py
 
-Sai 0 se todos passam. Não substitui os testes Go — é a rede que pega o que só
-aparece com um programa de verdade percorrido de ponta a ponta.
+14 exemplos: 6 em Python e 8 em Odin. Sai 0 se todos passam. Não substitui os
+testes Go — é a rede que pega o que só aparece com um programa de verdade
+percorrido de ponta a ponta.
+
+DUAS LIÇÕES QUE ESTE ARQUIVO JÁ APRENDEU, e que valem para quem for acrescentar
+um exemplo:
+
+* uma verificação que só reprova o caso RUIM passa de graça quando o produtor
+  deixa de emitir o dado. Foi o que aconteceu com `retorno_nunca_mente`: quando
+  os retornos ambíguos do Odin passaram a ser omitidos, o verificador que pegou o
+  bug do fibonacci virou vacuamente verdadeiro, porque ele pula todo passo sem
+  `retval`. Por isso agora existe `devolveu`, que cobra o caso POSITIVO;
+* um exemplo que verifica só o `stdout` verifica que o programa RODA, não que o
+  desenho diz o que ele existe para dizer. O exemplo "py ciclo" era assim.
+
+E o que este script NÃO alcança, por construção: ele fala direto com o runner,
+com um timeout largo. A classe de bug em que o backend corta uma resposta
+legítima do runner (envelope de tempo, prazo coordenado) é invisível daqui —
+para essa, o único teste é abrir a tela do aluno.
 """
 import json
 import os
@@ -170,6 +187,93 @@ def retorno_nunca_mente(param="n"):
     return checa
 
 
+def ciclo(nome):
+    """A caixa que `nome` alcança aponta para SI MESMA.
+
+    O exemplo "py ciclo" existia e verificava só o stdout — ou seja, verificava
+    que o programa roda, não que o DESENHO diz o que ele existe para dizer. Um
+    ciclo que deixasse de se fechar (ou que fizesse a expansão não terminar)
+    passava por aqui sem ninguém notar."""
+    def checa(r, d):
+        for passo in reversed(d["steps"]):
+            for rid in _refs_de(passo, nome):
+                b = _caixas(passo).get(rid) or {}
+                for v in (b.get("fields") or {}).values():
+                    if isinstance(v, dict) and v.get("ref") == rid:
+                        return None
+        return "nenhuma caixa de %s aponta para si mesma" % nome
+    return checa
+
+
+def devolveu(esperado, proc=None):
+    """Algum passo de retorno mostrou EXATAMENTE este valor.
+
+    `retorno_nunca_mente` só reprova um valor errado; ele passa de graça quando
+    valor nenhum é mostrado — e foi exatamente isso que aconteceu com o Odin
+    quando os retornos ambíguos passaram a ser omitidos: o verificador que pegou
+    o bug do fibonacci virou vacuamente verdadeiro. Este aqui cobra o caso
+    POSITIVO, que é o que dá sentido ao outro."""
+    def checa(r, d):
+        vistos = []
+        for s in d["steps"]:
+            if "retval" not in s:
+                continue
+            topo = s["stack"][-1] if s["stack"] else {}
+            if proc and topo.get("func") != proc:
+                continue
+            texto = s["retval"].get("text")
+            vistos.append(texto)
+            if texto == esperado:
+                return None
+        return "nenhum `devolveu` %s (vi %s)" % (esperado, vistos or "nenhum")
+    return checa
+
+
+def saida_acompanha_os_passos():
+    """`stdout_len` tem de crescer ao longo do trace e terminar no tamanho da
+    saída de verdade.
+
+    O driver do Odin mandava 0 em TODO passo, e o painel "Saída até aqui" dizia
+    "(sem saída ainda)" em todos eles — inclusive no último, de um programa que
+    imprimiu. Nada verificava isso porque nada olhava o campo."""
+    def checa(r, d):
+        lens = [s.get("stdout_len", 0) for s in d["steps"]]
+        if not lens:
+            return "nenhum passo"
+        if lens != sorted(lens):
+            return "stdout_len não é monótono: %s" % lens[:12]
+        total = len(r.get("stdout") or "")
+        if total and lens[-1] == 0:
+            return "programa imprimiu %d caracteres e todo passo diz 0" % total
+        if lens[-1] > total:
+            return "stdout_len final %d passa da saída real %d" % (lens[-1], total)
+        return None
+    return checa
+
+
+def sem_alias_falso(a, b, tam_a, tam_b):
+    """`a` e `b` compartilham o começo do arranjo mas têm comprimentos
+    diferentes: são caixas DIFERENTES, cada uma com o seu tamanho.
+
+    Com a chave só no ponteiro de dados as duas caíam na mesma caixa, e o
+    diagrama desenhava duas setas para uma caixa de `tam_a` itens — ensinando que
+    `b` é a mesma fatia de `a`, contra o `len(b)` do próprio programa."""
+    def checa(r, d):
+        for passo in reversed(d["steps"]):
+            ra, rb = _refs_de(passo, a), _refs_de(passo, b)
+            if not (ra and rb):
+                continue
+            if ra[0] == rb[0]:
+                return "%s e %s colapsaram na caixa %s" % (a, b, ra[0])
+            ca, cb = _caixas(passo).get(ra[0]) or {}, _caixas(passo).get(rb[0]) or {}
+            na, nb = len(ca.get("items") or []), len(cb.get("items") or [])
+            if na != tam_a or nb != tam_b:
+                return "esperava %d e %d itens, vi %d e %d" % (tam_a, tam_b, na, nb)
+            return None
+        return "nenhum passo teve %s e %s juntos" % (a, b)
+    return checa
+
+
 def caixa_com_campo(cls, campo):
     def checa(r, d):
         for passo in d["steps"]:
@@ -301,20 +405,46 @@ dobro :: proc(n: int) -> int { return n * 2 }
 main :: proc() { fmt.println(dobro(21)) }
 '''
 
+# Uma sub-fatia sobre o MESMO arranjo: `parte` começa onde `todos` começa e tem
+# comprimento menor. As duas eram a mesma caixa, e o desenho dizia que `parte`
+# tem 3 itens.
+OD_SUBFATIA = '''package main
+import "core:fmt"
+main :: proc() {
+    todos := []int{10, 20, 30}
+    parte := todos[:2]
+    fmt.println(len(todos), len(parte))
+}
+'''
+
+PY_CLOSURE = '''def contador():
+    n = 0
+    def incr():
+        return n + 1
+    return incr
+
+f = contador()
+print(f())
+'''
+
 CORPUS = [
     ("py alias + mutação", "python", PY_ALIAS,
      [stdout_e("4 4 3\n"), alias("notas", "copia"), nao_alias("notas", "outra"),
-      id_estavel("notas")]),
+      id_estavel("notas"), saida_acompanha_os_passos()]),
     ("py fibonacci recursivo", "python", PY_FIB,
-     [stdout_e("8\n"), eventos({"call": 2, "return": 2}), retorno_nunca_mente()]),
+     [stdout_e("8\n"), eventos({"call": 2, "return": 2}), retorno_nunca_mente(),
+      devolveu("8", proc="fibonacci")]),
     ("py objeto + alias", "python", PY_OBJ,
      [stdout_e("Ana Ana\n"), alias("a", "b"), caixa_com_campo("Aluno", "nome")]),
-    ("py ciclo", "python", PY_CICLO, [stdout_e("True\n")]),
+    # O ciclo agora é VERIFICADO, e não só executado.
+    ("py ciclo", "python", PY_CICLO, [stdout_e("True\n"), ciclo("n")]),
+    ("py closure", "python", PY_CLOSURE, [stdout_e("1\n"), eventos({"return": 2})]),
     ("py quebra", "python", PY_QUEBRA,
      [status_e("runtime_error"), crash_diz("ZeroDivisionError")]),
 
     ("odin alias + fatia", "odin", OD_ALIAS,
-     [stdout_e("3 3 3\n"), alias("notas", "copia"), nao_alias("notas", "outra")]),
+     [stdout_e("3 3 3\n"), alias("notas", "copia"), nao_alias("notas", "outra"),
+      saida_acompanha_os_passos()]),
     ("odin fibonacci recursivo", "odin", OD_FIB,
      [stdout_e("8\n"), eventos({"call": 2, "return": 2}), retorno_nunca_mente()]),
     ("odin struct por valor", "odin", OD_STRUCT,
@@ -323,10 +453,15 @@ CORPUS = [
      [stdout_e("4\n"), cadeia_de(4)]),
     ("odin dois vazios distintos", "odin", OD_VAZIOS,
      [stdout_e("1 0\n"), nao_alias("a", "b")]),
+    # E o inverso do anterior: o ponteiro de dados IGUAL, o comprimento diferente.
+    ("odin sub-fatia", "odin", OD_SUBFATIA,
+     [stdout_e("3 2\n"), sem_alias_falso("todos", "parte", 3, 2)]),
     ("odin quebra", "odin", OD_QUEBRA,
      [status_e("runtime_error"), crash_diz("out of range")]),
+    # O caso POSITIVO do `devolveu`: sem ele, `retorno_nunca_mente` passa de graça
+    # num trace que não mostra retorno nenhum.
     ("odin chamada simples", "odin", OD_CHAMADA,
-     [stdout_e("42\n"), eventos({"return": 1})]),
+     [stdout_e("42\n"), eventos({"return": 1}), devolveu("42", proc="dobro")]),
 ]
 
 
