@@ -144,6 +144,14 @@ class Heap:
         self.boxes = {} if boxes is None else boxes
         self.usados = set()
         self.truncated = False
+        # endereço real → id da caixa que mora ali. É o que permite ligar um
+        # ponteiro à caixa certa SEM desreferenciá-lo (ver _liga_ponteiros).
+        self.por_endereco = {}
+
+    def marca_endereco(self, valor, rid):
+        addr = _addr_int(valor)
+        if addr:
+            self.por_endereco[addr] = rid
 
     def id_for(self, key):
         if key in self.usados:
@@ -154,6 +162,67 @@ class Heap:
         if rid is not None:
             self.usados.add(key)
         return rid
+
+
+def _addr_int(valor):
+    """O endereço de um valor como INTEIRO, ou None.
+
+    Existe porque as duas pontas falavam formatos diferentes: a caixa era
+    chaveada por `str(v.address)` — que o gdb imprime como
+    `(main::Node *) 0x7fff…` — e o ponteiro saía como `0x%x`. Os dois lados
+    tinham a mesma informação e nunca casavam, então nenhuma seta era desenhada
+    entre dois objetos."""
+    try:
+        a = valor.address
+        return int(a) if a is not None else None
+    except Exception:
+        return None
+
+
+def _liga_ponteiros(stack, boxes, por_endereco):
+    """Troca `{"prim":"ptr","text":"0x…"}` por `{"ref": id}` quando o endereço é
+    de uma caixa que JÁ está no desenho.
+
+    Isto NÃO desreferencia coisa alguma — a regra de nunca ler através de um
+    ponteiro cru continua valendo palavra por palavra. É só uma consulta: o
+    endereço já foi lido, e a caixa já foi montada a partir de uma variável
+    alcançável; ligar as duas é reconhecer uma identidade que estava ali.
+
+    Sem isto, um `prox: ^Node` aparecia como `0x7fffffffe9b8` — o aluno via um
+    número onde o Python Tutor desenha uma seta, que é a metade do diagrama que
+    ensina estrutura ligada. Um ponteiro para algo que não está no desenho
+    (memória de `new` que ninguém mais alcança) continua sendo o endereço."""
+
+    def troca(val):
+        if not isinstance(val, dict) or val.get("prim") != "ptr":
+            return val
+        try:
+            addr = int(val.get("text", ""), 16)
+        except Exception:
+            return val
+        rid = por_endereco.get(addr)
+        return {"ref": rid} if rid is not None else val
+
+    for frame in stack:
+        vars_ = frame.get("vars") or {}
+        for nome, val in list(vars_.items()):
+            vars_[nome] = troca(val)
+    for box in (boxes or {}).values():
+        if not isinstance(box, dict):
+            continue
+        campos = box.get("fields")
+        if isinstance(campos, dict):
+            for nome, val in list(campos.items()):
+                campos[nome] = troca(val)
+        itens = box.get("items")
+        if isinstance(itens, list):
+            box["items"] = [troca(x) for x in itens]
+        pares = box.get("entries")
+        if isinstance(pares, list):
+            box["entries"] = [
+                [troca(p[0]), troca(p[1])] if isinstance(p, list) and len(p) == 2 else p
+                for p in pares
+            ]
 
 
 def _prim(t, text):
@@ -228,6 +297,8 @@ def _odin_sequence(v, t, heap, depth, kind_name):
         return _opaque("comprimento inválido")
     key = _chave("seq", v, v["data"], t)
     rid = heap.id_for(key)
+    if rid is not None:
+        heap.marca_endereco(v, rid)
     if rid is None:
         heap.truncated = True
         return _opaque("limite de objetos")
@@ -286,9 +357,11 @@ def value_v2(v, heap, depth=0):
             # Address only. Dereferencing a dangling/scribbled pointer is exactly
             # how a hostile program would crash the tracer.
             try:
-                return _prim("ptr", "0x%x" % int(v))
+                n = int(v)
             except Exception:
                 return _opaque("ponteiro inválido")
+            # `nil` é o que o aluno escreveu; `0x0` é o que a máquina guardou.
+            return _prim("ptr", "nil" if n == 0 else "0x%x" % n)
 
         if depth >= MAX_DEPTH:
             return _opaque("profundidade")
@@ -308,13 +381,14 @@ def value_v2(v, heap, depth=0):
                 return _odin_map(v, t, heap)
 
         if code == gdb.TYPE_CODE_STRUCT:
-            key = ("s", str(v.address), str(t))
+            key = ("s", _addr_int(v), str(t))
             rid = heap.id_for(key)
             if rid is None:
                 heap.truncated = True
                 return _opaque("limite de objetos")
+            heap.marca_endereco(v, rid)
             if rid not in heap.boxes:
-                box = {"kind": "object", "cls": _clip(str(t).replace("struct ", "")), "fields": {}, "truncated": False}
+                box = {"kind": "object", "cls": _clip(_nome_curto(str(t).replace("struct ", ""))), "fields": {}, "truncated": False}
                 heap.boxes[rid] = box  # inserted BEFORE recursing: cycles terminate
                 fields = {}
                 for i, f in enumerate(t.fields()):
@@ -331,11 +405,12 @@ def value_v2(v, heap, depth=0):
             return {"ref": rid}
 
         if code == gdb.TYPE_CODE_ARRAY:
-            key = ("a", str(v.address), str(t))
+            key = ("a", _addr_int(v), str(t))
             rid = heap.id_for(key)
             if rid is None:
                 heap.truncated = True
                 return _opaque("limite de objetos")
+            heap.marca_endereco(v, rid)
             if rid not in heap.boxes:
                 box = {"kind": "list", "items": [], "truncated": False}
                 heap.boxes[rid] = box
@@ -413,8 +488,8 @@ def frame_vars(frame, heap, current_line):
     return out
 
 
-def _nome_proc(bruto):
-    """`main::soma` → `soma`. O aluno escreveu `soma`, e o prefixo do pacote só
+def _nome_curto(bruto):
+    """`main::soma` → `soma`, `main::Node` → `Node`. O aluno escreveu `soma`, e o prefixo do pacote só
     ocupa espaço numa caixa estreita — o Python Tutor mostra o nome da função,
     não o caminho até ela. Só o último segmento; nomes sem `::` passam intactos."""
     nome = bruto or "?"
@@ -444,7 +519,7 @@ def snapshot(step_no, registro):
             if not _in_student_file(sal):
                 continue
             stack.append({
-                "func": _nome_proc(fr.name()),
+                "func": _nome_curto(fr.name()),
                 "file": os.path.basename(sal.symtab.filename),
                 "line": sal.line,
                 "vars": frame_vars(fr, heap, sal.line),
@@ -455,9 +530,14 @@ def snapshot(step_no, registro):
     try:
         cur = gdb.selected_frame().find_sal()
         line = cur.line
-        func = _nome_proc(gdb.selected_frame().name())
+        func = _nome_curto(gdb.selected_frame().name())
     except Exception:
         return None
+
+    # Agora que TODAS as caixas do passo existem, um ponteiro pode ser ligado à
+    # caixa que ele endereça. Tem de ser aqui, no fim: quando `a.prox` é lido, a
+    # caixa de `b` pode ainda não ter sido montada.
+    _liga_ponteiros(stack, heap.boxes, heap.por_endereco)
 
     # O registro guarda só o que estava vivo NESTE passo: é essa poda que impede
     # um endereço reaproveitado de herdar a caixa de um objeto morto.

@@ -150,7 +150,7 @@ func TestOdinTraceDriver_ContainersShowValues(t *testing.T) {
 	}
 	// Recognised BEFORE the generic struct expansion, or the {data,len} shape wins.
 	iName := strings.Index(traceDriverGDB, `tname in ("string", "cstring")`)
-	iStruct := strings.Index(traceDriverGDB, `key = ("s", str(v.address)`)
+	iStruct := strings.Index(traceDriverGDB, `key = ("s", _addr_int(v)`)
 	if iName < 0 || iStruct < 0 || iName > iStruct {
 		t.Fatal("container recognition must come BEFORE the generic struct path")
 	}
@@ -267,5 +267,37 @@ func TestOdinTraceDriver_CrashSaysWhatBroke(t *testing.T) {
 	// E sem a frase (um SIGSEGV cru) ainda há de sobrar o nome do sinal.
 	if !strings.Contains(traceDriverGDB, `else _fim["sinal"]`) {
 		t.Fatal("a crash with no parseable sentence must still fall back to the signal")
+	}
+}
+
+// TestOdinTraceDriver_PointersBecomeArrows: um `prox: ^Node` saía como
+// `0x7fffffffe9b8` — o aluno via um número onde o Python Tutor desenha uma seta,
+// e uma estrutura ligada não se desenhava. As duas pontas tinham a informação e
+// nunca casavam: a caixa era chaveada por `str(v.address)` (que o gdb imprime
+// como `(main::Node *) 0x7fff…`) e o ponteiro saía como `0x%x`.
+func TestOdinTraceDriver_PointersBecomeArrows(t *testing.T) {
+	if !strings.Contains(traceDriverGDB, "def _addr_int") {
+		t.Fatal("both ends must speak the same address format")
+	}
+	if !strings.Contains(traceDriverGDB, "def _liga_ponteiros") ||
+		!strings.Contains(traceDriverGDB, "por_endereco") {
+		t.Fatal("a pointer into a box already on screen must become a ref")
+	}
+	// A ligação é uma CONSULTA, não uma leitura: a regra de nunca desreferenciar
+	// um ponteiro cru continua valendo, e o teste dela segue neste arquivo.
+	i := strings.Index(traceDriverGDB, "def _liga_ponteiros")
+	if i < 0 || !strings.Contains(traceDriverGDB[i:i+1200], "NÃO desreferencia") {
+		t.Fatal("the linking pass must state that it never dereferences")
+	}
+	// Precisa rodar DEPOIS do heap estar completo: quando `a.prox` é lido, a
+	// caixa de `b` pode ainda não existir.
+	iDrain := strings.Index(traceDriverGDB, "_drain_heap(idmap, heap, queue)")
+	iLink := strings.Index(traceDriverGDB, "_liga_ponteiros(stack,")
+	if iDrain >= 0 && iLink >= 0 && iLink < iDrain {
+		t.Fatal("pointer linking must run after every box for the step exists")
+	}
+	// `nil` é o que o aluno escreveu; `0x0` é o que a máquina guardou.
+	if !strings.Contains(traceDriverGDB, `"nil" if n == 0`) {
+		t.Fatal("a null pointer must read as nil, not 0x0")
 	}
 }
