@@ -688,17 +688,27 @@ class _Devolucao(gdb.FinishBreakpoint):
         gdb.FinishBreakpoint.__init__(self, frame, internal=True)
         self.silent = True
         self.valor = None
+        # DISPAROU? É este o sinal de que o quadro saiu — e ele é bem mais
+        # confiável que comparar a profundidade da pilha entre dois passos.
+        # Em `f(n-1) + f(n-2)` as duas chamadas moram na mesma linha: a primeira
+        # retorna e a segunda entra sem que exista um passo intermediário no
+        # nível do chamador, então a profundidade nunca muda e o retorno passa
+        # despercebido — medido em `fibonacci`, todo quadro dizia `devolveu 1`,
+        # que era o valor preso da chamada anterior.
+        self.saiu = False
 
     def stop(self):
         try:
             self.valor = self.return_value
         except Exception:
             self.valor = None
+        self.saiu = True
         return False
 
     def out_of_scope(self):
         # O quadro morreu sem passar pelo retorno (sinal, longjmp): sem valor.
         self.valor = None
+        self.saiu = True
 
 
 def _arma_devolucao():
@@ -862,25 +872,50 @@ def collect():
                 # anterior acabou de devolver — e é NAQUELE passo que o evento
                 # `return` mora, com o quadro ainda em pé, igual ao Python.
                 pilha = [f["func"] for f in snap["stack"]]
-                if pilha_ant is None or len(pilha) > len(pilha_ant):
+                nivel = len(pilha)
+                nivel_ant = len(pilha_ant) if pilha_ant is not None else 0
+
+                # RETORNO. O sinal não é a pilha ter encolhido — é o breakpoint de
+                # saída ter DISPARADO. A diferença aparece em `f(n-1) + f(n-2)`,
+                # onde a primeira chamada sai e a segunda entra sem nenhum passo no
+                # nível do chamador: a profundidade fica igual e o retorno seria
+                # invisível. O passo ANTERIOR é o último dentro da proc que saiu, e
+                # é nele que o evento mora — com o quadro ainda em pé, como no
+                # Python. Numa cascata só o mais interno tem passo onde aparecer;
+                # os de fora saem sem valor, que é honesto.
+                saidos = [d for d in devolucoes if d[1] is not None and d[1].saiu]
+                if saidos and steps:
+                    steps[-1]["event"] = "return"
+                    # O VALOR só entra quando dá para provar de quem ele é.
+                    #
+                    # Em recursão eu não consigo: `f(n-1) + f(n-2)` põe duas
+                    # chamadas na mesma linha e o gdb entra e sai delas sem um
+                    # passo no nível do chamador, então nem a profundidade da
+                    # pilha nem a ordem de disparo identificam o quadro. Tentei as
+                    # duas e as duas produziram valores PLAUSÍVEIS E ERRADOS —
+                    # medido em `fibonacci(6)`: um quadro com `n = 0` dizendo
+                    # `devolveu 8`, que é a resposta da chamada de cima.
+                    #
+                    # Um valor errado é pior que valor nenhum: ensina que
+                    # `fib(0)` devolve 8. Então a linha `devolveu` aparece só
+                    # quando exatamente UM quadro saiu e a proc dele NÃO está
+                    # repetida na pilha. Fora disso o passo continua marcado como
+                    # `retornou` — o aluno vê a saída da função, só não vê o
+                    # valor. Vale para os casos que o tutor mais usa (`dobro(21)`
+                    # → `devolveu 42`) e cala exatamente onde eu não sei.
+                    anterior = pilha_ant or []
+                    repetida = anterior and anterior.count(anterior[-1]) > 1
+                    if len(saidos) == 1 and not repetida:
+                        _anota_devolvido(steps[-1], saidos[0][1], registro)
+                if saidos:
+                    devolucoes = [d for d in devolucoes if not (d[1] is not None and d[1].saiu)]
+
+                if pilha_ant is None or nivel > nivel_ant:
                     snap["event"] = "call"
-                    devolucoes.append(_arma_devolucao())
-                elif len(pilha) < len(pilha_ant):
-                    quantas = len(pilha_ant) - len(pilha)
-                    if steps:
-                        steps[-1]["event"] = "return"
-                        # A proc mais interna é a última armada; as intermediárias
-                        # (retorno em cascata num passo só) saem sem valor, que é
-                        # honesto: não houve passo onde mostrá-las.
-                        bp = None
-                        for _ in range(quantas):
-                            if devolucoes:
-                                bp = devolucoes.pop()
-                        _anota_devolvido(steps[-1], bp, registro)
-                    else:
-                        for _ in range(quantas):
-                            if devolucoes:
-                                devolucoes.pop()
+                    devolucoes.append((nivel, _arma_devolucao()))
+                # Uma proc cujo breakpoint nunca dispara (gdb sem suporte, quadro
+                # mais externo) não pode ficar presa segurando o nível de outra.
+                devolucoes = [d for d in devolucoes if d[0] <= nivel]
                 pilha_ant = pilha
 
                 steps.append(snap)
@@ -926,7 +961,7 @@ def collect():
     # programa acabou — e num que quebrou, o último passo é a quebra.
     elif terminou and steps and not truncated_steps:
         steps[-1]["event"] = "return"
-        _anota_devolvido(steps[-1], devolucoes.pop() if devolucoes else None, registro)
+        _anota_devolvido(steps[-1], devolucoes[-1][1] if devolucoes else None, registro)
 
     # Let the program RUN TO COMPLETION even when the step budget ran out: it is
     # still the student's program, its remaining output is theirs, and a process

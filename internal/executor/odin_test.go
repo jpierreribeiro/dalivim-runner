@@ -208,6 +208,14 @@ func TestOdinTraceDriver_CapturesReturnValue(t *testing.T) {
 	if !strings.Contains(traceDriverGDB, `passo["retval"]`) {
 		t.Fatal("the captured value must be attached to the return step as retval")
 	}
+	// E SÓ quando dá para provar de quem o valor é. Em recursão não dá: duas
+	// chamadas na mesma linha (`f(n-1) + f(n-2)`) não deixam passo no nível do
+	// chamador, e nem a profundidade nem a ordem de disparo identificam o quadro.
+	// Medido em fibonacci(6): um quadro com n=0 dizendo `devolveu 8`. Um valor
+	// errado é pior que valor nenhum — ele ensina que fib(0) devolve 8.
+	if !strings.Contains(traceDriverGDB, "len(saidos) == 1 and not repetida") {
+		t.Fatal("retval must be omitted when the returning frame is ambiguous (recursion)")
+	}
 }
 
 // TestOdinTraceDriver_StableObjectIds: o mapa de ids era refeito a cada passo, e
