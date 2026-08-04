@@ -286,9 +286,16 @@ def _value_ref(v, idmap, heap, queue):
         return _prim_value(v)
     real = id(v)
     rid = _remap_id(idmap, real, type_name(v))
-    if rid not in heap and len(heap) < MAX_HEAP_OBJECTS:
-        heap[rid] = None            # reserve the slot before expanding (cycle-safe)
-        queue.append((rid, v))
+    if rid not in heap:
+        if len(heap) < MAX_HEAP_OBJECTS:
+            heap[rid] = None        # reserve the slot before expanding (cycle-safe)
+            queue.append((rid, v))
+        else:
+            # O teto cortou esta caixa. A referência SOBREVIVE e não alcança nada
+            # — para o aluno isso é uma variável cujo valor não aparece. Sem
+            # registrar, o desenho fica incompleto sem ninguém poder dizer isso;
+            # é a mesma flag que o driver do Odin passou a emitir.
+            _state["heap_limit_hit"] = True
     return {"ref": rid}
 
 def _expand_function(f, idmap, heap, queue):
@@ -519,11 +526,39 @@ def _build_stack(frame, idmap=None, heap=None, queue=None):
 
 # ---- the tracer -------------------------------------------------------------
 
+def _envelope_pior_caso():
+    """O documento SEM passo nenhum, no pior caso (com registro de quebra cheio).
+
+    O orçamento de bytes contava só os passos, então ele fechava exatamente em
+    MAX_REPORT_BYTES e o documento FINAL — com envelope — passava disso. Aí o teto
+    externo do runner corta o arquivo no meio de um JSON, e o cliente recebe um
+    documento que não dá para ler: o trace INTEIRO perdido, em vez de truncado.
+    É a mesma forma de erro do resto deste trabalho — o limite, ao ser atingido,
+    destruía a entrega em vez de degradá-la.
+
+    Cobrar o pior caso custa alguns passos num trace enorme; não cobrar custa o
+    trace todo."""
+    return {
+        "version": 1, "language": "python", "heap_encoding": "delta",
+        "steps": [], "step_count": 0,
+        "truncated": {"steps": True, "bytes": True, "heap": True},
+        "limits": {"max_steps": MAX_STEPS, "max_report_bytes": MAX_REPORT_BYTES,
+                   "max_heap_objects": MAX_HEAP_OBJECTS},
+        "crash": {"type": "x" * 64, "message": "x" * (MAX_STR + 8),
+                  "file": "x" * 128, "line": 999999999, "func": "x" * 128},
+    }
+
+
+_ENVELOPE_BYTES = len(json.dumps(_envelope_pior_caso(), ensure_ascii=False).encode("utf-8"))
+
 _state = {
     "steps": [],
-    "bytes": 0,
+    # Começa cobrado do envelope: ver _envelope_pior_caso.
+    "bytes": _ENVELOPE_BYTES,
     "step_limit_hit": False,
     "bytes_limit_hit": False,
+    # Algum passo teve uma caixa cortada pelo teto de objetos (ver _value_ref).
+    "heap_limit_hit": False,
     "stopped": False,
     # id() real → (id denso, nome do tipo), vivo pelo TRACE inteiro. Podado a cada
     # passo para o conjunto alcançável, que é o que limita o reuso de endereço.
@@ -597,7 +632,17 @@ def _record(frame, event, arg):
                 step["heap_delta"] = delta
 
         # Approximate the report growth and stop before blowing the byte budget.
-        approx = len(json.dumps(step, ensure_ascii=False))
+        # BYTES, não caracteres. O teto do runner conta bytes do arquivo; com
+        # ensure_ascii=False um `…` (o próprio marcador de corte do harness) vale
+        # 1 caractere e 3 bytes, e qualquer string com acento faz o mesmo. Medido:
+        # um documento de 199 576 caracteres ocupava 200 100 bytes — 100 acima de
+        # um teto de 200 000 —, e aí o teto externo corta o arquivo no meio de um
+        # JSON. Contar caracteres num teto de bytes é o bug, e ele fica pior
+        # exatamente onde este produto vive: texto em português.
+        #
+        # `+ 1` pela vírgula que este passo acrescenta ao array steps[].
+        # O envelope é cobrado adiantado (ver _state["bytes"]).
+        approx = len(json.dumps(step, ensure_ascii=False).encode("utf-8")) + 1
         if _state["bytes"] + approx > MAX_REPORT_BYTES:
             _state["bytes_limit_hit"] = True
             _stop_tracing()
@@ -695,6 +740,10 @@ def _emit(crash):
         "truncated": {
             "steps": _state["step_limit_hit"],
             "bytes": _state["bytes_limit_hit"],
+            # O teto de CAIXAS. Diferente dos outros dois, ele não corta o trace:
+            # ele corta o DESENHO, e a referência órfã que sobra é o que o aluno
+            # vê como uma variável sem valor.
+            "heap": _state["heap_limit_hit"],
         },
         "limits": {
             "max_steps": MAX_STEPS,
@@ -706,6 +755,24 @@ def _emit(crash):
         report["crash"] = crash
     try:
         data = json.dumps(report, ensure_ascii=False)
+        # GARANTIA, não estimativa. O orçamento por passo é um freio BARATO — ele
+        # evita construir um documento gigante — mas prever o overhead exato do
+        # JSON (separadores do array, o envelope, o registro de quebra) erra por
+        # alguns bytes, e medido erra por ~100 num trace de 326 passos.
+        #
+        # Alguns bytes bastam para o documento passar do teto EXTERNO do runner, e
+        # aí o arquivo é cortado no meio de um JSON: o cliente recebe algo que não
+        # dá para ler, o que é o trace INTEIRO perdido em vez de truncado. Aqui o
+        # documento é medido de verdade e encolhe até caber.
+        #
+        # Corta pelo FIM: o começo é onde o aluno está olhando. Em proporção, para
+        # convergir em poucas iterações em vez de uma por passo.
+        while len(data.encode("utf-8")) > MAX_REPORT_BYTES and report["steps"]:
+            sobra = max(1, len(report["steps"]) // 20)
+            report["steps"] = report["steps"][:-sobra]
+            report["step_count"] = len(report["steps"])
+            report["truncated"]["bytes"] = True
+            data = json.dumps(report, ensure_ascii=False)
     except Exception:
         data = json.dumps({"version": 1, "language": "python", "steps": [],
                            "step_count": 0, "error": "trace serialization failed"})

@@ -182,8 +182,15 @@ func TestPythonTrace_StepLimit(t *testing.T) {
 // independent of the harness's own internal budget.
 func TestPythonTrace_ReportByteCapTruncates(t *testing.T) {
 	requirePython(t)
-	// A tiny outer cap forces the runner-side truncation on a normal program.
-	res := newPythonTrace(t, 512, 2500).Run(context.Background(), traceReq(
+	// A cap BELOW the floor of any document. The harness now charges its own
+	// envelope against the budget, so at any cap it can meet it writes a valid,
+	// under-cap document (see TestPythonTrace_ReportAlwaysFitsAndParses) — which
+	// is the point. To still prove the OUTER cap is authoritative and independent
+	// of the harness, the cap has to be smaller than the smallest document the
+	// harness can produce (measured: 234 bytes with zero steps). This is the
+	// defence that matters against a HOSTILE writer: /sandbox is writable in trace
+	// mode, so the student's own program can put anything in trace.json.
+	res := newPythonTrace(t, 150, 2500).Run(context.Background(), traceReq(
 		"vals = list(range(200))\nfor v in vals:\n    pass\nprint('done')\n"))
 	if res.TraceReport == "" {
 		t.Fatalf("expected a (truncated) trace report")
@@ -193,6 +200,42 @@ func TestPythonTrace_ReportByteCapTruncates(t *testing.T) {
 	}
 	if !res.TraceReportTruncated {
 		t.Fatalf("expected TraceReportTruncated=true at the outer byte cap")
+	}
+}
+
+// TestPythonTrace_ReportAlwaysFitsAndParses: o documento que o harness entrega
+// tem de CABER no teto e ser JSON VÁLIDO, em qualquer teto.
+//
+// O orçamento contava só os passos, então ele fechava exatamente em
+// MAX_REPORT_BYTES e o documento final — com o envelope (version, limits,
+// truncated, o registro de quebra) — passava disso. Aí o teto externo do runner
+// cortava o arquivo no meio de um JSON, e o cliente recebia algo que não dá para
+// ler: o trace INTEIRO perdido em vez de truncado, e o frontend só podendo
+// degradar para "nenhum passo a passo".
+//
+// É a mesma forma de erro do resto deste trabalho — o limite, ao ser atingido,
+// destruía a entrega em vez de degradá-la.
+func TestPythonTrace_ReportAlwaysFitsAndParses(t *testing.T) {
+	requirePython(t)
+	// Um programa que gera muito mais trace do que qualquer um destes tetos.
+	const src = "acc = []\nfor i in range(400):\n    acc.append([i, i * 2])\nprint(len(acc))\n"
+	for _, cap := range []int{2_000, 20_000, 200_000} {
+		res := newPythonTrace(t, cap, 2500).Run(context.Background(), traceReq(src))
+		if res.TraceReport == "" {
+			t.Fatalf("cap=%d: expected a trace report", cap)
+		}
+		if len(res.TraceReport) > cap {
+			t.Fatalf("cap=%d: harness wrote %d bytes, over its own budget", cap, len(res.TraceReport))
+		}
+		// O que importa para quem consome: ele PARSEIA. Um documento cortado no
+		// meio é indistinguível de nenhum documento.
+		var doc map[string]any
+		if err := json.Unmarshal([]byte(res.TraceReport), &doc); err != nil {
+			t.Fatalf("cap=%d: trace report is not valid JSON (%v): %s", cap, err, tail(res.TraceReport, 120))
+		}
+		if res.TraceReportTruncated {
+			t.Fatalf("cap=%d: the harness stopped in time, so the OUTER cap must not have fired", cap)
+		}
 	}
 }
 

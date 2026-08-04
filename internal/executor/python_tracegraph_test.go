@@ -258,6 +258,49 @@ func TestPythonTraceGraph_BuiltinSubclassIsNotStudentCode(t *testing.T) {
 	}
 }
 
+// TestPythonTraceGraph_HeapCapIsReported: bater no teto de caixas não corta o
+// TRACE, corta o DESENHO — a referência que sobra não alcança nada, e o aluno lê
+// isso como uma variável sem valor. Era o único teto sem forma de chegar até ele:
+// as caixas eram descartadas em silêncio.
+func TestPythonTraceGraph_HeapCapIsReported(t *testing.T) {
+	requirePython(t)
+	// 50 variáveis × 30 listas cada: bem acima de MAX_HEAP_OBJECTS=200. (Um
+	// `[[i] for i in range(1000)]` NÃO serve: o teto de itens por contêiner corta
+	// em 30, e a caixa 201 nunca é pedida.)
+	res, _ := runTraceMode(t, newPythonTrace(t, 2_000_000, 2500), traceReq(
+		"for _i in range(50):\n    globals()['v%d' % _i] = [[j] for j in range(30)]\nx = 1\n"))
+	if res.Status != runnerapi.StatusSuccess {
+		t.Fatalf("expected success, got %s (stderr=%s)", res.Status, tail(res.Stderr, 200))
+	}
+	var doc struct {
+		Truncated struct {
+			Heap bool `json:"heap"`
+		} `json:"truncated"`
+	}
+	if err := json.Unmarshal([]byte(res.TraceReport), &doc); err != nil {
+		t.Fatalf("trace_report is not valid JSON: %v", err)
+	}
+	if !doc.Truncated.Heap {
+		t.Fatal("hitting the per-step box cap must be reported in truncated.heap")
+	}
+	// E o teto continua valendo sobre o heap RECONSTRUÍDO.
+	for i, h := range heapsOf(decodeGraph(t, res)) {
+		if len(h) > 200 {
+			t.Fatalf("step %d: %d boxes, cap is 200", i, len(h))
+		}
+	}
+}
+
+// E o inverso: um programa pequeno não pode acusar truncagem que não houve.
+func TestPythonTraceGraph_HeapCapNotReportedWhenItFits(t *testing.T) {
+	requirePython(t)
+	res, _ := runTraceMode(t, newPythonTrace(t, 2_000_000, 2500), traceReq(
+		"a = [1, 2]\nb = a\nprint(len(a))\n"))
+	if strings.Contains(res.TraceReport, `"heap":true`) {
+		t.Fatalf("a trace that fits must not claim the box cap was hit: %s", tail(res.TraceReport, 200))
+	}
+}
+
 // TestTraceHarness_BuiltinSlotDispatch pins the RULE, not just one program: no
 // branch may reach a value's own method. A future branch added with `v.items()`
 // or `for x in v` would reopen the hole above without failing the test on the

@@ -102,6 +102,18 @@ jobs:
       #   --security-opt apparmor=unconfined  docker-default apparmor denies the
       #                                        mount ops nsjail performs to build
       #                                        the read-only rootfs + tmpfs /tmp
+      #   --security-opt systempaths=unconfined  docker MASKS parts of /proc by
+      #                                        default; mode=trace on a COMPILED
+      #                                        language steps the program under
+      #                                        gdb, and gdb cannot resolve a PIE
+      #                                        load base without an unmasked
+      #                                        /proc. This is the OUTER
+      #                                        container's /proc — the per-run
+      #                                        jail still gets a procfs of its
+      #                                        OWN fresh PID namespace (4 pids,
+      #                                        read-only), and only for
+      #                                        mode=trace. See
+      #                                        docs/future/B2-TRACER-SPIKE.md §2.3
       #   (host sysctl above)                 lifts Ubuntu 24.04's userns mount
       #                                        restriction
       # None of these add capabilities, and the container still runs as the
@@ -116,6 +128,7 @@ jobs:
             --cpus=1 --memory=512m \
             --security-opt seccomp=unconfined \
             --security-opt apparmor=unconfined \
+            --security-opt systempaths=unconfined \
             -e RUNNER_ENV=development \
             -e RUNNER_SANDBOX=require \
             -e GOMAXPROCS=1 \
@@ -888,6 +901,23 @@ jobs:
           echo "=== runner ==="; docker logs runner 2>&1 || true
           echo "=== runner-bp ==="; docker logs runner-bp 2>&1 || true
           echo "=== runner-seccomp ==="; docker logs runner-seccomp 2>&1 || true
+
+      # ---- G16 mode=trace: o PASSO A PASSO, dentro da imagem ----
+      # Isto não existia. Todas as garantias do passo a passo eram testes de
+      # unidade: o harness Python rodando CPython, e o driver do Odin rodando
+      # contra um `gdb` FALSO. Nenhum dos dois toca o jail, o leitor do relatório,
+      # a classificação de status — e, no caso do Odin, nada tocava DWARF, prólogo,
+      # convenção de chamada ou ASLR, que é onde as decisões do driver foram
+      # tomadas. Os dois scripts abaixo exercitam o /run de verdade.
+      #
+      # O do Odin é o único teste automatizado que roda gdb sobre um binário nativo,
+      # e é ele que valida a atribuição do valor devolvido em RECURSÃO — a pergunta
+      # "o `devolveu` mente?", que é a que pegou o bug do fibonacci.
+      - name: G16 trace — Python (alias, delta, saída acumulada, valor hostil)
+        run: python3 ./scripts/smoke-trace-python.py
+
+      - name: G16 trace — Odin sob gdb (B.1 + B.2)
+        run: python3 ./scripts/smoke-odin.py
 
       - name: Teardown
         if: always()
