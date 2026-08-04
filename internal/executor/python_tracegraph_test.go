@@ -201,6 +201,85 @@ func TestPythonTraceGraph_HostileObjectNeverInvokesRepr(t *testing.T) {
 	}
 }
 
+// TestPythonTraceGraph_BuiltinSubclassIsNotStudentCode is the sibling of the
+// hostile-__repr__ test, for the case that test does NOT reach: a subclass of a
+// BUILT-IN. Every branch of safe_repr/_expand_object dispatches on `isinstance`,
+// so `class Loud(int)` took the "safe" scalar path and the harness called the
+// student's own `__str__` — the exact thing the file's header rules out.
+//
+// Measured before the fix, with this program: `LOG` held SIX entries by the time
+// `n = len(LOG)` ran (the student's methods ran six times without the student
+// calling them once), `a` was DRAWN AS 42 while holding 5, and a `__str__`
+// returning 200 MB was materialised in full before _clip could cut it — an OOM
+// under the cgroup for a program that runs fine in run mode.
+//
+// The fix is to render through the BUILT-IN's unbound slot (int.__repr__,
+// list.__iter__, dict.items), which a subclass cannot override — safe AND still
+// truthful, so the value keeps showing.
+func TestPythonTraceGraph_BuiltinSubclassIsNotStudentCode(t *testing.T) {
+	requirePython(t)
+	res, _ := runTraceMode(t, newPythonTrace(t, 2_000_000, 2500), traceReq(
+		"LOG = []\n"+
+			"class Loud(int):\n"+
+			"    def __str__(self):\n        LOG.append('PWNED_MARKER'); return '42'\n"+
+			"    def __repr__(self):\n        LOG.append('PWNED_MARKER'); return '42'\n"+
+			"class LoudList(list):\n"+
+			"    def __iter__(self):\n        LOG.append('PWNED_MARKER'); return super().__iter__()\n"+
+			"class LoudDict(dict):\n"+
+			"    def items(self):\n        LOG.append('PWNED_MARKER'); return super().items()\n"+
+			"a = Loud(5)\nb = LoudList([1, 2])\nd = LoudDict(x=1)\nn = len(LOG)\nz = 1\n"))
+	if res.Status != runnerapi.StatusSuccess {
+		t.Fatalf("expected success, got %s (stderr=%s)", res.Status, tail(res.Stderr, 200))
+	}
+	if strings.Contains(res.TraceReport, "PWNED_MARKER") {
+		t.Fatalf("a subclass's __str__/__iter__/items was invoked: %s", tail(res.TraceReport, 300))
+	}
+	g := decodeGraph(t, res)
+	vars, heap, ok := lastStepWithVars(g, "a", "b", "d", "n")
+	if !ok {
+		t.Fatal("no step bound a, b, d and n together")
+	}
+	// The student's own count is the authoritative witness: the program appends to
+	// LOG on every override call, so `n` is how many times the harness ran code it
+	// promised never to run.
+	if vars["n"].Text != "0" {
+		t.Fatalf("the harness invoked student code %s time(s) while recording", vars["n"].Text)
+	}
+	// And the value must still be the TRUE one. Rendering `<Loud>` would also be
+	// safe, but it would hide the number — going through int.__repr__ keeps both.
+	if vars["a"].Text != "5" {
+		t.Fatalf("Loud(5) must render as its real value 5, got %+v", vars["a"])
+	}
+	if box := heap[vars["b"].Ref]; box.Kind != "list" || len(box.Items) != 2 {
+		t.Fatalf("a list subclass must still show its real cells, got %+v", box)
+	}
+	if box := heap[vars["d"].Ref]; box.Kind != "dict" || len(box.Entries) != 1 {
+		t.Fatalf("a dict subclass must still show its real pairs, got %+v", box)
+	}
+}
+
+// TestTraceHarness_BuiltinSlotDispatch pins the RULE, not just one program: no
+// branch may reach a value's own method. A future branch added with `v.items()`
+// or `for x in v` would reopen the hole above without failing the test on the
+// programs we happened to think of.
+func TestTraceHarness_BuiltinSlotDispatch(t *testing.T) {
+	for _, want := range []string{
+		"int.__repr__(v)", "float.__repr__(v)", "str.__getitem__(v",
+		"def _itens_base", "def _pares_base", "return dict.items(v)", "base.__iter__(v)",
+	} {
+		if !strings.Contains(traceHarnessPython, want) {
+			t.Fatalf("a built-in's value must be read through its own slot (%s missing)", want)
+		}
+	}
+	// The two expansion sites must go through the helpers, never through the
+	// instance. `enumerate(v)` on a list subclass IS a call into student code.
+	for _, proibido := range []string{"enumerate(v)", "enumerate(v.items())"} {
+		if strings.Contains(traceHarnessPython, proibido) {
+			t.Fatalf("%q dispatches on the instance and reaches an overridden method", proibido)
+		}
+	}
+}
+
 // TestPythonTraceGraph_HeapObjectCapBounded: a program that builds far more than
 // MAX_HEAP_OBJECTS distinct objects must have its per-step heap bounded, so a
 // pathological graph cannot blow the report up.
