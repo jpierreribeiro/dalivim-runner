@@ -56,6 +56,13 @@ func NewLua(sb sandbox.Sandbox, outputLimit, maxProcesses, maxFileSizeMB, maxRep
 	return newInterpreted(luaSpec, sb, outputLimit, maxProcesses, maxFileSizeMB, maxReportBytes)
 }
 
+// NewPHP builds the PHP (CLI SAPI) runtime. Corte 162: mesma jaula dos outros
+// interpretados, e a única coisa nova é o phpSpec — que é exatamente o que a
+// "camada 1" promete, uma linguagem por corte sem arquitetura nova.
+func NewPHP(sb sandbox.Sandbox, outputLimit, maxProcesses, maxFileSizeMB, maxReportBytes int) *interpretedRuntime {
+	return newInterpreted(phpSpec, sb, outputLimit, maxProcesses, maxFileSizeMB, maxReportBytes)
+}
+
 // NewSQL builds the SQL (in-memory SQLite) runtime (G10). It reuses the identical
 // interpreted jail — SQLite is Shape A, an interpreter reading a source file — and
 // differs only in sqliteSpec (the fixed sqlite3 argv, the pinned JSON result

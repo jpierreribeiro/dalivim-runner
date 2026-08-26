@@ -81,6 +81,7 @@ func main() {
 			WithTraceLimits(cfg.MaxTraceReportBytes, cfg.MaxTraceSteps),
 		executor.NewNode(sb, cfg.MaxOutputBytes, cfg.MaxProcesses, cfg.MaxFileSizeMB, cfg.MaxTestReportBytes),
 		executor.NewLua(sb, cfg.MaxOutputBytes, cfg.MaxProcesses, cfg.MaxFileSizeMB, cfg.MaxTestReportBytes),
+		executor.NewPHP(sb, cfg.MaxOutputBytes, cfg.MaxProcesses, cfg.MaxFileSizeMB, cfg.MaxTestReportBytes),
 		executor.NewSQL(sb, cfg.MaxOutputBytes, cfg.MaxProcesses, cfg.MaxFileSizeMB, cfg.MaxTestReportBytes),
 		executor.NewC(sb, compiledConfig(cfg)),
 		executor.NewCpp(sb, compiledConfig(cfg)),
