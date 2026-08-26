@@ -129,6 +129,16 @@ var filePolicies = map[string]FilePolicy{
 		AllowedExts:  exts(".lua"),
 		DefaultEntry: "main.lua",
 	},
+	"php": {
+		Language:    "php",
+		AllowedExts: exts(".php"),
+		// composer.json e composer.lock são recusados pelo mesmo motivo que
+		// package.json: instalar dependência é proibido por desenho — a netns é
+		// vazia — e aceitar o arquivo daria a impressão de que não é.
+		ForbiddenNames:      names("composer.json", "composer.lock"),
+		ForbiddenComponents: names("vendor"),
+		DefaultEntry:        "main.php",
+	},
 	"c": {
 		Language:     "c",
 		AllowedExts:  exts(".c", ".h"),

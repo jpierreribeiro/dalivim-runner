@@ -193,6 +193,96 @@ var luaSpec = languageSpec{
 	multiFileRunArgs: luaRunArgs,
 }
 
+// phpSpec runs a single PHP file (CLI SAPI). Corte 162 — camada 1: uma
+// linguagem simples por corte, SEM arquitetura nova. Ele herda o mesmo jail dos
+// outros interpretados; só mudam o argv, o nome do arquivo e o parse da versão.
+//
+// Cada flag aqui existe por um motivo, e três delas são de isolamento:
+//
+//	-n            NÃO lê php.ini nenhum. Sem isto, o comportamento do runner
+//	              passaria a depender da configuração da imagem — e uma imagem
+//	              reconstruída com outro pacote mudaria o resultado de uma
+//	              submissão sem que ninguém tivesse tocado no código.
+//	-d ...        as diretivas que substituem o ini que acabamos de recusar.
+//	-f main.php   o arquivo, depois de `-f`, para um nome nunca ser lido como
+//	              opção do próprio PHP.
+//
+// As diretivas:
+//
+//	display_errors=stderr   erro vai para stderr, não para o stdout que o
+//	                        exercício compara. Misturar os dois faria um aviso
+//	                        do PHP reprovar uma solução correta.
+//	error_reporting=-1      tudo é reportado: um E_NOTICE silencioso é
+//	                        exatamente o que faz um candidato não entender por
+//	                        que a saída dele difere.
+//	memory_limit=-1         o limite de memória é do JAIL (RLIMIT_AS/cgroup),
+//	                        não do PHP. Dois limites concorrentes dariam duas
+//	                        mensagens de erro diferentes para a mesma causa, e a
+//	                        classificação de OOM deixaria de ser determinística.
+//	opcache.enable=0        JIT/opcache fora: compilação em cache torna o tempo
+//	                        da primeira execução diferente do da segunda, e o
+//	                        teto de tempo passa a depender de o processo ser ou
+//	                        não o primeiro.
+//	date.timezone=UTC       mesma trava de determinismo que o locale.
+//	disable_functions=...   as portas de escape que não dependem de rede: o jail
+//	                        já bloqueia processo e rede, e isto é a segunda
+//	                        camada — barata, e a que sobra se a primeira for mal
+//	                        configurada numa máquina de desenvolvimento.
+var phpSpec = languageSpec{
+	name:       "php",
+	sourceFile: "main.php",
+	binNames:   []string{"php8.3", "php8.2", "php"},
+	runArgs: []string{
+		"-n",
+		"-d", "display_errors=stderr",
+		"-d", "error_reporting=-1",
+		"-d", "memory_limit=-1",
+		"-d", "opcache.enable=0",
+		"-d", "date.timezone=UTC",
+		"-d", phpDisabledFunctions,
+		"-f", "main.php",
+	},
+	env:          determinismEnv("PATH=/usr/local/bin:/usr/bin:/bin"),
+	versionArgs:  []string{"-n", "-v"}, // "PHP 8.3.6 (cli) (built: ...)"
+	parseVersion: secondField,          // -> "8.3.6"
+	// O alocador do PHP usa malloc, então um RLIMIT_AS rígido o limita e uma
+	// bomba de string morre de forma determinística. Com memory_limit=-1 o
+	// próprio PHP não intercepta antes, e a mensagem que sobra é a do sistema —
+	// que é a que o classificador de OOM sem cgroup procura.
+	memErrSubstr:    "Allowed memory size",
+	capAddressSpace: true,
+	// Multi-file: o include_path recebe EXATAMENTE a raiz das fontes, para
+	// require/include resolverem irmãos sob src/ e em lugar nenhum controlado
+	// por quem submete.
+	multiFileRunArgs: phpRunArgs,
+}
+
+// phpDisabledFunctions é a segunda camada, e vale enumerar em vez de resumir:
+// quem ler daqui a um ano precisa poder auditar a lista, não confiar nela.
+//
+// Não inclui as funções de rede — o jail já roda numa netns vazia, e listar
+// aqui o que a rede já impede daria a impressão de que ESTA lista é a defesa.
+const phpDisabledFunctions = "disable_functions=" +
+	"exec,passthru,shell_exec,system,proc_open,popen,pcntl_exec," +
+	"dl,putenv,getenv,ini_restore,phpinfo"
+
+// phpRunArgs monta o argv multi-arquivo: mesmas diretivas, mais o include_path
+// apontando para a raiz das fontes. O nome da raiz é fixo aqui, nunca o caminho
+// do chamador.
+func phpRunArgs(entryRel string) []string {
+	return []string{
+		"-n",
+		"-d", "display_errors=stderr",
+		"-d", "error_reporting=-1",
+		"-d", "memory_limit=-1",
+		"-d", "opcache.enable=0",
+		"-d", "date.timezone=UTC",
+		"-d", phpDisabledFunctions,
+		"-d", "include_path=" + srcRootName,
+		"-f", entryRel,
+	}
+}
+
 // sqliteSpec runs a SQL script against a fresh IN-MEMORY SQLite (G10). The engine
 // (sqlite3) is an implementation detail behind the wire id "sql"; mechanically it
 // is Shape A — an interpreter reading a source file — so it reuses the identical
